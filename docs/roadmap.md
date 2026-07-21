@@ -13,7 +13,10 @@ code, so the substrate is agreed before the heavier integration work starts.
 The smallest thing that beats the file transport, driven from a terminal.
 
 - `crewd` broker: post a message, subscribe to a self-filtered inbox stream,
-  read history. In-memory store with an on-disk log to start.
+  read history. In-memory store with an on-disk log to start. Stamp every event
+  with `ts` / `role` / `channel` / `kind` from day one, so observability stays a
+  projection of the stream rather than a later retrofit (see
+  `docs/observability.md`).
 - `crew` CLI: `send`, `watch`, and a manual two-agent flow (the General wires two
   Claude Code sessions to the broker).
 - Proves the transport end to end and lets us dogfood in a terminal immediately.
@@ -52,6 +55,11 @@ crew's second front-end.
 
 - Seraphim depends on the published substrate crate, adds a UI panel plus
   Postgres persistence.
+- Observability views (see `docs/observability.md`): crew communication rendered
+  into task history (reusing the `ci` / `lifecycle` / `screenshot` event
+  pattern), a per-agent activity log, an aggregate activity log, and a live agent
+  count on screen.
+- Runewood consumes the same event stream to visualize the unit live.
 - Railways adopt the broker so lanes can talk to each other.
 
 ## Parallel track: coworker skill transport upgrade

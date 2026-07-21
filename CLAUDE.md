@@ -67,6 +67,12 @@ not a reimplementation of the agent.
 - **Roles trace the tree.** A role owns a directory boundary that already exists
   (`api/`, `frontend/`, `.github/`). Start with a small crew, expand on demand.
   See `docs/roles.md`.
+- **Observability is a first-class output.** The broker + supervisor emit one
+  typed, timestamped, addressed event stream. Task history, per-agent and
+  aggregate activity logs, and the live agent count are all projections of it,
+  never separate capture pipelines. Seraphim renders crew communication into task
+  history the way it renders `ci` / `lifecycle` / `screenshot` events today, and
+  the live count can drive a Runewood visualization. See `docs/observability.md`.
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -120,6 +126,7 @@ CLAUDE.md          README.md          .gitignore
 docs/
   architecture.md    the substrate: broker, supervisor, MCP surface, distribution
   communication.md   topology, channels, message schema, context management
+  observability.md   one event stream: task history, activity logs, live count
   roles.md           the roster and the ownership model
   roadmap.md         phased plan
 crates/            (planned) broker + supervisor + cli + mcp

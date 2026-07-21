@@ -54,6 +54,10 @@ and manages its lifecycle: lazy start on first work, idle-stop to save context
 and money, restart on death. The supervisor is what makes `crew up` bring an
 entire unit online at once instead of the General opening terminals by hand.
 
+It spawns each agent as a `claude -p --output-format stream-json` process and
+parses that stream into per-agent activity events, the same way Seraphim parses
+the agent stream today (see `observability.md`).
+
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.
 
@@ -75,6 +79,15 @@ fallback for a runtime without MCP.
 - `crew send` posts a message as the General, to the commander by default.
 - `crew watch` tails the conversation with routing visible.
 - `crew down` stands the crew down.
+
+### Observability
+
+Every message, lifecycle transition, and per-agent activity item is one typed,
+timestamped, addressed event. The observability views (task history, per-agent
+and aggregate activity logs, the live agent count, and a Runewood visualization)
+are projections of that single stream, not separate capture pipelines. The broker
+owns communication and roster/liveness; the supervisor owns per-agent activity
+parsed from stream-json. See `observability.md`.
 
 ## Stack and conventions
 
