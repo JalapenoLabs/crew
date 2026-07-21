@@ -5,48 +5,49 @@ message schema, and context management.
 
 ## Topology: hub-and-spoke, with escape valves
 
-The default is a **coxswain** (the lead/router) at the hub. The human briefs the
-cox; the cox decomposes the work and fans it out to role-scoped teammates.
+The default is a **commander** (the lead/router) at the hub. The General briefs
+the commander; the commander decomposes the work and fans orders out to
+role-scoped specialists.
 
 Why not a free-for-all broadcast: broadcasting every message to every agent is
-O(N) wakeups per message. Each agent burns a turn deciding "not mine," the human
-drowns in a firehose, and there is nowhere to arbitrate when two agents claim the
-same work. It gets worse with every role added.
+O(N) wakeups per message. Each agent burns a turn deciding "not mine," the
+General drowns in a firehose, and there is nowhere to arbitrate when two agents
+claim the same work. It gets worse with every role added.
 
-The coxswain fixes all three:
+The commander fixes all three:
 
-- The human briefs **one** agent. The vision enters in one place and fans out.
-  That is the "director talking to my team" feeling, done right.
+- The General briefs **one** agent. The intent enters in one place and fans out.
+  That is the "director commanding a unit" feeling, done right.
 - Routing is intentional: direct messages go point-to-point, and only a genuine
-  all-hands wakes everyone.
+  all-units call wakes everyone.
 - Arbitration (work-claiming, interface disputes) resolves at the hub.
 
-A pure star would make the cox a bottleneck and a game of telephone, so two
+A pure star would make the commander a bottleneck and a game of telephone, so two
 escape valves stay open:
 
 - **Peer direct messages** for tight loops. Frontend and backend hammering out an
-  API contract should not route every line through the cox.
-- **`#all-hands`** as a deliberate, rare channel, not the default send.
+  API contract should not route every line through the commander.
+- **`all-units`** as a deliberate, rare channel, not the default send.
 
-The human addresses the cox by default and can drop into any role's channel
-directly when they want.
+The General addresses the commander by default and can drop into any role's
+channel directly when they want.
 
 ## Channels
 
-- `#all-hands` reaches every live role. Reserved for genuine team-wide notices.
+- `all-units` reaches every live role. Reserved for genuine team-wide orders.
 - `@role` is a direct, point-to-point channel to one role, self-filtered so the
   sender never receives their own message.
 - pair channels (for example `frontend+backend`) scope a tight two-party thread,
-  such as negotiating an interface, without waking the rest of the crew.
+  such as negotiating an interface, without waking the rest of the unit.
 
 ## Message schema
 
 Messages are typed so a front-end can render them and the broker can route them.
 Fields are illustrative, not final:
 
-- `id`, `from` (role or `human`), `channel`, `ts`.
+- `id`, `from` (role or `general`), `channel`, `ts`.
 - `kind`, one of:
-  - `handoff` gives a task to a role (title, scope, owned paths, acceptance).
+  - `order` gives a task to a role (title, scope, owned paths, acceptance).
   - `question` asks for a decision, with optional suggested options.
   - `answer` responds to a question.
   - `status` reports progress without asking anything.
@@ -54,7 +55,7 @@ Fields are illustrative, not final:
   - `note` is freeform prose for anything the above do not cover.
 - `body` (markdown), plus per-kind structured fields.
 
-Typed intents are what let the coxswain arbitrate and let a UI show a handoff
+Typed intents are what let the commander arbitrate and let a UI show an order
 differently from a status ping.
 
 ## Delivery and notifications

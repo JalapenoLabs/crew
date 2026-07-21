@@ -15,10 +15,10 @@
 ## What it is
 
 crew turns a set of separate Claude Code (or Codex) instances into a **team you
-talk to like a team**. You brief a lead, the lead fans work out to role-scoped
-teammates, and each teammate keeps its own long-lived context and owns its lane
-of the codebase. The point is to feel like a visionary directing an engineering
-team, not a person hand-feeding prompts to three terminals.
+command like a team**. You supply the strategic intent, a commander turns it into
+orders for role-scoped specialists, and each specialist keeps its own long-lived
+context and owns its lane of the codebase. The point is to feel like a general
+directing a unit, not a person hand-feeding prompts to three terminals.
 
 It grows out of the `coworker` skill (a shared markdown file plus a `tail -F`
 monitor). crew keeps the idea, working agents that talk to each other, and
@@ -39,15 +39,20 @@ Build the substrate once as a library. Give it two front-ends. That is how crew
 serves both the Claude Code CLI workflow and Seraphim without forking logic.
 
 **crew is not a new agent runtime.** Claude Code already is the runtime. crew is
-the conductor around N Claude Code processes: a supervisor and a message bus, not
-a reimplementation of the agent.
+the command layer around N Claude Code processes: a supervisor and a message bus,
+not a reimplementation of the agent.
 
 ## Direction (agreed)
 
-- **Name:** `crew`. The lead/router role is the **coxswain** (`cox`): steers and
-  calls the pace, does not pull an oar (does not write code). Swappable.
+- **Name:** `crew`. **You are the General:** you supply the intent. The lead
+  role is the **commander**, the rank below you that issues the orders and
+  reports back. The commander does not take the field (does not write code).
 - **Substrate:** one Rust crate = a localhost message **broker** + a process
   **supervisor**. Two front-ends consume it (terminal CLI now, Seraphim later).
+- **Distribution:** the substrate ships as a Rust crate consumed by both
+  front-ends, published under the **JalapenoLabs** org. GitHub Packages has no
+  cargo registry, so the path is a private Git dependency (current lean),
+  crates.io (public), or a private cargo registry. See `docs/roadmap.md`.
 - **Transport:** a localhost broker (axum + SSE), not a shared file. The broker
   routes messages, filters your own messages out of your stream (no self-echo),
   and serves a compact rolling summary so a late joiner does not read the full
@@ -55,9 +60,10 @@ a reimplementation of the agent.
 - **Agent interface:** an **MCP server** exposing `crew_send`, `crew_inbox`,
   `crew_roster` and friends, so agents get real tools instead of appending to a
   file. A thin CLI shim is the fallback.
-- **Topology:** hub-and-spoke by default (human briefs the coxswain, who fans
-  out), with peer direct messages allowed for tight loops and a deliberate,
-  rare `#all-hands` broadcast. Not a free-for-all. See `docs/communication.md`.
+- **Topology:** hub-and-spoke by default (the General briefs the commander, who
+  fans out orders), with peer direct messages allowed for tight loops and a
+  deliberate, rare `all-units` broadcast. Not a free-for-all. See
+  `docs/communication.md`.
 - **Roles trace the tree.** A role owns a directory boundary that already exists
   (`api/`, `frontend/`, `.github/`). Start with a small crew, expand on demand.
   See `docs/roles.md`.
@@ -68,11 +74,14 @@ a reimplementation of the agent.
 
 ## Open questions
 
-- Coxswain identity: does the human always talk through the cox, or can the human
-  drop into any role's channel directly? (Current lean: both, cox is default.)
+- Commander identity: does the General always talk through the commander, or can
+  the General drop into any role's channel directly? (Current lean: both, the
+  commander is default.)
 - Codex parity: same MCP surface via a CLI shim, or a Codex-native path?
 - Persistence: SQLite for the standalone broker vs in-memory with a log file.
   (Seraphim brings Postgres; the standalone need not.)
+- Distribution registry: private Git dependency vs a private cargo registry (see
+  `docs/roadmap.md` for the tradeoff).
 - Where the coworker-skill transport upgrade lands: a `crew` dependency, or a
   standalone drop-in the skill points at. Tracked as a separate effort.
 
@@ -90,7 +99,7 @@ The full design is in `docs/architecture.md`. In short:
 
 ## Roles (summary)
 
-Full roster in `docs/roles.md`. Default crew: **coxswain** (lead/router),
+Full roster in `docs/roles.md`. Default crew: **commander** (lead/router),
 **backend**, **frontend**, **qa**. On demand: **ci/release**, split
 **sdet-unit** / **sdet-e2e**, **security**, **docs**. Prefer few busy agents over
 many idle ones; every idle agent still wakes on traffic and spends context.
@@ -109,7 +118,7 @@ adding a UI and Postgres-backed persistence.
 ```
 CLAUDE.md          README.md          .gitignore
 docs/
-  architecture.md    the substrate: broker, supervisor, MCP surface, stack
+  architecture.md    the substrate: broker, supervisor, MCP surface, distribution
   communication.md   topology, channels, message schema, context management
   roles.md           the roster and the ownership model
   roadmap.md         phased plan

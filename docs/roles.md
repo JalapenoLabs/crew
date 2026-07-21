@@ -3,28 +3,35 @@
 The roster and the ownership model. Update this file when the default crew or the
 ownership rules change.
 
+## The chain of command
+
+**You are the General.** You supply the strategic intent. crew gives you a
+**commander**, the rank below you, who turns intent into orders and reports back.
+The commander directs; it does not take the field. Below the commander are the
+specialists, each owning a lane of the codebase.
+
 ## The ownership model
 
 A role owns a boundary that **already exists in the tree**. Most repos hand you
 clean ones: `api/`, `frontend/`, `workspace/`, `.github/`. An agent that owns a
 directory has a crisp lane and rarely collides with a teammate. Ownership is the
-organizing principle, not job titles for their own sake.
+organizing principle, not ranks for their own sake.
 
-Two rules keep a crew healthy:
+Two rules keep a unit healthy:
 
 1. **Roles trace directory boundaries.** If two roles keep editing the same
    files, the split is wrong; redraw it.
 2. **Prefer few busy agents over many idle ones.** Every idle specialist still
    wakes on channel traffic and spends context deciding a message is not theirs.
-   An idle role is a running tax. Spin roles up on demand and tear them down when
+   An idle role is a running tax. Spin roles up on demand and stand them down when
    the push is over.
 
 ## Default crew (start with 3 to 4)
 
-- **coxswain** (`cox`) is the lead and router. It owns decomposition, interface
-  decisions, arbitration, and the human interface. It steers and calls the pace;
-  it does not pull an oar (it does not write feature code). This is the agent the
-  human briefs.
+- **commander** is the lead and router. It owns decomposition, interface
+  decisions, arbitration, and the interface to the General. It issues orders and
+  reports back; it does not write feature code. This is the agent the General
+  briefs.
 - **backend** owns server code, the database, and migrations (for example
   `api/`).
 - **frontend** owns the UI (for example `frontend/`).
@@ -33,7 +40,7 @@ Two rules keep a crew healthy:
 
 ## On-demand roster
 
-Spin these up for a specific push, then retire them:
+Spin these up for a specific push, then stand them down:
 
 - **ci / release** owns the pipeline (`.github/workflows`, Earthfile, Docker
   builds). Bring it up when the work touches CI.
@@ -44,18 +51,18 @@ Spin these up for a specific push, then retire them:
 ## Role cards
 
 Each role boots with a **role card**: its name, its owned paths, its acceptance
-bar, and how to reach the crew (the broker plus the MCP tools). The card is the
+bar, and how to reach the unit (the broker plus the MCP tools). The card is the
 thin bootstrap; the coordination rules live in crew itself, not restated per
 agent. This is the shape the `coworker` skill should shrink to once crew exists:
 "you are the backend role, here is your lane, here is the broker."
 
 ## Sizing guidance
 
-Match the crew to the work:
+Match the crew to the mission:
 
-- A focused change: cox plus one or two builders.
-- A feature across the stack: cox, backend, frontend, qa.
+- A focused change: commander plus one or two specialists.
+- A feature across the stack: commander, backend, frontend, qa.
 - A test or pipeline hardening push: add ci and the sdet split for its duration.
 
-When in doubt, start smaller. Adding a role mid-flight is cheap; a room full of
-idle specialists is not.
+When in doubt, start smaller. Adding a role mid-mission is cheap; a barracks full
+of idle specialists is not.

@@ -17,7 +17,7 @@ Build the substrate once as a Rust library. Give it two front-ends. Neither
 front-end forks the coordination logic.
 
 crew supervises Claude Code / Codex. It is **not** a new agent runtime. The
-runtime already exists; crew is the conductor around N of them.
+runtime already exists; crew is the command layer around N of them.
 
 ## Components
 
@@ -32,7 +32,7 @@ Planned surface (illustrative, not final):
 - `GET /inbox?role=backend` streams messages for a role over SSE, **filtered so
   a role never receives its own messages** (self-echo is impossible by
   construction, not by convention).
-- `GET /history?channel=all-hands&summary=true` returns a compact rolling
+- `GET /history?channel=all-units&summary=true` returns a compact rolling
   summary rather than the full transcript, so a late joiner spends little
   context catching up.
 - `GET /roster` lists roles, their liveness, and their owned paths.
@@ -45,14 +45,14 @@ Why a broker beats the old shared file:
   broker filters them at the source.
 - **Bounded context.** The file grew without limit; the broker summarizes.
 - **Typed messages.** The file was freeform prose; the broker carries structured
-  intents (handoff, question, status, artifact-ref) that a front-end can render.
+  intents (order, question, status, artifact) that a front-end can render.
 
 ### Supervisor
 
 Spawns one agent process per role, each with its role card, wired to the broker,
 and manages its lifecycle: lazy start on first work, idle-stop to save context
 and money, restart on death. The supervisor is what makes `crew up` bring an
-entire team online at once instead of the human opening terminals by hand.
+entire unit online at once instead of the General opening terminals by hand.
 
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.
@@ -72,9 +72,9 @@ fallback for a runtime without MCP.
 ### CLI (`crew`, human front-end)
 
 - `crew up` brings a crew online from a config (roles, owned paths, model).
-- `crew send` posts a message as the human, to the coxswain by default.
+- `crew send` posts a message as the General, to the commander by default.
 - `crew watch` tails the conversation with routing visible.
-- `crew down` stops the crew.
+- `crew down` stands the crew down.
 
 ## Stack and conventions
 
@@ -96,6 +96,31 @@ Open question. The standalone broker can run in memory with an on-disk log, or
 back onto SQLite for durable history and summaries. Seraphim brings Postgres, so
 the Seraphim front-end persists there. Keep the broker storage behind a trait so
 the backend is swappable.
+
+## Distribution
+
+The substrate is the reusable part, so it ships as a Rust crate (the broker plus
+supervisor library) that both front-ends depend on, published under the
+**JalapenoLabs** org.
+
+**Constraint:** GitHub Packages does not host cargo registries (it serves npm,
+Maven, NuGet, RubyGems, and Docker, not Rust). So "publish under JalapenoLabs"
+has three realistic shapes:
+
+1. **Private Git dependency** (current lean). Consumers depend on the crate via
+   `git = "ssh://git@github.com/JalapenoLabs/crew"` pinned to a tag. No registry
+   to run, private by default, works today. The cost is no semantic-version
+   resolution and no `cargo publish` ergonomics.
+2. **crates.io.** A real `cargo publish` with proper versioning and discovery.
+   The cost is the crate is world-visible; only viable once the API is stable and
+   we are content to open it.
+3. **Private cargo registry** (Kellnr, Cloudsmith, Shipyard, or self-hosted via
+   the sparse registry protocol). True org-private packages with `cargo publish`
+   and version resolution. The cost is a service to run or pay for.
+
+The crate split (`M-SMALLER-CRATES`) keeps this clean: publish the substrate
+crate, keep the CLI and any Seraphim glue as consumers. Which registry to use is
+tracked in `roadmap.md`.
 
 ## What this deliberately is not
 
