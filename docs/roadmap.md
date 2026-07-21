@@ -62,6 +62,24 @@ crew's second front-end.
 - Runewood consumes the same event stream to visualize the unit live.
 - Railways adopt the broker so lanes can talk to each other.
 
+## Capability tracks (parallel to the phases)
+
+Cross-cutting tracks that harden crew into a team you command, watch, and trust.
+Each is a milestone of its own; they layer onto the phase work rather than block
+it.
+
+- **Command & Control.** Interject, redirect, and belay a role mid-task;
+  rules-of-engagement approval gates for risky actions; pause and stand-down;
+  direct override of the commander.
+- **Coordination Robustness.** Worktree-per-role isolation with an integrator, a
+  work ledger with claims, lane-ownership enforcement, an adversarial done-gate,
+  and coordination-stall detection.
+- **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
+  the `crew top` terminal cockpit, and push notifications on the actionable
+  moments.
+- **Economy.** Model per role, a shared token budget with per-role caps,
+  auto-idle with cost telemetry, and subscription usage awareness.
+
 ## Parallel track: coworker skill transport upgrade
 
 Independent of the phases above. Upgrade the `coworker` skill to use a broker

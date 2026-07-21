@@ -73,6 +73,23 @@ not a reimplementation of the agent.
   never separate capture pipelines. Seraphim renders crew communication into task
   history the way it renders `ci` / `lifecycle` / `screenshot` events today, and
   the live count can drive a Runewood visualization. See `docs/observability.md`.
+- **Command and control (the general's console).** The General can interject and
+  redirect a role mid-task (`crew redirect` / `crew belay`), gate risky actions
+  (push, merge, delete, spend, external post) behind rules-of-engagement
+  approval, pause or stand down per role and globally, and override the commander
+  to command a specialist directly.
+- **Coordination robustness.** Parallel roles work in isolated git worktrees and
+  integrate through a deliberate step; a commander-maintained work ledger with
+  claims prevents collisions; lane ownership is enforced; nothing is done until an
+  adversarial gate fails to break it; the defibrillator also catches coordination
+  stalls, not just dead agents.
+- **Team memory.** A shared decision board (agreed interfaces, decisions,
+  gotchas) the crew reads and writes, distinct from the transient message stream;
+  a new role boots from a briefing packet (role card + board + rolling summary),
+  never the raw log.
+- **Economy.** Model per role (strong for the commander and architect, cheap for
+  mechanical roles), a shared token budget with per-role caps, auto-idle with cost
+  telemetry, and subscription usage awareness.
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
