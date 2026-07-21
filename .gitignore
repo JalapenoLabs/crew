@@ -1,0 +1,22 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Broker runtime state (planned)
+*.crew.db
+*.crew.db-*
+/.crew
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
