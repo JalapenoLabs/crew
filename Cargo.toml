@@ -1,0 +1,79 @@
+# crew Cargo workspace.
+#
+# The substrate is split into small crates (M-SMALLER-CRATES): a shared core,
+# the broker service, the process supervisor, the agent-facing MCP surface, and
+# the human CLI front-end. Each library crate builds and tests on its own; the
+# dependency graph flows toward `crew-core`, and nothing depends on `crew-cli`.
+# See docs/architecture.md and CLAUDE.md (Repo layout).
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# Metadata every crate inherits, so version, license, and repository stay in one
+# place across the split (`field.workspace = true` in each member).
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/JalapenoLabs/crew"
+
+# Dependencies pinned once here and referenced by members with `workspace = true`,
+# so versions never drift across crates. The internal crates are path deps, so the
+# whole dependency graph is declared in one place.
+[workspace.dependencies]
+# Application error type (M-APP-ERROR) and global allocator (M-MIMALLOC-APPS).
+eyre = "0.6"
+mimalloc = "0.1"
+# Internal crates. The direction flows toward crew-core; crew-cli is a consumer
+# only, never a dependency.
+crew-core = { path = "crates/crew-core" }
+crew-broker = { path = "crates/crew-broker" }
+crew-supervisor = { path = "crates/crew-supervisor" }
+crew-mcp = { path = "crates/crew-mcp" }
+
+# The compiler and clippy lint sets from ~/.claude/docs/rust.md, defined once and
+# inherited by every member via `[lints] workspace = true`.
+[workspace.lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+cargo = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+
+# Selected lints from the `restriction` group, to drive up consistency and quality.
+allow_attributes_without_reason = "warn"
+assertions_on_result_states = "warn"
+clone_on_ref_ptr = "warn"
+deref_by_slicing = "warn"
+disallowed_script_idents = "warn"
+empty_drop = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+fn_to_numeric_cast_any = "warn"
+if_then_some_else_none = "warn"
+map_err_ignore = "warn"
+redundant_type_annotations = "warn"
+renamed_function_params = "warn"
+semicolon_outside_block = "warn"
+string_to_string = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unneeded_field_pattern = "warn"
+unused_result_ok = "warn"
+
+# Would otherwise fight structured logging with formatting-style args.
+literal_string_with_formatting_args = "allow"

@@ -1,0 +1,15 @@
+[package]
+name = "crew-supervisor"
+description = "The crew process supervisor: spawns and manages role-scoped agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crew-core.workspace = true

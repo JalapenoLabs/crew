@@ -1,0 +1,28 @@
+[package]
+name = "crew-cli"
+description = "The crew command-line front-end (the crew binary)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The human front-end binary is `crew` (crew up, crew send, crew watch, crew down).
+[[bin]]
+name = "crew"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Application conventions: eyre for errors (M-APP-ERROR), mimalloc allocator
+# (M-MIMALLOC-APPS).
+eyre.workspace = true
+mimalloc.workspace = true
+# The substrate crates the CLI drives: `crew up`/`down` the supervisor, and
+# `crew send`/`watch` the broker (both pull crew-core transitively). The commands
+# themselves land in later phases; this fixes the consumer direction now.
+crew-broker.workspace = true
+crew-supervisor.workspace = true
