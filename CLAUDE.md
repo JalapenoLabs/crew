@@ -170,7 +170,12 @@ and build/test green; they are empty homes waiting for the phased build in
 ## Local conventions
 
 - **No em dashes** in any user-facing text.
-- **Rust toolchain pinned** (`rust-toolchain.toml`); use `cargo +<pinned>`.
+- **Rust toolchain pinned** to `1.88` in `rust-toolchain.toml` (with `rustfmt` +
+  `clippy`), so a fresh clone, CI, and any container all build with the same
+  compiler. rustup selects it automatically inside the repo; pass `cargo
+  +<pinned>` (e.g. `cargo +1.88 build`) when you need it explicitly from outside.
+- **Formatting** is pinned in `rustfmt.toml` (stable options only). Run
+  `cargo fmt` to apply it and `cargo fmt --check` to verify.
 - **eyre** for application errors, **mimalloc** as the global allocator, the
   clippy lint set from `~/.claude/docs/rust.md`.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
