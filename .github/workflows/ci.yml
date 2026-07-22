@@ -1,11 +1,10 @@
 name: CI
 
-# Gate every pull request and every push to main on the strict lint posture
-# (issue #3): formatting, clippy with warnings as errors, build, and tests.
+# Check every pull request and every push to the long-lived branches (issue #5).
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
 
 # A newer push to the same ref supersedes an in-flight run.
 concurrency:
@@ -15,35 +14,36 @@ concurrency:
 permissions:
   contents: read
 
+# Three independent jobs, so each reports its own status check and a failure in
+# one never short-circuits the others ("no fail-fast"). Each provisions the
+# toolchain pinned in rust-toolchain.toml (1.88 with rustfmt + clippy); `rustup
+# show` installs exactly that and fails early with a clear message if it cannot.
 jobs:
-  check:
-    name: fmt, clippy, build, test
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # rust-toolchain.toml pins the compiler (1.88 with rustfmt + clippy); rustup
-      # installs exactly that. Doing it explicitly fails early with a clear message
-      # if the toolchain cannot be provisioned.
       - name: Install the pinned toolchain
         run: rustup show
+      - run: cargo fmt --all --check
 
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # No fail-fast: every check runs even if an earlier one fails, so a single
-      # run surfaces all problems at once.
-      - name: Format
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all --check
-
-      - name: Clippy (warnings as errors)
-        if: ${{ !cancelled() }}
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Build
-        if: ${{ !cancelled() }}
-        run: cargo build --all-targets --all-features
-
-      - name: Test
-        if: ${{ !cancelled() }}
-        run: cargo test --all-features
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features

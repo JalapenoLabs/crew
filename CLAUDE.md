@@ -181,9 +181,11 @@ and build/test green; they are empty homes waiting for the phased build in
 - **Lints** (compiler + clippy, with selected `restriction` lints) live in
   `[workspace.lints]` and every crate inherits them. Override a lint locally with
   `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
-- **CI gate** (`.github/workflows/ci.yml`): every pull request and push to `main`
-  must pass `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-  build, and test. Keep the tree clippy-clean at that level.
+- **CI gate** (`.github/workflows/ci.yml`): every pull request and every push to
+  `main` and `develop` runs three independent jobs on the pinned toolchain, so
+  each reports its own status and one failure never blocks the rest: `cargo fmt
+  --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`. Keep the
+  tree clippy-clean at that level.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
 - **Git:** commit and push only when asked. Never add a co-author trailer. Never
   self-assign PR credit.
