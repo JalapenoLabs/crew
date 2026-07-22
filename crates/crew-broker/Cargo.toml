@@ -1,0 +1,15 @@
+[package]
+name = "crew-broker"
+description = "The crew message broker: localhost routing, roster, and history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crew-core.workspace = true

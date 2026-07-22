@@ -1,0 +1,16 @@
+[package]
+name = "crew-mcp"
+description = "The crew agent-facing MCP surface (crew_send, crew_inbox, crew_roster)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crew-core.workspace = true
+crew-broker.workspace = true

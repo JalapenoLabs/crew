@@ -1,0 +1,5 @@
+# Pin the toolchain so local, CI, and every contributor build the same compiler.
+# Matches the JalapenoLabs standard (Seraphim pins the same). Bump deliberately.
+[toolchain]
+channel = "1.88"
+components = ["rustfmt", "clippy"]

@@ -136,9 +136,11 @@ plus a message bus). The broker crew builds is the coordination backbone
 Railways can adopt so lanes can talk. Seraphim becomes crew's second front-end,
 adding a UI and Postgres-backed persistence.
 
-## Repo layout (planned)
+## Repo layout
 
 ```
+Cargo.toml         workspace root: members, shared deps, the lint set
+rust-toolchain.toml pinned toolchain (1.88, rustfmt + clippy)
 CLAUDE.md          README.md          .gitignore
 docs/
   architecture.md    the substrate: broker, supervisor, MCP surface, distribution
@@ -146,13 +148,24 @@ docs/
   observability.md   one event stream: task history, activity logs, live count
   roles.md           the roster and the ownership model
   roadmap.md         phased plan
-crates/            (planned) broker + supervisor + cli + mcp
+crates/
+  crew-core          shared types + the event model (the dependency-graph root)
+  crew-broker        the localhost message broker service
+  crew-supervisor    process management: spawn/wire/lifecycle of role agents
+  crew-mcp           the agent-facing MCP surface (crew_send, crew_inbox, ...)
+  crew-cli           the human front-end binary (`crew`)
 ```
+
+Crate split follows `M-SMALLER-CRATES`: every crate builds and tests on its own,
+the dependency direction flows toward `crew-core`, and nothing depends on
+`crew-cli` (the CLI is a consumer only). The crates are scaffolds today; each
+phase in `docs/roadmap.md` fills in its home.
 
 ## Status
 
-Design stage. No code yet. This repo currently holds the design of record. See
-`docs/roadmap.md` for the build order.
+Design of record plus the workspace scaffold. The five crates above are in place
+and build/test green; they are empty homes waiting for the phased build in
+`docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
 
 ## Local conventions
 
