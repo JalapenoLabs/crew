@@ -187,8 +187,12 @@ at the root.
   `<component>.<operation>.<state>` and `{{property}}` message templates
   (M-LOG-STRUCTURED). Binaries call `crew_telemetry::init()` once at startup, and
   any secret in a field goes through `crew_telemetry::redact::secret` first.
-- The clippy lint set from `~/.claude/docs/rust.md` lives in `[workspace.lints]`;
-  override a lint locally with `#[expect(..., reason = "...")]`, never `#[allow]`.
+- **Lints** (compiler + clippy, with selected `restriction` lints) live in
+  `[workspace.lints]` and every crate inherits them. Override a lint locally with
+  `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
+- **CI gate** (`.github/workflows/ci.yml`): every pull request and push to `main`
+  must pass `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  build, and test. Keep the tree clippy-clean at that level.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
 - **Git:** commit and push only when asked. Never add a co-author trailer. Never
   self-assign PR credit.

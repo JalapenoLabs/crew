@@ -1,0 +1,49 @@
+name: CI
+
+# Gate every pull request and every push to main on the strict lint posture
+# (issue #3): formatting, clippy with warnings as errors, build, and tests.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt, clippy, build, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler (1.88 with rustfmt + clippy); rustup
+      # installs exactly that. Doing it explicitly fails early with a clear message
+      # if the toolchain cannot be provisioned.
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No fail-fast: every check runs even if an earlier one fails, so a single
+      # run surfaces all problems at once.
+      - name: Format
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings as errors)
+        if: ${{ !cancelled() }}
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        if: ${{ !cancelled() }}
+        run: cargo build --all-targets --all-features
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: cargo test --all-features
