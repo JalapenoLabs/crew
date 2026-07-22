@@ -33,6 +33,29 @@ See [`docs/`](docs/) for the design: [architecture](docs/architecture.md),
 [communication](docs/communication.md), [roles](docs/roles.md), and the
 [roadmap](docs/roadmap.md).
 
+## Layout
+
+A Cargo workspace split into small crates (`M-SMALLER-CRATES`); the dependency
+direction flows toward `crew-core`, and nothing depends on `crew-cli`.
+
+```
+crates/
+  crew-core        shared types + the event model (the dependency-graph root)
+  crew-broker      the localhost message broker service
+  crew-supervisor  process management: spawn, wire, and lifecycle of role agents
+  crew-mcp         the agent-facing MCP surface (crew_send, crew_inbox, ...)
+  crew-cli         the human front-end binary (crew)
+```
+
+Build and test the whole workspace from the root:
+
+```sh
+cargo build
+cargo test
+```
+
 ## Status
 
-Design stage. No code yet. This repo holds the design of record.
+Design of record plus the workspace scaffold: the five crates above are in place
+and build green, as empty homes for the phased build in
+[`docs/roadmap.md`](docs/roadmap.md).
