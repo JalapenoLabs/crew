@@ -161,16 +161,21 @@ Crate split follows `M-SMALLER-CRATES`: every crate builds and tests on its own,
 the dependency direction flows toward `crew-core`, and nothing depends on
 `crew-cli` (the CLI is a consumer only). `crew-telemetry` is a standalone
 infrastructure crate the binaries call to initialize logging, so the library
-crates never pull a subscriber. The substrate crates are scaffolds today; each
-phase in `docs/roadmap.md` fills in its home.
+crates never pull a subscriber. `crew-core` holds the domain types and event
+model (issue #6); the other substrate crates are scaffolds, each filled in by its
+phase in `docs/roadmap.md`.
 
 ## Status
 
 Design of record plus the workspace scaffold. The crates build/test green.
-`crew-telemetry` carries the shared logging init; the `crew` binary boots with
-structured logging; and `crewd` (the broker skeleton, issue #7) starts on
-loopback, serves `GET /health`, and shuts down gracefully. The rest of the
-substrate is still scaffolds waiting for the phased build in `docs/roadmap.md`.
+`crew-telemetry` carries the shared logging init and the `crew` binary boots with
+structured logging (issue #4); `crew-core` carries the shared, strongly-typed
+vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
+`MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
+`EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`) stream
+model, all serde round-tripping; and `crewd` (the broker skeleton, issue #7)
+starts on loopback, serves `GET /health`, and shuts down gracefully. The rest of
+the substrate is still scaffolds waiting for the phased build in `docs/roadmap.md`.
 Verify with `cargo build` and `cargo test` at the root.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
