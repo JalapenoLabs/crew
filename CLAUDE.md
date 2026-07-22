@@ -178,6 +178,12 @@ and build/test green; they are empty homes waiting for the phased build in
   `cargo fmt` to apply it and `cargo fmt --check` to verify.
 - **eyre** for application errors, **mimalloc** as the global allocator, the
   clippy lint set from `~/.claude/docs/rust.md`.
+- **Lints** (compiler + clippy, with selected `restriction` lints) live in
+  `[workspace.lints]` and every crate inherits them. Override a lint locally with
+  `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
+- **CI gate** (`.github/workflows/ci.yml`): every pull request and push to `main`
+  must pass `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  build, and test. Keep the tree clippy-clean at that level.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
 - **Git:** commit and push only when asked. Never add a co-author trailer. Never
   self-assign PR credit.
