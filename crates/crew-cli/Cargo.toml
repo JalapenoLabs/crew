@@ -18,9 +18,11 @@ workspace = true
 
 [dependencies]
 # Application conventions: eyre for errors (M-APP-ERROR), mimalloc allocator
-# (M-MIMALLOC-APPS).
+# (M-MIMALLOC-APPS), the shared logging init, and tracing for structured events.
 eyre.workspace = true
 mimalloc.workspace = true
+crew-telemetry.workspace = true
+tracing.workspace = true
 # The substrate crates the CLI drives: `crew up`/`down` the supervisor, and
 # `crew send`/`watch` the broker (both pull crew-core transitively). The commands
 # themselves land in later phases; this fixes the consumer direction now.

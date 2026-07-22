@@ -26,12 +26,19 @@ repository = "https://github.com/JalapenoLabs/crew"
 # Application error type (M-APP-ERROR) and global allocator (M-MIMALLOC-APPS).
 eyre = "0.6"
 mimalloc = "0.1"
-# Internal crates. The direction flows toward crew-core; crew-cli is a consumer
-# only, never a dependency.
+# Structured logging (M-LOG-STRUCTURED): `tracing` is the emit-side facade any
+# crate can use; `tracing-subscriber` is the init side, kept in crew-telemetry so
+# the library crates never pull a subscriber.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Internal crates. The domain graph flows toward crew-core; crew-cli is a consumer
+# only, never a dependency. crew-telemetry is a standalone infrastructure crate the
+# binaries call to initialize logging.
 crew-core = { path = "crates/crew-core" }
 crew-broker = { path = "crates/crew-broker" }
 crew-supervisor = { path = "crates/crew-supervisor" }
 crew-mcp = { path = "crates/crew-mcp" }
+crew-telemetry = { path = "crates/crew-telemetry" }
 
 # The compiler and clippy lint sets from ~/.claude/docs/rust.md, defined once and
 # inherited by every member via `[lints] workspace = true`.
