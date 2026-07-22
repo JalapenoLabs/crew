@@ -158,14 +158,19 @@ crates/
 
 Crate split follows `M-SMALLER-CRATES`: every crate builds and tests on its own,
 the dependency direction flows toward `crew-core`, and nothing depends on
-`crew-cli` (the CLI is a consumer only). The crates are scaffolds today; each
-phase in `docs/roadmap.md` fills in its home.
+`crew-cli` (the CLI is a consumer only). `crew-core` holds the domain types and
+event model (issue #6); the other crates are scaffolds, each filled in by its
+phase in `docs/roadmap.md`.
 
 ## Status
 
-Design of record plus the workspace scaffold. The five crates above are in place
-and build/test green; they are empty homes waiting for the phased build in
-`docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
+Design of record plus the workspace scaffold. `crew-core` carries the shared,
+strongly-typed vocabulary: the identifier newtypes (`RoleId`, `ChannelId`,
+`MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
+`EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`) stream
+model, all serde round-tripping. The other crates are still scaffolds waiting for
+the phased build in `docs/roadmap.md`. Verify with `cargo build` and `cargo test`
+at the root.
 
 ## Local conventions
 

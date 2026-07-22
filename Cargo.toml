@@ -26,6 +26,11 @@ repository = "https://github.com/JalapenoLabs/crew"
 # Application error type (M-APP-ERROR) and global allocator (M-MIMALLOC-APPS).
 eyre = "0.6"
 mimalloc = "0.1"
+# Serialization for the wire types, timestamps, and unique identifiers.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 # Internal crates. The direction flows toward crew-core; crew-cli is a consumer
 # only, never a dependency.
 crew-core = { path = "crates/crew-core" }
@@ -52,6 +57,11 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
+
+# Opt back out of one `cargo`-group lint: transitive dependencies pull two major
+# versions of shared build crates (e.g. `syn` 2 and 3 via proc-macro deps), which
+# the workspace cannot reconcile, so this lint only reports noise we cannot fix.
+multiple_crate_versions = "allow"
 
 # Selected lints from the `restriction` group, to drive up consistency and quality.
 allow_attributes_without_reason = "warn"
