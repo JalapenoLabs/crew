@@ -1,0 +1,13 @@
+# Project formatting settings (issue #2), applied by `cargo fmt` on the pinned
+# toolchain (see rust-toolchain.toml). Stable-channel options only, so every
+# setting takes effect with no "unstable option" warnings.
+#
+# The values are set explicitly rather than left to rustfmt's defaults, so
+# formatting stays reproducible across local, CI, and any future container even if
+# a rustfmt default shifts. `newline_style = "Unix"` is the one deliberate
+# deviation, enforcing LF so line endings never drift on a Windows checkout.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+hard_tabs = false
+newline_style = "Unix"
