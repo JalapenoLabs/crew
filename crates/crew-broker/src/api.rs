@@ -1,0 +1,41 @@
+//! The HTTP surface: the axum router and its handlers.
+
+use axum::extract::State;
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Serialize;
+
+use crate::state::AppState;
+
+/// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
+///
+/// The skeleton serves only `GET /health`; the message, stream, roster, and
+/// history routes are added by later tickets.
+pub(crate) fn build(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .with_state(state)
+}
+
+/// The health probe payload.
+#[derive(Debug, Serialize)]
+struct Health {
+    /// Always `ok` when the broker is serving.
+    status: &'static str,
+    /// The service name, `crewd`.
+    service: &'static str,
+    /// The running build's version.
+    version: &'static str,
+    /// The active storage backend, e.g. `memory`.
+    storage: &'static str,
+}
+
+/// `GET /health`: reports that the broker is up and which storage backend it runs.
+async fn health(State(state): State<AppState>) -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        service: "crewd",
+        version: env!("CARGO_PKG_VERSION"),
+        storage: state.storage.backend(),
+    })
+}
