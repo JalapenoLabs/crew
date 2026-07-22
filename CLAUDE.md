@@ -154,18 +154,23 @@ crates/
   crew-supervisor    process management: spawn/wire/lifecycle of role agents
   crew-mcp           the agent-facing MCP surface (crew_send, crew_inbox, ...)
   crew-cli           the human front-end binary (`crew`)
+  crew-telemetry     shared structured-logging (tracing) init + secret redaction
 ```
 
 Crate split follows `M-SMALLER-CRATES`: every crate builds and tests on its own,
 the dependency direction flows toward `crew-core`, and nothing depends on
-`crew-cli` (the CLI is a consumer only). `crew-core` holds the domain types and
-event model (issue #6); the other crates are scaffolds, each filled in by its
+`crew-cli` (the CLI is a consumer only). `crew-telemetry` is a standalone
+infrastructure crate the binaries call to initialize logging, so the library
+crates never pull a subscriber. `crew-core` holds the domain types and event
+model (issue #6); the other substrate crates are scaffolds, each filled in by its
 phase in `docs/roadmap.md`.
 
 ## Status
 
-Design of record plus the workspace scaffold. `crew-core` carries the shared,
-strongly-typed vocabulary: the identifier newtypes (`RoleId`, `ChannelId`,
+Design of record plus the workspace scaffold. The crates build/test green.
+`crew-telemetry` carries the shared logging init and the `crew` binary boots with
+structured logging (issue #4); `crew-core` carries the shared, strongly-typed
+vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`) stream
 model, all serde round-tripping. The other crates are still scaffolds waiting for
@@ -181,8 +186,12 @@ at the root.
   +<pinned>` (e.g. `cargo +1.88 build`) when you need it explicitly from outside.
 - **Formatting** is pinned in `rustfmt.toml` (stable options only). Run
   `cargo fmt` to apply it and `cargo fmt --check` to verify.
-- **eyre** for application errors, **mimalloc** as the global allocator, the
-  clippy lint set from `~/.claude/docs/rust.md`.
+- **Application conventions** (issue #4): **eyre** is the single application error
+  type (M-APP-ERROR); **mimalloc** is the global allocator in every binary
+  (M-MIMALLOC-APPS); logging is **tracing** with structured, named events
+  `<component>.<operation>.<state>` and `{{property}}` message templates
+  (M-LOG-STRUCTURED). Binaries call `crew_telemetry::init()` once at startup, and
+  any secret in a field goes through `crew_telemetry::redact::secret` first.
 - **Lints** (compiler + clippy, with selected `restriction` lints) live in
   `[workspace.lints]` and every crate inherits them. Override a lint locally with
   `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
