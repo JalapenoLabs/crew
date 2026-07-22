@@ -45,6 +45,7 @@ crates/
   crew-supervisor  process management: spawn, wire, and lifecycle of role agents
   crew-mcp         the agent-facing MCP surface (crew_send, crew_inbox, ...)
   crew-cli         the human front-end binary (crew)
+  crew-telemetry   shared structured-logging (tracing) init + secret redaction
 ```
 
 Build and test the whole workspace from the root:
