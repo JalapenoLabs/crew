@@ -1,9 +1,23 @@
-//! The crew message broker.
+//! The crew message broker: the localhost `crewd` HTTP + SSE service.
 //!
-//! A localhost HTTP + SSE service that owns the message log, the roster, and
-//! delivery: agents post a typed message and subscribe to a self-filtered stream,
-//! and a history endpoint serves a compact rolling summary rather than the full
-//! transcript. Built on the types in [`crew_core`].
+//! `crewd` owns the message log, the roster, and delivery (see
+//! `docs/architecture.md`). This is the service skeleton (issue #7): it binds
+//! loopback-only, serves a health probe, wires the application state (the
+//! [`Storage`] backend and the [`ChannelRouter`]), and shuts down gracefully. The
+//! message endpoints, the self-filtered SSE streams, the roster, and history come
+//! in later tickets.
 //!
-//! This is the scaffold from issue #1; the service lands in a later phase (see
-//! `docs/architecture.md`).
+//! Run it with the `crewd` binary, or drive it as a library through [`run`].
+
+mod api;
+mod config;
+mod router;
+mod serve;
+mod state;
+mod store;
+
+pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
+pub use router::ChannelRouter;
+pub use serve::run;
+pub use state::AppState;
+pub use store::{MemoryStore, Storage};

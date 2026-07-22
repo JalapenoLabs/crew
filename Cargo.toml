@@ -31,6 +31,11 @@ mimalloc = "0.1"
 # the library crates never pull a subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The broker service: async runtime, HTTP + SSE framework, and serde for its
+# JSON responses.
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
 # Internal crates. The domain graph flows toward crew-core; crew-cli is a consumer
 # only, never a dependency. crew-telemetry is a standalone infrastructure crate the
 # binaries call to initialize logging.
@@ -59,6 +64,11 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
+
+# Opt back out of one `cargo`-group lint: transitive dependencies pull two major
+# versions of shared build crates (e.g. `syn` 2 and 3 via proc-macro deps), which
+# the workspace cannot reconcile, so this lint only reports noise we cannot fix.
+multiple_crate_versions = "allow"
 
 # Selected lints from the `restriction` group, to drive up consistency and quality.
 allow_attributes_without_reason = "warn"

@@ -150,7 +150,7 @@ docs/
   roadmap.md         phased plan
 crates/
   crew-core          shared types + the event model (the dependency-graph root)
-  crew-broker        the localhost message broker service
+  crew-broker        the localhost broker service + the `crewd` binary
   crew-supervisor    process management: spawn/wire/lifecycle of role agents
   crew-mcp           the agent-facing MCP surface (crew_send, crew_inbox, ...)
   crew-cli           the human front-end binary (`crew`)
@@ -166,11 +166,18 @@ phase in `docs/roadmap.md` fills in its home.
 
 ## Status
 
-Design of record plus the workspace scaffold. The crates build/test green;
-`crew-telemetry` carries the shared logging init and the `crew` binary boots with
-structured logging, while the substrate crates are still empty homes waiting for
-the phased build in `docs/roadmap.md`. Verify with `cargo build` and `cargo test`
-at the root.
+Design of record plus the workspace scaffold. The crates build/test green.
+`crew-telemetry` carries the shared logging init; the `crew` binary boots with
+structured logging; and `crewd` (the broker skeleton, issue #7) starts on
+loopback, serves `GET /health`, and shuts down gracefully. The rest of the
+substrate is still scaffolds waiting for the phased build in `docs/roadmap.md`.
+Verify with `cargo build` and `cargo test` at the root.
+
+**Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
+default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
+`CREW_BROKER_STATE_DIR` (default `.crew`), and `CREW_BROKER_ALLOW_NON_LOCAL`
+(`1`/`true`/`yes`). Binding a non-loopback address is refused unless that last one
+is set, so the broker never exposes itself to the network by accident.
 
 ## Local conventions
 

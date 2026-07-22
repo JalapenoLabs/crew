@@ -1,6 +1,6 @@
 [package]
 name = "crew-broker"
-description = "The crew message broker: localhost routing, roster, and history."
+description = "The crew message broker: the localhost crewd HTTP + SSE service."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,23 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The broker daemon. The library holds the service; this is its thin entry point.
+[[bin]]
+name = "crewd"
+path = "src/bin/crewd.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
 crew-core.workspace = true
+# Application conventions (issue #4): eyre errors, tracing events, the shared
+# logging init, and the mimalloc allocator for the crewd binary.
+eyre.workspace = true
+tracing.workspace = true
+crew-telemetry.workspace = true
+mimalloc.workspace = true
+# The service: async runtime, HTTP framework, serde for JSON responses.
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
