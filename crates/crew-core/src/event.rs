@@ -170,7 +170,8 @@ impl Event {
 /// (issue #49), `budget` is a token-spend report against the crew budget (issue
 /// #54), `telemetry` is a per-turn token-and-cost usage report (issue #55), and
 /// `usage` is a shared-subscription usage reading and its auto-pause (issue
-/// #56).
+/// #56), and `stall` is a coordination stall the monitor detected or resolved
+/// (issue #48, #120).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -200,6 +201,9 @@ pub enum EventKind {
     /// A shared-subscription usage reading, and whether it auto-paused the crew
     /// (issue #56).
     Usage(UsageEvent),
+    /// A coordination stall the fleet-wide monitor detected or resolved (issue
+    /// #48, surfaced on the stream by issue #120).
+    Stall(StallEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown
@@ -627,6 +631,72 @@ pub struct UsageEvent {
     pub paused: bool,
 }
 
+/// A coordination stall the fleet-wide monitor detected, or its resolution
+/// (issue #48, surfaced on the stream by issue #120).
+///
+/// The defibrillator's stall monitor reads the event stream for a crew stuck
+/// waiting on itself and escalates the specific cause. Publishing it as a
+/// first-class `stall` event lets `crew notify` push the "a role is stalled"
+/// moment (issue #52) and the `crew top` cockpit (issue #51) render live
+/// stalls, rather than the stall living only in a supervisor log. The paired
+/// [`status`](StallEvent::status) says whether this reading raised the stall or
+/// cleared it, so a watcher can light it up and later clear it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StallEvent {
+    /// Which shape of stall this is.
+    pub kind: StallKind,
+    /// Whether the stall was just detected or has since resolved.
+    pub status: StallStatus,
+    /// The roles caught in the stall, sorted for a stable identity across
+    /// scans.
+    pub roles: Vec<RoleId>,
+    /// A one-line, specific description of the stall: who is waiting on what.
+    pub detail: String,
+}
+
+/// The shape of a coordination stall (issue #48).
+///
+/// A [`Deadlock`](Self::Deadlock) is a cycle of unanswered questions (the crew
+/// waiting on itself), an [`UnansweredQuestion`](Self::UnansweredQuestion) is a
+/// one-sided wait past the threshold with no cycle, and a
+/// [`LedgerStall`](Self::LedgerStall) is a held task with no forward motion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallKind {
+    /// A cycle of unanswered questions: the crew is waiting on itself.
+    Deadlock,
+    /// One agent has waited past the threshold for another to answer.
+    UnansweredQuestion,
+    /// A task sits in a held state past the threshold, with no forward motion.
+    LedgerStall,
+}
+
+impl StallKind {
+    /// The stall's stable label, matching its serialized name.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Deadlock => "deadlock",
+            Self::UnansweredQuestion => "unanswered_question",
+            Self::LedgerStall => "ledger_stall",
+        }
+    }
+}
+
+/// Whether a [`StallEvent`] raises a stall or clears it (issue #120).
+///
+/// The monitor publishes [`Detected`](Self::Detected) when a stall first
+/// crosses the threshold and [`Resolved`](Self::Resolved) once it clears, so a
+/// front-end lights a stall up and later takes it down off the same stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallStatus {
+    /// The stall was just detected: the crew is stuck and needs the General.
+    Detected,
+    /// The stall has resolved: the crew moved on, so a watcher can clear it.
+    Resolved,
+}
+
 impl BoardSection {
     /// The section's stable label, matching its serialized name.
     #[must_use]
@@ -643,7 +713,7 @@ impl BoardSection {
 mod tests {
     use super::{
         Activity, ArtifactKind, BoardEvent, BoardSection, Event, EventKind, Lifecycle, Message,
-        MessageKind, Verdict, VerificationEvent,
+        MessageKind, StallEvent, StallKind, StallStatus, Verdict, VerificationEvent,
     };
     use crate::{
         id::{ChannelId, MessageId, RoleId, Sender, TaskId},
@@ -651,6 +721,10 @@ mod tests {
     };
 
     /// One representative event per kind, to exercise every serde path.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a flat one-event-per-kind fixture is inherently long but clearer as one list"
+    )]
     fn sample_events() -> Vec<Event> {
         let envelope = |kind| Event {
             ts: Timestamp::now(),
@@ -739,6 +813,19 @@ mod tests {
                 author: RoleId::new("commander"),
                 body: String::new(),
                 retracted: true,
+            })),
+            envelope(EventKind::Stall(StallEvent {
+                kind: StallKind::Deadlock,
+                status: StallStatus::Detected,
+                roles: vec![RoleId::new("backend"), RoleId::new("frontend")],
+                detail: "deadlock: backend waits on frontend, and frontend waits on backend"
+                    .to_owned(),
+            })),
+            envelope(EventKind::Stall(StallEvent {
+                kind: StallKind::LedgerStall,
+                status: StallStatus::Resolved,
+                roles: vec![RoleId::new("backend")],
+                detail: "ledger task `login` moved forward".to_owned(),
             })),
         ]
     }

@@ -26,7 +26,7 @@
 //! loop feeds it the recent history on a timer and escalates each new stall.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         mpsc::{Receiver, RecvTimeoutError},
         Arc, Mutex, PoisonError,
@@ -35,35 +35,11 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use crew_core::{Channel, RoleId, Timestamp};
+use crew_core::{Channel, RoleId, StallEvent, StallKind, StallStatus, Timestamp};
 use serde_json::Value;
 use tracing::{event, Level};
 
 use crate::roster::RosterClient;
-
-/// What kind of coordination stall the detector found (issue #48).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StallKind {
-    /// A cycle of unanswered questions: the crew is waiting on itself.
-    Deadlock,
-    /// One agent has waited past the threshold for another to answer a
-    /// question.
-    UnansweredQuestion,
-    /// A task sits in a held state past the threshold, with no forward motion.
-    LedgerStall,
-}
-
-impl StallKind {
-    /// The stall's stable label, for logs and diagnostics.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Deadlock => "deadlock",
-            Self::UnansweredQuestion => "unanswered_question",
-            Self::LedgerStall => "ledger_stall",
-        }
-    }
-}
 
 /// A detected coordination stall: the crew stuck waiting on itself, not one
 /// dead agent.
@@ -623,17 +599,18 @@ impl StallMonitor {
     /// Runs the scan loop until `stop` fires (or the fleet drops, disconnecting
     /// it).
     pub(crate) fn run(self, stop: &Receiver<()>) {
-        // Stalls already escalated, so a persistent one is reported once; a stall that
-        // clears is forgotten, so a recurrence is escalated afresh.
-        let mut reported: BTreeSet<String> = BTreeSet::new();
+        // The stalls reported on the previous scan, keyed for a stable identity:
+        // a persistent one is escalated once, and one that clears is surfaced as
+        // resolved and forgotten, so a recurrence is escalated afresh.
+        let mut reported: BTreeMap<String, Stall> = BTreeMap::new();
         while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(self.scan_interval) {
             self.scan(&mut reported);
         }
     }
 
-    /// One scan: read the recent history, detect stalls, and escalate the new
-    /// ones.
-    fn scan(&self, reported: &mut BTreeSet<String>) {
+    /// One scan: read the recent history, detect stalls, and surface the ones
+    /// that newly appeared or have since resolved.
+    fn scan(&self, reported: &mut BTreeMap<String, Stall>) {
         let events = match self.roster.history_since(self.lookback_start()) {
             Ok(events) => events,
             // A transient broker read failure is not fatal: skip this scan and retry.
@@ -650,14 +627,51 @@ impl StallMonitor {
         let now = Timestamp::now();
         let stalls = detect_stalls(&events, &self.roles, now, self.timeout);
         let current: BTreeSet<String> = stalls.iter().map(Stall::key).collect();
+
+        // Newly detected stalls: escalate to the operator and surface on the stream.
         for stall in &stalls {
-            if reported.insert(stall.key()) {
+            if !reported.contains_key(&stall.key()) {
                 escalate(stall);
+                self.publish(stall, StallStatus::Detected);
             }
         }
-        // Forget stalls that have resolved, so the same shape can be escalated again.
-        reported.retain(|key| current.contains(key));
+        // Stalls that were reported before but are gone now: surface as resolved,
+        // so a watcher can clear them.
+        for (key, stall) in reported.iter() {
+            if !current.contains(key) {
+                self.publish(stall, StallStatus::Resolved);
+            }
+        }
+
+        // Track exactly the current stalls, so next scan escalates only what is new.
+        *reported = stalls
+            .iter()
+            .map(|stall| (stall.key(), stall.clone()))
+            .collect();
         *self.stalls.lock().unwrap_or_else(PoisonError::into_inner) = stalls;
+    }
+
+    /// Surfaces a stall on the stream as a `stall` event (`POST /stall`, issue
+    /// #120), so `crew notify` and the `crew top` cockpit see it live.
+    ///
+    /// A broker write failure is not fatal: the stall is already escalated to
+    /// the operator through the log and `Fleet::stalls`, so a missed stream
+    /// event degrades quietly rather than taking the monitor down.
+    fn publish(&self, stall: &Stall, status: StallStatus) {
+        let event = StallEvent {
+            kind: stall.kind,
+            status,
+            roles: stall.roles.clone(),
+            detail: stall.detail.clone(),
+        };
+        if let Err(err) = self.roster.report_stall(&event) {
+            event!(
+                name: "supervisor.stall.publish.failed",
+                Level::DEBUG,
+                error = %err,
+                "could not surface the stall on the stream; it is still logged and recorded",
+            );
+        }
     }
 
     /// The start of the history window to scan: far enough back to see a wait

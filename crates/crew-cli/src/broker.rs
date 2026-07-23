@@ -20,7 +20,8 @@ use crew_substrate::{
     broker::Config as BrokerConfig,
     core::{
         Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind,
-        MessageKind, Sender, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
+        MessageKind, Sender, StallEvent, StallStatus, TelemetryEvent, UsageEvent, Verdict,
+        VerificationEvent,
     },
 };
 use eyre::{eyre, Result, WrapErr};
@@ -257,7 +258,18 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Budget(budget) => ("budget", budget_body(budget)),
         EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
         EventKind::Usage(usage) => ("usage", usage_body(usage)),
+        EventKind::Stall(stall) => ("stall", stall_body(stall)),
     }
+}
+
+/// A short description of a coordination stall the monitor surfaced (issue
+/// #120).
+fn stall_body(stall: &StallEvent) -> String {
+    let verb = match stall.status {
+        StallStatus::Detected => "detected",
+        StallStatus::Resolved => "resolved",
+    };
+    format!("{verb} {}: {}", stall.kind.label(), stall.detail)
 }
 
 /// A short description of a shared-subscription usage reading (issue #56).

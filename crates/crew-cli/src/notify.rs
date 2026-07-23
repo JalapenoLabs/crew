@@ -18,14 +18,16 @@
 //!   recovery.
 //! - **The crew stands down** ([`Lifecycle::StoodDown`]): every role halts and
 //!   the mission is on hold.
+//! - **The crew is stalled** (a `stall` event, [`StallStatus::Detected`]): the
+//!   crew is stuck waiting on itself and needs the General (issue #48, #120). A
+//!   resolved stall is good news and stays quiet.
 //!
 //! Everything else (status, notes, orders, answers, artifacts, ordinary
 //! lifecycle such as `started` or `idle`, activity, board, boundary, and
-//! verification events) is routine and stays quiet by default. Two further
-//! moments in the issue's scope, an approval pending (issue #40) and a role
-//! stalled (surfaced on the stream as a later refinement of issue #48), light
-//! up here for free once their events reach the stream: extend [`moment_of`]
-//! and [`Moment`] and the rest of the pipeline carries them.
+//! verification events) is routine and stays quiet by default. One further
+//! moment in the issue's scope, an approval pending (issue #40), lights up here
+//! for free once its event reaches the stream: extend [`moment_of`] and
+//! [`Moment`] and the rest of the pipeline carries it.
 //!
 //! ## Configurable, quiet by default
 //!
@@ -51,7 +53,7 @@
 
 use std::{io::Write, process::Command};
 
-use crew_substrate::core::{Event, EventKind, Lifecycle, MessageKind, Sender};
+use crew_substrate::core::{Event, EventKind, Lifecycle, MessageKind, Sender, StallStatus};
 use eyre::Result;
 
 use crate::broker;
@@ -66,8 +68,8 @@ const MAX_DETAIL: usize = 160;
 /// An actionable moment: a stream event that changes what the General would do
 /// next.
 ///
-/// The `clap` value names (`question`, `died`, `stood-down`) are the tokens
-/// `--mute` accepts.
+/// The `clap` value names (`question`, `died`, `stood-down`, `stalled`) are the
+/// tokens `--mute` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Moment {
     /// A role asked a question and is waiting on a decision.
@@ -79,6 +81,10 @@ pub(crate) enum Moment {
     /// The crew stood down: every role halted and the mission is on hold.
     #[value(name = "stood-down")]
     CrewStoodDown,
+    /// The crew is stalled: it is stuck waiting on itself and needs the General
+    /// to unstick it (issue #48, #120).
+    #[value(name = "stalled")]
+    RoleStalled,
 }
 
 /// Which moments push a notification, and whether a push sounds the bell.
@@ -151,6 +157,11 @@ fn moment_of(event: &Event) -> Option<Moment> {
         },
         EventKind::Lifecycle(Lifecycle::Died) => Some(Moment::RoleDied),
         EventKind::Lifecycle(Lifecycle::StoodDown) => Some(Moment::CrewStoodDown),
+        // Only a newly detected stall pulls the General in; a resolved one is
+        // good news that needs no push.
+        EventKind::Stall(stall) if stall.status == StallStatus::Detected => {
+            Some(Moment::RoleStalled)
+        }
         _ => None,
     }
 }
@@ -175,6 +186,16 @@ fn render(event: &Event, moment: Moment) -> Notification {
             title: "crew: the crew stood down".to_owned(),
             body: "every role halted and the mission is on hold".to_owned(),
         },
+        Moment::RoleStalled => {
+            let detail = match &event.kind {
+                EventKind::Stall(stall) => elide(stall.detail.trim()),
+                _ => "the crew is stuck waiting on itself".to_owned(),
+            };
+            Notification {
+                title: "crew: the crew is stalled".to_owned(),
+                body: format!("coordination stall: {detail}"),
+            }
+        }
     }
 }
 
@@ -274,10 +295,24 @@ fn deliver_native(_notification: &Notification) {}
 mod tests {
     use crew_substrate::core::{
         Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId,
-        Sender, Timestamp,
+        Sender, StallEvent, StallKind, StallStatus, Timestamp,
     };
 
     use super::{moment_of, notification_for, Moment, NotifyPolicy};
+
+    /// A stall event from the crew carrying `kind`, `status`, and `detail`.
+    fn stall(kind: StallKind, status: StallStatus, detail: &str) -> Event {
+        event(
+            Sender::General,
+            "all-units",
+            EventKind::Stall(StallEvent {
+                kind,
+                status,
+                roles: vec![RoleId::new("backend"), RoleId::new("frontend")],
+                detail: detail.to_owned(),
+            }),
+        )
+    }
 
     /// An event from `from` on `channel` carrying `kind`.
     fn event(from: Sender, channel: &str, kind: EventKind) -> Event {
@@ -421,6 +456,74 @@ mod tests {
         assert!(
             notification.body.len() < long.len(),
             "the body is shorter than the raw question"
+        );
+    }
+
+    #[test]
+    fn a_detected_stall_is_an_actionable_moment() {
+        assert_eq!(
+            moment_of(&stall(
+                StallKind::Deadlock,
+                StallStatus::Detected,
+                "deadlock: backend waits on frontend, and frontend waits on backend"
+            )),
+            Some(Moment::RoleStalled)
+        );
+    }
+
+    #[test]
+    fn a_resolved_stall_stays_quiet() {
+        assert_eq!(
+            moment_of(&stall(
+                StallKind::Deadlock,
+                StallStatus::Resolved,
+                "the deadlock cleared"
+            )),
+            None,
+            "a resolved stall is good news and needs no push"
+        );
+    }
+
+    #[test]
+    fn a_stall_notification_names_the_cause() {
+        let policy = NotifyPolicy::new(vec![], true);
+        let notification = notification_for(
+            &stall(
+                StallKind::UnansweredQuestion,
+                StallStatus::Detected,
+                "backend has waited 12m for frontend to answer",
+            ),
+            &policy,
+        )
+        .expect("a detected stall is an actionable moment");
+        assert!(
+            notification.title.contains("stalled"),
+            "title: {}",
+            notification.title
+        );
+        assert!(
+            notification
+                .body
+                .contains("backend has waited 12m for frontend to answer"),
+            "body names the specific cause: {}",
+            notification.body
+        );
+    }
+
+    #[test]
+    fn a_muted_stall_does_not_notify() {
+        let policy = NotifyPolicy::new(vec![Moment::RoleStalled], true);
+        assert!(
+            notification_for(
+                &stall(
+                    StallKind::LedgerStall,
+                    StallStatus::Detected,
+                    "task `login` is stuck"
+                ),
+                &policy
+            )
+            .is_none(),
+            "a muted stall does not notify"
         );
     }
 }
