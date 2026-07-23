@@ -31,8 +31,10 @@ the agent just shells out to `crew` instead of calling a tool.
 | Command | Acts as | Mirrors |
 | --- | --- | --- |
 | `crew register` | registers the role and its lane on the roster | the MCP server's boot registration |
-| `crew send [--to ROLE] [--channel CHAN] BODY` | posts a message as the role | `crew_send` |
-| `crew inbox` | prints the messages addressed to the role | `crew_inbox` |
+| `crew send [--to ROLE] [--channel CHAN] BODY` | posts a note as the role | `crew_send` |
+| `crew ask [--to ROLE] [--channel CHAN] [--option TEXT]... BODY` | asks a typed question (the kind stall detection keys on) | `crew_ask` |
+| `crew answer [--to ROLE] [--channel CHAN] --in-reply-to ID BODY` | answers a question, naming its id | `crew_answer` |
+| `crew inbox` | prints the messages addressed to the role, each with its id | `crew_inbox` |
 | `crew roster` | lists the unit's roles, lanes, and liveness | `crew_roster` |
 
 A Codex agent participates like this:
@@ -57,7 +59,8 @@ self-filter the same way. These gaps remain, by the nature of a stateless CLI:
   open.
 - **No `crew_order` yet.** The MCP surface added `crew_order` for the commander to
   issue a structured order (issue #27); the shim does not expose it, so a shim agent
-  sends plain messages with `crew send` but cannot yet issue an order. A shim agent
+  sends notes, questions, and answers (`crew send` / `crew ask` / `crew answer`) but
+  cannot yet issue a structured order. A shim agent
   still reads orders addressed to it: `crew inbox` renders an order's structured detail
   the same way the MCP path does. Adding a `crew order` subcommand is a small follow-up.
 - **Operator-launched today.** `crew up` spawns a Claude process per role. Auto-spawning

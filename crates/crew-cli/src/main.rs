@@ -81,6 +81,36 @@ enum Command {
         /// The message text (markdown).
         body: String,
     },
+    /// Ask a typed question and wait on a decision (the kind coordination-stall
+    /// detection keys on), as this agent's role.
+    Ask {
+        /// Ask one role directly (its `@role` channel).
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+        /// Ask on a named channel: `all-units`, or a pair like
+        /// `frontend+backend`.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// A suggested answer to offer; repeat for several.
+        #[arg(long = "option", value_name = "TEXT")]
+        options: Vec<String>,
+        /// The question (markdown).
+        body: String,
+    },
+    /// Answer a teammate's question, naming the question id from your inbox.
+    Answer {
+        /// Answer one role directly (usually the asker's `@role` channel).
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+        /// Answer on a named channel, if the question was asked on one.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// The id of the question being answered (shown in `crew inbox`).
+        #[arg(long, value_name = "ID")]
+        in_reply_to: String,
+        /// The answer (markdown).
+        body: String,
+    },
     /// Read the messages currently addressed to this agent's role.
     Inbox,
     /// Tail a role's self-filtered inbox stream live, or the whole firehose.
@@ -297,6 +327,18 @@ fn main() -> Result<()> {
         Command::Down => down::run(),
         Command::Register => shim::register(),
         Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
+        Command::Ask {
+            to,
+            channel,
+            options,
+            body,
+        } => shim::ask(to.as_deref(), channel.as_deref(), &body, &options),
+        Command::Answer {
+            to,
+            channel,
+            in_reply_to,
+            body,
+        } => shim::answer(to.as_deref(), channel.as_deref(), &body, &in_reply_to),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
         Command::Notify {

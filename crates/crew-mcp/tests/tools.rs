@@ -204,3 +204,75 @@ fn a_brief_defaults_to_the_commander_who_fans_orders_out() {
         "the commander never sees its own order echoed",
     );
 }
+
+#[test]
+fn an_agent_asks_a_typed_question_and_receives_a_typed_answer() {
+    let broker = TestBroker::start();
+    broker.register("backend", &["api/"]);
+    broker.register("frontend", &["web/"]);
+
+    let mut backend = broker.client("backend");
+    let mut frontend = broker.client("frontend");
+
+    // backend asks frontend a typed question, the kind stall detection keys on.
+    backend
+        .ask(
+            Some("frontend"),
+            None,
+            "which auth library?",
+            &["jwt".to_owned(), "sessions".to_owned()],
+        )
+        .unwrap();
+
+    // frontend reads it as a `question` (not a note), carrying an id to answer.
+    let inbox = frontend.inbox().unwrap();
+    assert_eq!(inbox.len(), 1);
+    let question = &inbox[0];
+    assert_eq!(
+        question.kind, "question",
+        "it arrives as a typed question, not a note"
+    );
+    assert_eq!(question.from, "backend");
+    assert_eq!(question.body, "which auth library?");
+    assert!(
+        !question.id.is_empty(),
+        "the question carries an id to reply to"
+    );
+
+    // frontend answers, naming the question id; the answer threads back to backend.
+    frontend
+        .answer(Some("backend"), None, "use jwt", &question.id)
+        .unwrap();
+    let reply = backend.inbox().unwrap();
+    assert_eq!(reply.len(), 1);
+    assert_eq!(reply[0].kind, "answer", "it arrives as a typed answer");
+    assert_eq!(reply[0].from, "frontend");
+    assert_eq!(reply[0].body, "use jwt");
+}
+
+#[test]
+fn a_typed_question_lands_on_the_stream_for_stall_detection() {
+    // The point of typed questions: the coordination-stall detector (issue #48)
+    // keys on `question` events. Prove one lands on the broker as a question kind.
+    let broker = TestBroker::start();
+    broker.register("backend", &["api/"]);
+    let backend = broker.client("backend");
+
+    backend
+        .ask(Some("frontend"), None, "what token TTL?", &[])
+        .unwrap();
+
+    let text = ureq::get(&format!("{}/history?kind=message", broker.base))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let events = history["events"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["kind"]["data"]["kind"] == "question"),
+        "the question is on the stream as a `question` event: {events:?}"
+    );
+}

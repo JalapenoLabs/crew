@@ -122,6 +122,70 @@ impl Broker {
         self.post_message(target.name().as_str(), &payload)
     }
 
+    /// Asks a typed `question` as this role, to a role, a channel, or the
+    /// commander by default (issue #123).
+    ///
+    /// A `question` is the message kind the coordination-stall detector keys on
+    /// (issue #48), so asking through this, rather than a plain `crew_send`
+    /// note, is what lets a real deadlock surface on the stream. `options` are
+    /// suggested answers, if any. The target follows the same one addressing
+    /// rule as [`send`](Broker::send).
+    ///
+    /// # Errors
+    /// Returns a message if the target is not routable, or the broker rejects
+    /// the post or cannot be reached.
+    pub fn ask(
+        &self,
+        to: Option<&str>,
+        channel: Option<&str>,
+        body: &str,
+        options: &[String],
+    ) -> Result<String, String> {
+        let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
+            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
+                .to_owned()
+        })?;
+        let payload = json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": "question",
+            "options": options,
+            "body": body,
+        });
+        self.post_message(target.name().as_str(), &payload)
+    }
+
+    /// Answers a `question` as this role, naming the message it replies to
+    /// (issue #123).
+    ///
+    /// `in_reply_to` is the id of the question being answered, as shown in the
+    /// asker's inbox (`crew_inbox`); it threads the reply to its question and,
+    /// as a substantive reply from the blocker, clears the wait the stall
+    /// detector was tracking. The target follows the same addressing rule as
+    /// [`send`](Broker::send).
+    ///
+    /// # Errors
+    /// Returns a message if the target is not routable, `in_reply_to` is not a
+    /// message id, or the broker rejects the post or cannot be reached.
+    pub fn answer(
+        &self,
+        to: Option<&str>,
+        channel: Option<&str>,
+        body: &str,
+        in_reply_to: &str,
+    ) -> Result<String, String> {
+        let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
+            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
+                .to_owned()
+        })?;
+        let payload = json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": "answer",
+            "in_reply_to": in_reply_to,
+            "body": body,
+        });
+        self.post_message(target.name().as_str(), &payload)
+    }
+
     /// Issues an order as this role to `to`, giving the specialist a scoped
     /// task.
     ///
@@ -600,6 +664,7 @@ impl Broker {
             return None;
         }
         Some(InboxItem {
+            id: message.id.to_string(),
             from: sender_label(&event.from),
             channel: event.channel.as_str().to_owned(),
             kind: message_kind_label(&message.kind).to_owned(),
@@ -787,6 +852,9 @@ fn addressed_message_id(event: &Event, role: &RoleId) -> Option<MessageId> {
 /// One message addressed to the role, for display.
 #[derive(Debug)]
 pub struct InboxItem {
+    /// The message's id, so a reply can reference it: `crew_answer` names the
+    /// question it answers by this id.
+    pub id: String,
     /// Who sent it: a role's id, or `general`.
     pub from: String,
     /// The channel it was sent on.
