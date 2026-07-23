@@ -28,6 +28,7 @@ use crate::lifecycle::{Fleet, LifecyclePolicy};
 use crate::mcp::{agent_turn_argv, locate_server, register_server, CLAUDE_BIN};
 use crate::provision;
 use crate::roster::RosterClient;
+use crate::worktree::{self, Worktree};
 
 /// How often a monitor thread checks whether its agent process has exited.
 ///
@@ -147,7 +148,8 @@ impl Supervisor {
         let server = locate_server()?;
         register_server(&server)?;
 
-        let prepared = self.prepare(cards, None)?;
+        // The card-based entry has no config, so no repos and no worktree isolation.
+        let (prepared, _worktrees) = self.prepare(cards, None)?;
         let roster = RosterClient::new(self.broker.base_url());
         Crew::spawn(&roster, prepared)
     }
@@ -171,32 +173,55 @@ impl Supervisor {
         register_server(&server)?;
 
         let cards = config.to_cards(&self.broker);
-        let prepared = self.prepare(&cards, Some(config))?;
+        // With `worktrees` on, each role gets its own worktree of the crew's repos, and
+        // the fleet cleans them up on stand-down.
+        let (prepared, worktrees) = self.prepare(&cards, Some(config))?;
         let roster = RosterClient::new(self.broker.base_url());
         let policy = LifecyclePolicy {
             idle_timeout: config.idle_stop,
             ..LifecyclePolicy::default()
         };
-        Ok(Fleet::launch(&roster, prepared, policy))
+        Ok(Fleet::launch(&roster, prepared, policy).with_worktrees(worktrees))
     }
 
-    /// Provisions each card and builds its spawn command into a [`PreparedAgent`].
+    /// Provisions each card and builds its spawn command into a [`PreparedAgent`],
+    /// isolating each role in its own worktree when the config opts in (issue #43).
     ///
     /// When `config` is given, each command runs the role's configured model (its
     /// override or the crew default), so the same provisioning serves the eager
     /// [`up`](Supervisor::up) and the lifecycle-managed [`launch`](Supervisor::launch).
+    /// With `worktrees` on and repos configured, each role works in its own git
+    /// worktree of those repos; the returned worktrees are the ones to clean up on
+    /// stand-down. A failure part-way cleans up the worktrees already created.
     fn prepare(
         &self,
         cards: &[RoleCard],
         config: Option<&CrewConfig>,
-    ) -> Result<Vec<PreparedAgent>> {
+    ) -> Result<(Vec<PreparedAgent>, Vec<Worktree>)> {
+        // Isolation is opt-in and needs repos to isolate.
+        let repos: Vec<PathBuf> = config
+            .filter(|config| config.worktrees)
+            .map(|config| config.repos.iter().map(PathBuf::from).collect())
+            .unwrap_or_default();
+
         let mut prepared = Vec::with_capacity(cards.len());
+        let mut worktrees = Vec::new();
         for card in cards {
             let dir = self.root.join(card.role.as_str());
             std::fs::create_dir_all(&dir)
                 .wrap_err_with(|| format!("could not create agent dir {}", dir.display()))?;
             let launch = provision(card, &dir)?;
-            let mut command = agent_command(&launch, &dir);
+
+            let cwd = match isolate_role(&card.role, &dir, &repos, &mut worktrees) {
+                Ok(cwd) => cwd,
+                Err(err) => {
+                    // Undo the worktrees created so far, so a failed bring-up leaves none.
+                    worktree::clean_all(&worktrees);
+                    return Err(err);
+                }
+            };
+
+            let mut command = agent_command(&launch, &cwd);
             if let Some(config) = config {
                 command.args.push("--model".to_owned());
                 command.args.push(config.model_for(&card.role).to_owned());
@@ -207,8 +232,44 @@ impl Supervisor {
                 command,
             });
         }
-        Ok(prepared)
+        Ok((prepared, worktrees))
     }
+}
+
+/// The working directory for a role: its own worktree of each configured repo, or the
+/// agent directory when isolation is off.
+///
+/// With one repo the role works directly in that worktree; with several, the agent
+/// directory holds each repo's worktree as a subdirectory. Created worktrees are pushed
+/// onto `worktrees`, so the caller can clean them up.
+fn isolate_role(
+    role: &RoleId,
+    dir: &Path,
+    repos: &[PathBuf],
+    worktrees: &mut Vec<Worktree>,
+) -> Result<PathBuf> {
+    if repos.is_empty() {
+        return Ok(dir.to_path_buf());
+    }
+    let start = worktrees.len();
+    for repo in repos {
+        let dest = dir.join(repo_name(repo));
+        worktrees.push(Worktree::create(repo, role, &dest)?);
+    }
+    let cwd = if worktrees.len() - start == 1 {
+        worktrees[start].path().to_path_buf()
+    } else {
+        dir.to_path_buf()
+    };
+    Ok(cwd)
+}
+
+/// A repo's short name, for its worktree subdirectory: the last path component.
+fn repo_name(repo: &Path) -> String {
+    repo.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "repo".to_owned())
 }
 
 /// A running crew: the spawned agent processes and their broker registration.

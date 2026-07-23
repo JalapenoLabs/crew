@@ -28,6 +28,7 @@ mod lifecycle;
 mod mcp;
 mod roster;
 mod spawn;
+mod worktree;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,7 @@ pub use roster::{Liveness, RosterClient};
 pub use spawn::{
     agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
 };
+pub use worktree::Worktree;
 
 /// The file name a provisioned role card is written under, in the agent's directory.
 const CARD_FILE_NAME: &str = "role-card.toml";

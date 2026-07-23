@@ -45,6 +45,7 @@ use tracing::{event, Level};
 
 use crate::roster::{Liveness, RosterClient};
 use crate::spawn::{spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent};
+use crate::worktree::Worktree;
 
 /// How often a driver polls its agent, and the watchdog scans the fleet.
 ///
@@ -162,6 +163,9 @@ pub struct Fleet {
     incidents: Arc<Mutex<Vec<Incident>>>,
     watchdog_stop: Sender<()>,
     watchdog: Option<JoinHandle<()>>,
+    /// The per-role git worktrees to clean up on stand-down (issue #43); empty unless
+    /// the crew opted into worktree isolation.
+    worktrees: Vec<Worktree>,
 }
 
 impl Fleet {
@@ -206,7 +210,18 @@ impl Fleet {
             incidents,
             watchdog_stop,
             watchdog: Some(watchdog),
+            worktrees: Vec::new(),
         }
+    }
+
+    /// Hands the fleet the per-role worktrees to clean up on stand-down (issue #43).
+    ///
+    /// The supervisor creates them before launch; the fleet owns them so it can remove
+    /// each unchanged one once its agent has stopped (see [`shutdown`](Fleet::shutdown)).
+    #[must_use]
+    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
+        self.worktrees = worktrees;
+        self
     }
 
     /// Starts (or restarts) `role`'s agent: lazy start on first work, restart on demand.
@@ -271,7 +286,12 @@ impl Fleet {
             .clone()
     }
 
-    /// Stops the fleet: stands every agent down, deregisters its role, ends the watchdog.
+    /// Stops the fleet: stands every agent down, deregisters its role, ends the
+    /// watchdog, and cleans up each role's worktree.
+    ///
+    /// Worktrees are removed only after every agent process has stopped (the driver
+    /// joins below), so no cleanup races a running agent. An unchanged worktree is
+    /// removed; one with uncommitted changes is kept for integration (issue #43).
     pub fn shutdown(mut self) {
         for driver in &self.drivers {
             let _ = driver.commands.send(Command::Shutdown);
@@ -285,6 +305,8 @@ impl Fleet {
         if let Some(handle) = self.watchdog.take() {
             let _ = handle.join();
         }
+        // Every agent has stopped, so its worktree is no longer in use: clean it up.
+        crate::worktree::clean_all(&self.worktrees);
     }
 
     /// The driver for `role`, if present.
