@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::state::AppState;
 use crate::{
-    board, boundary, briefing, budget, control, events, gate, history, inbox, roster, stats,
+    board, boundary, briefing, budget, control, events, gate, history, inbox, roster, stats, usage,
 };
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
@@ -33,6 +33,7 @@ pub(crate) fn build(state: AppState) -> Router {
         .merge(boundary::routes())
         .merge(budget::routes())
         .merge(stats::routes())
+        .merge(usage::routes())
         .merge(gate::routes())
         .merge(board::routes())
         .merge(briefing::routes())

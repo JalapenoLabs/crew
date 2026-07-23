@@ -54,6 +54,8 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   hit (role or crew).
 - `telemetry` a per-turn token-and-cost usage report (issue #55): the role, the tokens the
   turn spent, and its cost in micro-USD. Always emitted, whether or not a budget is set.
+- `usage` a shared-subscription usage reading and its auto-pause (issue #56): the window
+  percent, whether new work is paused, and (while paused) when the window resets.
 
 ## The views
 
@@ -311,6 +313,25 @@ instant, so a live role's time keeps climbing. Like the situation board, the rol
 projection of the durable log, so it is rebuilt on a restart rather than kept separately.
 This is the data the `crew top` cockpit (issue #51) and the Seraphim per-role stats render,
 mirroring Seraphim's per-railway stats.
+
+## Subscription usage auto-pause
+
+A crew shares one subscription, so it must not exhaust the shared window (issue #56). The
+broker keeps **one usage gauge** across the crew, mirroring Seraphim's usage auto-pause. The
+supervisor reports the window's fill against the shared limit (`POST /usage`, the reading
+plus when the window resets); the detection of that fill from the agents' rate-limit output
+is the stream-json parser's (issue #24), and `POST /usage` is the surface it reports to.
+
+When a reading reaches the threshold (`CREW_BROKER_USAGE_THRESHOLD`, default 90 percent), the
+broker auto-pauses new work and publishes a `usage` event carrying the reset time, so the
+pause is visible on the stream, never silent. The auto-pause gates every role, since the
+subscription is shared; it is distinct from the manual pause control (issue #41), so it never
+clobbers a manual pause and a reset never lifts one. The gate lifts lazily at the reset
+instant (the pause event advertises it), so work auto-resumes with no further reading. The
+operator resumes early with `crew resume`, the one escape hatch, which lifts a manual pause
+and the usage auto-pause together and surfaces the lift as a `usage` event. `GET /usage` (and
+`crew usage`) reads the gauge: the latest reading, the threshold, and any pause. The usage
+percent rides the wire as a whole number (`0..=100`) so the event stays exactly comparable.
 
 ## Runewood
 

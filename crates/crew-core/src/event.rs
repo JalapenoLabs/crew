@@ -140,8 +140,9 @@ impl Event {
 /// `activity` is an agent's own work parsed from its stream-json, `boundary` is a lane
 /// crossing (issue #46), `verification` is a step through the adversarial done-gate
 /// (issue #47), `board` is a change to the shared situation board (issue #49),
-/// `budget` is a token-spend report against the crew budget (issue #54), and
-/// `telemetry` is a per-turn token-and-cost usage report (issue #55).
+/// `budget` is a token-spend report against the crew budget (issue #54),
+/// `telemetry` is a per-turn token-and-cost usage report (issue #55), and
+/// `usage` is a shared-subscription usage reading and its auto-pause (issue #56).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -161,6 +162,8 @@ pub enum EventKind {
     Budget(BudgetEvent),
     /// A per-turn usage report: the tokens and cost a role spent on a turn (issue #55).
     Telemetry(TelemetryEvent),
+    /// A shared-subscription usage reading, and whether it auto-paused the crew (issue #56).
+    Usage(UsageEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -468,6 +471,27 @@ pub struct TelemetryEvent {
     pub tokens: u64,
     /// The turn's cost in micro-USD (millionths of a dollar).
     pub cost_micro_usd: u64,
+}
+
+/// A shared-subscription usage reading, and whether it auto-paused the crew (issue #56).
+///
+/// The crew shares one subscription, so the broker keeps one usage gauge. The supervisor
+/// reports the window's fill against the shared limit; the broker publishes a `usage` event
+/// when a reading auto-pauses the crew (crossing the threshold) or lifts the pause, so the
+/// moment is visible on the stream, never silent. A paused reading carries the
+/// [`window_reset`](UsageEvent::window_reset) the pause lifts at, so an observer knows when
+/// work resumes without polling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageEvent {
+    /// The window's fill against the shared subscription limit, as a percent (`0..=100`).
+    pub percent: u8,
+    /// When the usage window resets and the auto-pause lifts. `Some` on a pause, `None`
+    /// when the pause lifts (the operator resumed early).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_reset: Option<Timestamp>,
+    /// Whether the crew is auto-paused on usage: `true` when this reading engaged the pause,
+    /// `false` when it lifted (the window reset, or the operator resumed early).
+    pub paused: bool,
 }
 
 impl BoardSection {

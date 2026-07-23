@@ -12,6 +12,12 @@ pub const DEFAULT_PORT: u16 = 2739;
 /// The default on-disk state directory, relative to the working directory.
 pub const DEFAULT_STATE_DIR: &str = ".crew";
 
+/// The default shared-subscription usage percent at which new work auto-pauses (issue #56).
+///
+/// Ninety percent leaves headroom to finish an in-flight turn before the window is spent,
+/// mirroring Seraphim's usage auto-pause. A crew retunes it with `CREW_BROKER_USAGE_THRESHOLD`.
+pub const DEFAULT_USAGE_THRESHOLD: u8 = 90;
+
 /// The broker's runtime configuration.
 ///
 /// Loopback-only by default: [`host`](Config::host) is `127.0.0.1` and
@@ -40,6 +46,10 @@ pub struct Config {
     /// Secret values masked out of every message before it is stored or streamed.
     /// Empty by default; a leaked token never reaches the log or a subscriber.
     pub secrets: Vec<String>,
+    /// The shared-subscription usage percent at which new work auto-pauses (issue #56).
+    /// Defaults to [`DEFAULT_USAGE_THRESHOLD`]; a value at or above 100 disables the
+    /// auto-pause, since a reading never reaches it.
+    pub usage_threshold: u8,
 }
 
 impl Default for Config {
@@ -50,6 +60,7 @@ impl Default for Config {
             state_dir: PathBuf::from(DEFAULT_STATE_DIR),
             allow_non_local: false,
             secrets: Vec::new(),
+            usage_threshold: DEFAULT_USAGE_THRESHOLD,
         }
     }
 }
@@ -58,12 +69,14 @@ impl Config {
     /// Builds a [`Config`] from the environment, falling back to the defaults.
     ///
     /// Reads `CREW_BROKER_HOST`, `CREW_BROKER_PORT`, `CREW_BROKER_STATE_DIR`,
-    /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it), and
-    /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to mask).
+    /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it),
+    /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to mask), and
+    /// `CREW_BROKER_USAGE_THRESHOLD` (the usage percent at which new work auto-pauses).
     ///
     /// # Errors
-    /// Returns an error if `CREW_BROKER_HOST` is not a valid IP address or
-    /// `CREW_BROKER_PORT` is not a valid port number.
+    /// Returns an error if `CREW_BROKER_HOST` is not a valid IP address,
+    /// `CREW_BROKER_PORT` is not a valid port number, or `CREW_BROKER_USAGE_THRESHOLD`
+    /// is not a percent.
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
         if let Ok(host) = env::var("CREW_BROKER_HOST") {
@@ -86,6 +99,11 @@ impl Config {
         // hold several secrets without a delimiter that a secret might contain.
         if let Ok(secrets) = env::var("CREW_BROKER_SECRETS") {
             config.secrets = secrets.split_whitespace().map(str::to_owned).collect();
+        }
+        if let Ok(threshold) = env::var("CREW_BROKER_USAGE_THRESHOLD") {
+            config.usage_threshold = threshold
+                .parse()
+                .wrap_err("CREW_BROKER_USAGE_THRESHOLD is not a percent (0..=100)")?;
         }
         Ok(config)
     }

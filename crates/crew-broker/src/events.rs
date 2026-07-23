@@ -412,7 +412,8 @@ mod tests {
             | EventKind::Verification(_)
             | EventKind::Board(_)
             | EventKind::Budget(_)
-            | EventKind::Telemetry(_) => {
+            | EventKind::Telemetry(_)
+            | EventKind::Usage(_) => {
                 panic!("expected a message")
             }
         };
