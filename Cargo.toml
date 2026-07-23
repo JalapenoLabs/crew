@@ -47,9 +47,9 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 # Adapt a broadcast receiver into a Stream for axum's SSE fan-out.
 tokio-stream = { version = "0.1", features = ["sync"] }
-# A synchronous HTTP client for the MCP server's calls to the broker. http-only
-# (no TLS backend) since the broker is localhost, so a fresh clone builds without a
-# system OpenSSL (M-OOBE).
+# A synchronous HTTP client for the CLI (issue #15) and the MCP server (issue #17)
+# calling the broker. http-only (no TLS backend) since the broker is localhost, so a
+# fresh clone builds without a system OpenSSL (M-OOBE).
 ureq = { version = "2", default-features = false }
 # The CLI argument parser: derive the `crew` command surface (up, down, ...).
 clap = { version = "4", features = ["derive"] }
