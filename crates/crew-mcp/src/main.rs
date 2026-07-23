@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     // lane; stdout is reserved for the JSON-RPC protocol.
     eprintln!("{}", card.briefing());
 
-    let broker = Broker::new(
+    let mut broker = Broker::new(
         card.broker.base_url(),
         card.role.clone(),
         card.commander.clone(),
@@ -46,7 +46,14 @@ fn main() -> Result<()> {
         );
     }
 
-    let mut server = Server::new(broker);
+    // Subscribe to the live inbox so `crew_inbox` drains buffered events instead of
+    // refetching the whole history each call (issue #76). If streaming is unavailable the
+    // pull-based read remains the fallback, so the tool still works.
+    if let Err(reason) = broker.subscribe() {
+        eprintln!("crew-mcp: inbox streaming unavailable, using pull reads: {reason}");
+    }
+
+    let mut server = Server::new(broker, card.owned_paths.clone(), card.lane_enforcement);
     server
         .serve(BufReader::new(stdin().lock()), stdout().lock())
         .wrap_err("the MCP server exited with an I/O error")

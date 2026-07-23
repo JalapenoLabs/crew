@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::{BudgetScope, Spend};
 use crate::channel::Channel;
 use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 use crate::time::Timestamp;
@@ -133,10 +134,15 @@ impl Event {
     }
 }
 
-/// The three kinds of item on the event stream (see `docs/observability.md`).
+/// A typed item on the crew event stream (see `docs/observability.md`).
 ///
-/// `message` is inter-agent communication, `lifecycle` is a supervised state
-/// change, and `activity` is an agent's own work parsed from its stream-json.
+/// `message` is inter-agent communication, `lifecycle` is a supervised state change,
+/// `activity` is an agent's own work parsed from its stream-json, `boundary` is a lane
+/// crossing (issue #46), `verification` is a step through the adversarial done-gate
+/// (issue #47), `board` is a change to the shared situation board (issue #49),
+/// `budget` is a token-spend report against the crew budget (issue #54),
+/// `telemetry` is a per-turn token-and-cost usage report (issue #55), and
+/// `usage` is a shared-subscription usage reading and its auto-pause (issue #56).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -146,6 +152,18 @@ pub enum EventKind {
     Lifecycle(Lifecycle),
     /// An agent's own work, parsed from its `claude -p` stream-json.
     Activity(Activity),
+    /// A role reaching outside its owned lane (issue #46).
+    Boundary(BoundaryEvent),
+    /// A step through the adversarial done-gate: a submission or a verdict (issue #47).
+    Verification(VerificationEvent),
+    /// A change to the shared situation board: an entry recorded or retracted (issue #49).
+    Board(BoardEvent),
+    /// A token-spend report against the crew budget, and any cap it hit (issue #54).
+    Budget(BudgetEvent),
+    /// A per-turn usage report: the tokens and cost a role spent on a turn (issue #55).
+    Telemetry(TelemetryEvent),
+    /// A shared-subscription usage reading, and whether it auto-paused the crew (issue #56).
+    Usage(UsageEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -202,6 +220,28 @@ pub enum MessageKind {
     },
     /// Freeform prose for anything the other kinds do not cover.
     Note,
+    /// Steers a role mid-task without stopping it: the General's `crew redirect`
+    /// (issue #38). The role honors it at its next tool boundary, keeping its current
+    /// task and adjusting course; the steering text is the [`body`](Message::body).
+    Redirect,
+    /// Halts a role's current work and re-tasks it: the General's `crew belay`
+    /// (issue #38). The role stops what it is doing and takes the [`body`](Message::body)
+    /// as its new order.
+    Belay,
+}
+
+impl MessageKind {
+    /// Whether this is a General directive the receiving role must honor at once,
+    /// at its next tool boundary rather than at its leisure.
+    ///
+    /// A [`Redirect`](Self::Redirect) steers a role without stopping it; a
+    /// [`Belay`](Self::Belay) halts its current work and re-tasks it. Both are the
+    /// General interjecting to steer a running agent, so a front-end flags them and an
+    /// agent acts on them immediately (see `docs/communication.md`, command and control).
+    #[must_use]
+    pub fn is_directive(&self) -> bool {
+        matches!(self, Self::Redirect | Self::Belay)
+    }
 }
 
 /// What a [`MessageKind::Artifact`] reference points to (see `docs/communication.md`).
@@ -235,6 +275,14 @@ pub enum Lifecycle {
     Died,
     /// The defibrillator revived the agent after a death, within its recovery budget.
     Recovered,
+    /// The role was paused: it pulls no new work until resumed (issue #41). The
+    /// General's brake, per role or crew-wide.
+    Paused,
+    /// The role was resumed: it may pull work again (issue #41).
+    Resumed,
+    /// The crew was stood down: every role halts at once and the state is preserved so
+    /// the crew is recoverable (issue #41). The General's emergency kill switch.
+    StoodDown,
 }
 
 /// An agent's own work item, parsed from its `claude -p` stream-json.
@@ -260,9 +308,210 @@ pub enum Activity {
     },
 }
 
+/// A role reaching outside its owned lane: a boundary crossing (issue #46).
+///
+/// Lane enforcement (`docs/roles.md`, ownership model) warns or blocks a role editing a
+/// path outside its owned boundaries, and records the crossing here so the operator sees
+/// it on the stream. A genuine cross-lane need should go through the commander, not a
+/// silent edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryEvent {
+    /// The role that reached outside its lane.
+    pub role: RoleId,
+    /// The out-of-lane path it reached for.
+    pub path: String,
+    /// Whether the crew's policy blocked the edit (`true`) or only warned (`false`).
+    pub blocked: bool,
+}
+
+/// A step through the adversarial done-gate: a submission, and the verdict on it
+/// (issue #47).
+///
+/// "Done" is verified, not asserted. When a role believes its task meets the acceptance
+/// criteria it submits the work rather than declaring it done; an independent role then
+/// tries to break it against those criteria and returns a [`Verdict`]. Only a
+/// [`Passed`](Verdict::Passed) verdict from a role other than the owner marks the task
+/// done, and a [`Failed`](Verdict::Failed) verdict carries the specific failure back to
+/// the owner as an actionable handback (see `docs/roles.md`, the done-gate).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationEvent {
+    /// The task under the gate, named by its title (the order's title).
+    pub task: String,
+    /// The role whose work is under verification: the one that submitted it.
+    pub owner: RoleId,
+    /// The independent role that returned the verdict; absent on the submission itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<RoleId>,
+    /// Where the task stands in the gate.
+    pub verdict: Verdict,
+    /// The acceptance criteria being claimed (on a submission) or the specific failure
+    /// (on a failed verdict); empty when there is none.
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// A task's standing in the adversarial done-gate (issue #47).
+///
+/// It moves from [`Submitted`](Self::Submitted) to either [`Passed`](Self::Passed), when
+/// an independent verifier could not break it (the task is done), or
+/// [`Failed`](Self::Failed), when a verifier broke it (the work returns to the owner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// The owner submitted the work; it awaits an independent verifier.
+    Submitted,
+    /// An independent verifier could not break it against the acceptance criteria: done.
+    Passed,
+    /// A verifier broke it; the work returns to the owner with the specific failure.
+    Failed,
+}
+
+/// A change to the shared situation board: an entry recorded or retracted (issue #49).
+///
+/// The board is the crew's durable memory, distinct from the transient message stream:
+/// agreed interfaces, decisions and their rationale, and known gotchas, so the crew stops
+/// re-deriving and re-litigating what is settled. Every change is a first-class `board`
+/// event, so the board is auditable and rebuildable from the log across a restart (see
+/// `docs/communication.md`, context management).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardEvent {
+    /// The entry's stable key: a topic the crew agrees on, such as `auth-strategy` or
+    /// `api-error-format`. Recording the same key again updates the entry.
+    pub key: String,
+    /// Which section of the board the entry belongs to.
+    pub section: BoardSection,
+    /// The role that recorded or retracted the entry.
+    pub author: RoleId,
+    /// The entry's content: a decision and its rationale, an agreed interface, or a
+    /// gotcha. Empty on a retraction.
+    #[serde(default)]
+    pub body: String,
+    /// Whether this change retracts the entry, removing it from the board.
+    #[serde(default)]
+    pub retracted: bool,
+}
+
+/// A section of the shared situation board (issue #49).
+///
+/// The three kinds of durable memory the crew keeps: what it decided, what interfaces it
+/// agreed on, and what gotchas it hit, so a new or returning role reads them rather than
+/// re-deriving them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardSection {
+    /// A decision the crew agreed on, with its rationale.
+    Decision,
+    /// An agreed interface or contract between roles.
+    Interface,
+    /// A known gotcha or pitfall, so the crew does not rediscover it.
+    Gotcha,
+}
+
+/// A token-spend report against the crew budget, and any cap it hit (issue #54).
+///
+/// The supervisor publishes one as it records a role's spend, so a UI reads spend against
+/// budget off the stream and a cap hit is never silent. When [`breach`](BudgetEvent::breach)
+/// is set, the report marks the moment the supervisor idle-stops the role (a [`Role`] cap)
+/// or the crew (the [`Crew`] budget) rather than overrun.
+///
+/// [`Role`]: BudgetScope::Role
+/// [`Crew`]: BudgetScope::Crew
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetEvent {
+    /// The role whose spend this report is about.
+    pub role: RoleId,
+    /// The role's cumulative token spend.
+    pub role_spent: u64,
+    /// The role's own cap, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_cap: Option<u64>,
+    /// The crew's cumulative token spend across every role.
+    pub crew_spent: u64,
+    /// The crew-wide budget, if the crew has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_budget: Option<u64>,
+    /// The ceiling this spend hit, if any: the role idle-stops (a [`Role`] breach) or the
+    /// whole crew does (a [`Crew`] breach). `None` is a report still within budget.
+    ///
+    /// [`Role`]: BudgetScope::Role
+    /// [`Crew`]: BudgetScope::Crew
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breach: Option<BudgetScope>,
+}
+
+impl From<Spend> for BudgetEvent {
+    /// Renders a recorded [`Spend`] as the `budget` event that surfaces it on the stream.
+    fn from(spend: Spend) -> Self {
+        Self {
+            role: spend.role,
+            role_spent: spend.role_spent,
+            role_cap: spend.role_cap,
+            crew_spent: spend.crew_spent,
+            crew_budget: spend.crew_budget,
+            breach: spend.breach,
+        }
+    }
+}
+
+/// A per-turn usage report: the tokens and cost a role spent on one turn (issue #55).
+///
+/// The supervisor publishes one as it records each turn's usage, so per-role and aggregate
+/// spend is legible off the stream regardless of any budget. The broker folds these (with
+/// the role's working time, read from its `lifecycle` events) into the `GET /stats` rollup
+/// that feeds the cockpit and the Seraphim stats. The counts are per turn (incremental), so
+/// the rollup is their running sum.
+///
+/// Cost is carried as micro-USD (millionths of a dollar) so it accumulates exactly, without
+/// floating-point drift; a consumer divides by 1,000,000 to render dollars.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryEvent {
+    /// The role whose turn this usage belongs to.
+    pub role: RoleId,
+    /// The tokens the turn spent.
+    pub tokens: u64,
+    /// The turn's cost in micro-USD (millionths of a dollar).
+    pub cost_micro_usd: u64,
+}
+
+/// A shared-subscription usage reading, and whether it auto-paused the crew (issue #56).
+///
+/// The crew shares one subscription, so the broker keeps one usage gauge. The supervisor
+/// reports the window's fill against the shared limit; the broker publishes a `usage` event
+/// when a reading auto-pauses the crew (crossing the threshold) or lifts the pause, so the
+/// moment is visible on the stream, never silent. A paused reading carries the
+/// [`window_reset`](UsageEvent::window_reset) the pause lifts at, so an observer knows when
+/// work resumes without polling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageEvent {
+    /// The window's fill against the shared subscription limit, as a percent (`0..=100`).
+    pub percent: u8,
+    /// When the usage window resets and the auto-pause lifts. `Some` on a pause, `None`
+    /// when the pause lifts (the operator resumed early).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_reset: Option<Timestamp>,
+    /// Whether the crew is auto-paused on usage: `true` when this reading engaged the pause,
+    /// `false` when it lifted (the window reset, or the operator resumed early).
+    pub paused: bool,
+}
+
+impl BoardSection {
+    /// The section's stable label, matching its serialized name.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Decision => "decision",
+            Self::Interface => "interface",
+            Self::Gotcha => "gotcha",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind};
+    use super::{
+        Activity, ArtifactKind, BoardEvent, BoardSection, Event, EventKind, Lifecycle, Message,
+        MessageKind, Verdict, VerificationEvent,
+    };
     use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
     use crate::time::Timestamp;
 
@@ -304,14 +553,55 @@ mod tests {
                 artifact_kind: ArtifactKind::PullRequest,
             })),
             envelope(message(MessageKind::Note)),
+            envelope(message(MessageKind::Redirect)),
+            envelope(message(MessageKind::Belay)),
             envelope(EventKind::Lifecycle(Lifecycle::Started)),
             envelope(EventKind::Lifecycle(Lifecycle::Died)),
+            envelope(EventKind::Lifecycle(Lifecycle::Paused)),
+            envelope(EventKind::Lifecycle(Lifecycle::Resumed)),
+            envelope(EventKind::Lifecycle(Lifecycle::StoodDown)),
             envelope(EventKind::Activity(Activity::TurnStarted)),
             envelope(EventKind::Activity(Activity::ToolCall {
                 tool: "cargo".to_owned(),
             })),
             envelope(EventKind::Activity(Activity::Output {
                 text: "build succeeded".to_owned(),
+            })),
+            envelope(EventKind::Verification(VerificationEvent {
+                task: "Scaffold the broker".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: None,
+                verdict: Verdict::Submitted,
+                detail: "crewd serves /health".to_owned(),
+            })),
+            envelope(EventKind::Verification(VerificationEvent {
+                task: "Scaffold the broker".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: Some(RoleId::new("qa")),
+                verdict: Verdict::Passed,
+                detail: String::new(),
+            })),
+            envelope(EventKind::Verification(VerificationEvent {
+                task: "Scaffold the broker".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: Some(RoleId::new("qa")),
+                verdict: Verdict::Failed,
+                detail: "/health returns 500 under load".to_owned(),
+            })),
+            envelope(EventKind::Board(BoardEvent {
+                key: "auth-strategy".to_owned(),
+                section: BoardSection::Decision,
+                author: RoleId::new("commander"),
+                body: "JWT with 15m access tokens; rationale: stateless, matches the gateway."
+                    .to_owned(),
+                retracted: false,
+            })),
+            envelope(EventKind::Board(BoardEvent {
+                key: "auth-strategy".to_owned(),
+                section: BoardSection::Decision,
+                author: RoleId::new("commander"),
+                body: String::new(),
+                retracted: true,
             })),
         ]
     }
@@ -332,6 +622,31 @@ mod tests {
             json,
             serde_json::json!({ "kind": "lifecycle", "data": "idle" })
         );
+    }
+
+    #[test]
+    fn directives_are_the_redirect_and_belay_kinds() {
+        assert!(
+            MessageKind::Redirect.is_directive(),
+            "a redirect is a directive"
+        );
+        assert!(MessageKind::Belay.is_directive(), "a belay is a directive");
+        for kind in [
+            MessageKind::Note,
+            MessageKind::Status,
+            MessageKind::Answer,
+            MessageKind::Question { options: vec![] },
+        ] {
+            assert!(!kind.is_directive(), "{kind:?} is not a directive");
+        }
+    }
+
+    #[test]
+    fn directives_serialize_with_their_snake_case_tag() {
+        let redirect = serde_json::to_value(MessageKind::Redirect).unwrap();
+        assert_eq!(redirect, serde_json::json!({ "kind": "redirect" }));
+        let belay = serde_json::to_value(MessageKind::Belay).unwrap();
+        assert_eq!(belay, serde_json::json!({ "kind": "belay" }));
     }
 
     #[test]

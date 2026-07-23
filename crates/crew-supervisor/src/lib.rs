@@ -22,12 +22,17 @@
 //!   on every transition. Its defibrillator (issue #23) detects an agent whose turn
 //!   died, whether it crashed or hung, with a layered heartbeat and watchdog; it
 //!   records an [`Incident`] and revives the agent within a recovery budget, handing
-//!   it to the operator once the budget is spent.
+//!   it to the operator once the budget is spent. Its coordination-stall monitor (issue
+//!   #48, [`stall`]) extends that to the crew as a whole: it reads the event stream for a
+//!   deadlock, an unanswered question, or a ledger with no forward motion, and escalates
+//!   the specific [`Stall`] so silence never reads as progress.
 
 mod lifecycle;
 mod mcp;
 mod roster;
 mod spawn;
+mod stall;
+mod worktree;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +46,8 @@ pub use roster::{Liveness, RosterClient};
 pub use spawn::{
     agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
 };
+pub use stall::{detect_stalls, Stall, StallKind};
+pub use worktree::Worktree;
 
 /// The file name a provisioned role card is written under, in the agent's directory.
 const CARD_FILE_NAME: &str = "role-card.toml";

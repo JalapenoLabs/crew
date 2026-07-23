@@ -32,7 +32,9 @@ use std::fmt::{self, Display, Formatter, Write as _};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::LaneEnforcement;
 use crate::id::RoleId;
+use crate::lane::path_in_lane;
 
 /// The environment variable naming the role card a spawned agent boots from.
 ///
@@ -81,6 +83,10 @@ pub struct RoleCard {
     /// conventional name, when a hand-authored card omits it.
     #[serde(default = "default_commander")]
     pub commander: RoleId,
+    /// How the crew enforces this role's lane: whether an out-of-lane edit warns,
+    /// blocks, or is unchecked (issue #46). Defaults to `warn`.
+    #[serde(default)]
+    pub lane_enforcement: LaneEnforcement,
     /// How to reach the unit: the broker's address.
     pub broker: BrokerEndpoint,
 }
@@ -104,8 +110,25 @@ impl RoleCard {
             owned_paths,
             acceptance: acceptance.into(),
             commander: default_commander(),
+            lane_enforcement: LaneEnforcement::default(),
             broker,
         }
+    }
+
+    /// Sets how the crew enforces this role's lane, returning the card so calls chain.
+    #[must_use]
+    pub fn with_lane_enforcement(mut self, enforcement: LaneEnforcement) -> Self {
+        self.lane_enforcement = enforcement;
+        self
+    }
+
+    /// Whether `path` is within this role's owned lane (issue #46).
+    ///
+    /// A path outside every owned boundary is out of lane; a role that owns no lane is
+    /// unrestricted. See [`path_in_lane`](crate::path_in_lane).
+    #[must_use]
+    pub fn owns(&self, path: &str) -> bool {
+        path_in_lane(&self.owned_paths, path)
     }
 
     /// Sets the crew's commander, returning the card so calls can chain.
@@ -194,6 +217,58 @@ impl RoleCard {
              channel, crew_inbox to read what is addressed to you, crew_roster to see the team. \
              The broker is at {}. The coordination rules live in crew; do not restate them.",
             self.broker.base_url(),
+        );
+
+        out.push('\n');
+        out.push_str(
+            "First thing, catch up: call crew_briefing. It returns a small, bounded packet, the \
+             decision board and a rolling summary scoped to your lane, so you start productive in \
+             seconds without reading the whole log. Do not read the raw history; the briefing is \
+             the deliberate catch-up path.\n",
+        );
+
+        if !self.owned_paths.is_empty() && self.lane_enforcement != LaneEnforcement::Off {
+            out.push('\n');
+            out.push_str(
+                "Stay in your lane. Before you edit a file outside your owned paths, check it \
+                 with crew_lane. An out-of-lane edit is reported to the unit and, under a \
+                 blocking policy, refused: route a genuine cross-lane change through the \
+                 commander (crew_send), never a silent edit.\n",
+            );
+        }
+
+        out.push('\n');
+        out.push_str(
+            "Done means verified, not asserted. When you believe a task meets its acceptance \
+             criteria, do not report it done: submit it with crew_submit, and an independent role \
+             tries to break it. If it fails, you get the specific failure back to fix and \
+             resubmit. When a teammate asks you to verify their work, be the skeptic: try to \
+             break it against the acceptance and crew_verdict pass only if you cannot; on a fail, \
+             give the specific, actionable reason. You cannot verify your own work.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
+            "The crew keeps a shared situation board, its durable memory: agreed interfaces, \
+             decisions and their rationale, and known gotchas. Read it with crew_board before you \
+             re-derive a settled decision or re-open a resolved one, and record a new decision, \
+             interface, or gotcha with crew_record so no one relitigates it. The board outlives \
+             the message stream and survives a restart; the commander curates it.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
+            "A redirect or belay in your inbox is a command from the General: honor it at your \
+             very next tool boundary, not when your current step finishes. A redirect steers you: \
+             keep your task and adjust course. A belay overrides you: stop your current work and \
+             take its message as your new order.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
+            "The General can pause you. Before you pick up new work, check crew_roster: if you \
+             are marked paused, or the crew is paused or stood down, pull no new work and wait \
+             for it to lift. A stand-down means stop now and leave your work recoverable.\n",
         );
 
         out.push('\n');
@@ -410,6 +485,34 @@ mod tests {
             "gives the broker address"
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
+        assert!(
+            briefing.contains("crew_briefing"),
+            "tells the role to catch up with the bounded briefing packet on boot"
+        );
+        assert!(
+            briefing.contains("Stay in your lane") && briefing.contains("crew_lane"),
+            "tells a role with a lane and enforcement on to stay in it"
+        );
+        assert!(
+            briefing.contains("Done means verified") && briefing.contains("crew_submit"),
+            "tells the role to verify before done and to be a skeptic"
+        );
+        assert!(
+            briefing.contains("situation board") && briefing.contains("crew_board"),
+            "points the role at the shared situation board"
+        );
+        assert!(
+            briefing.contains("redirect") && briefing.contains("belay"),
+            "tells the role to honor the General's redirect and belay"
+        );
+        assert!(
+            briefing.contains("next tool boundary"),
+            "says when to honor a directive"
+        );
+        assert!(
+            briefing.contains("paused") && briefing.contains("pull no new work"),
+            "tells the role to honor a pause"
+        );
     }
 
     #[test]

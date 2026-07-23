@@ -1,8 +1,12 @@
-//! Shared helpers for the lifecycle and defibrillator integration tests.
+//! Shared helpers for the lifecycle, defibrillator, and worktree integration tests.
 //!
 //! Each test starts a real `crewd` in-process and manages a fleet of stub agent
 //! processes (shells that stand in for a real `claude` turn, which needs no external
 //! services in CI), observing the roster and the stream over HTTP.
+#![allow(
+    dead_code,
+    reason = "each test binary that includes this module uses only a subset of the helpers"
+)]
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::thread;

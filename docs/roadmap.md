@@ -44,10 +44,19 @@ The "one command brings up a team" experience.
 Make the substrate a consumable package under the **JalapenoLabs** org, so the
 CLI and Seraphim depend on the same versioned crate.
 
-- Split the substrate (broker + supervisor) into its own crate, CLI and glue as
-  consumers.
-- Wire the chosen distribution path (see the open decision below).
-- CI publishes on tag.
+- Split the substrate into one consumable crate, CLI and glue as consumers (issue
+  #34, done): the `crew-substrate` umbrella re-exports the four substrate crates and
+  defines the public API; the CLI depends only on it.
+- Distribute it as a private Git dependency pinned to a release tag (issue #35,
+  decided): a consumer takes `crew-substrate` via `git` + `tag`, no registry to run,
+  private by the repository's access control. crates.io is deferred to the 1.0 line;
+  see `docs/distribution.md` and `docs/architecture.md`. `publish = false` stays,
+  since a Git dependency does not publish to a registry.
+- Publish on tag with a semver policy (issue #36, done): a release is a `v<version>`
+  tag on `main`; `release.yml` checks the tag matches the crate version, runs the full
+  gate on the pinned toolchain, and cuts a GitHub Release so a consumer can pin it. The
+  public API is `crew-substrate`'s re-exports; the per-tag release notes are the
+  changelog. See `docs/distribution.md` (Semantic versioning, Changelog).
 
 ## Phase 5: Seraphim integration
 
@@ -68,32 +77,47 @@ Cross-cutting tracks that harden crew into a team you command, watch, and trust.
 Each is a milestone of its own; they layer onto the phase work rather than block
 it.
 
-- **Command & Control.** Interject, redirect, and belay a role mid-task;
-  rules-of-engagement approval gates for risky actions; pause and stand-down;
-  direct override of the commander.
-- **Coordination Robustness.** Worktree-per-role isolation with an integrator, a
-  work ledger with claims, lane-ownership enforcement, an adversarial done-gate,
-  and coordination-stall detection.
-- **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
-  the `crew top` terminal cockpit, and push notifications on the actionable
-  moments.
-- **Economy.** Model per role, a shared token budget with per-role caps,
-  auto-idle with cost telemetry, and subscription usage awareness.
+- **Command & Control.** Interject to redirect and belay a role mid-task (`crew
+  redirect` / `crew belay`, issue #38, done); rules-of-engagement approval gates for
+  risky actions; pause, resume, and emergency stand-down per role and crew-wide
+  (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
+  the commander.
+- **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
+  config, issue #43, done) with an integrator to follow, a work ledger with claims,
+  lane-ownership enforcement (`lane_enforcement` and the `crew_lane` tool, issue #46,
+  done), an adversarial done-gate (`crew_submit` / `crew_verdict` / `crew_gate`, issue
+  #47, done), and coordination-stall detection (the defibrillator's fleet-wide stall
+  monitor, issue #48, done).
+- **Team Memory + Cockpit.** A shared situation board (`crew_board` / `crew_record`,
+  issue #49, done: the crew's durable memory of decisions, interfaces, and gotchas,
+  rebuilt from the log across a restart), a new-role briefing packet (`crew_briefing`,
+  issue #50, done: the board plus a lane-scoped rolling summary, size-capped, so a fresh
+  role catches up in seconds without the whole log), the `crew top` terminal cockpit, and
+  push notifications on the actionable moments (`crew notify`, issue #52, done: a native
+  notification when a question is asked, a role dies, or the crew stands down, configurable
+  per moment and quiet on routine chatter, over the same event stream).
+- **Economy.** Model per role; a shared token budget with per-role caps (issue #54, done: a
+  crew-wide `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the
+  crew at a cap and surfaced as a `budget` event over the stream, with the live token feed
+  awaiting the stream-json activity parser, issue #24); auto-idle on quiet with cost and
+  token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role, and a
+  `GET /stats` rollup folds per-turn `telemetry` events and the roles' `lifecycle` events
+  into tokens, cost, and working time per role and in aggregate, feeding the cockpit and the
+  Seraphim stats); and subscription usage awareness (issue #56, done: one shared usage gauge
+  auto-pauses new work when a reading crosses `CREW_BROKER_USAGE_THRESHOLD`, lifts at the
+  window reset, and lets the operator resume early with `crew resume`).
 
-## Parallel track: coworker skill transport upgrade
+## Parallel track: coworker skill transport upgrade (done)
 
-Independent of the phases above. Upgrade the `coworker` skill to use a broker
-instead of the shared file plus `tail -F` monitor, so existing users get routing,
-no self-echo, and bounded context without waiting on all of crew. Can land as
-soon as Phase 1's broker is usable.
+Independent of the phases above. The `coworker` skill uses the broker instead of the
+shared file plus `tail -F` monitor, so existing users get routing, no self-echo, and
+bounded context without waiting on all of crew (issue #37). crew ships the upgraded
+skill at `skills/coworker/`: it sends with `crew send`, watches its self-filtered inbox
+with `crew watch --role <role>`, and shrinks to a role-card bootstrap, with a graceful
+message when no broker is reachable. See `docs/communication.md`.
 
 ## Open decisions that gate later phases
 
-- **Distribution registry.** GitHub Packages has no cargo registry, so the choice
-  is: a private Git dependency (simplest, private, no infra; the current lean), a
-  crates.io publish (public, real versioning), or a private cargo registry
-  (org-private with `cargo publish`, but a service to run or pay for). See
-  `docs/architecture.md` for the full tradeoff.
 - **Persistence backend** for the standalone broker (in-memory plus log vs
   SQLite).
 - **Codex parity.** A Codex agent joins a crew through the CLI shim (issue #28):

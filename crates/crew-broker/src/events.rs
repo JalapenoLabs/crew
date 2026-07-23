@@ -298,6 +298,16 @@ mod tests {
                 "all-units",
                 json!({ "from": { "kind": "general" }, "kind": "note", "body": "fyi" }),
             ),
+            (
+                "@backend",
+                json!({ "from": { "kind": "general" }, "kind": "redirect",
+                    "body": "prefer the async path" }),
+            ),
+            (
+                "@backend",
+                json!({ "from": { "kind": "general" }, "kind": "belay",
+                    "body": "stop; switch to the login bug" }),
+            ),
         ]
     }
 
@@ -417,7 +427,16 @@ mod tests {
 
         let body_of = |event: &Event| match &event.kind {
             EventKind::Message(message) => message.body.clone(),
-            EventKind::Lifecycle(_) | EventKind::Activity(_) => panic!("expected a message"),
+            EventKind::Lifecycle(_)
+            | EventKind::Activity(_)
+            | EventKind::Boundary(_)
+            | EventKind::Verification(_)
+            | EventKind::Board(_)
+            | EventKind::Budget(_)
+            | EventKind::Telemetry(_)
+            | EventKind::Usage(_) => {
+                panic!("expected a message")
+            }
         };
         assert!(
             !body_of(&streamed).contains(secret),

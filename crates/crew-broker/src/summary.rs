@@ -120,7 +120,17 @@ pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
             EventKind::Lifecycle(state) => {
                 *lifecycle.entry(lifecycle_label(*state)).or_default() += 1;
             }
-            EventKind::Activity(_) => {}
+            // Activity, boundary, verification, board, budget, telemetry, and usage events
+            // are their own projections (the activity timeline, `history?kind=boundary`, the
+            // done-gate, `GET /board`, `history?kind=budget`, `GET /stats`, and `GET /usage`),
+            // so the message/lifecycle summary skips them.
+            EventKind::Activity(_)
+            | EventKind::Boundary(_)
+            | EventKind::Verification(_)
+            | EventKind::Board(_)
+            | EventKind::Budget(_)
+            | EventKind::Telemetry(_)
+            | EventKind::Usage(_) => {}
         }
     }
 
@@ -230,6 +240,8 @@ fn message_kind_label(kind: &MessageKind) -> &'static str {
         MessageKind::Status => "status",
         MessageKind::Artifact { .. } => "artifact",
         MessageKind::Note => "note",
+        MessageKind::Redirect => "redirect",
+        MessageKind::Belay => "belay",
     }
 }
 
@@ -242,6 +254,9 @@ fn lifecycle_label(state: Lifecycle) -> &'static str {
         Lifecycle::Restarted => "restarted",
         Lifecycle::Died => "died",
         Lifecycle::Recovered => "recovered",
+        Lifecycle::Paused => "paused",
+        Lifecycle::Resumed => "resumed",
+        Lifecycle::StoodDown => "stood_down",
     }
 }
 

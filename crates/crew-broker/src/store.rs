@@ -176,6 +176,18 @@ pub enum EventKindTag {
     Lifecycle,
     /// An agent's own parsed work.
     Activity,
+    /// A lane boundary crossing (issue #46).
+    Boundary,
+    /// A done-gate step: a submission or a verdict (issue #47).
+    Verification,
+    /// A change to the shared situation board (issue #49).
+    Board,
+    /// A token-spend report against the crew budget (issue #54).
+    Budget,
+    /// A per-turn token-and-cost usage report (issue #55).
+    Telemetry,
+    /// A shared-subscription usage reading and its auto-pause (issue #56).
+    Usage,
 }
 
 impl EventKindTag {
@@ -186,6 +198,12 @@ impl EventKindTag {
             "message" => Some(Self::Message),
             "lifecycle" => Some(Self::Lifecycle),
             "activity" => Some(Self::Activity),
+            "boundary" => Some(Self::Boundary),
+            "verification" => Some(Self::Verification),
+            "board" => Some(Self::Board),
+            "budget" => Some(Self::Budget),
+            "telemetry" => Some(Self::Telemetry),
+            "usage" => Some(Self::Usage),
             _ => None,
         }
     }
@@ -197,6 +215,12 @@ impl EventKindTag {
             (Self::Message, EventKind::Message(_))
                 | (Self::Lifecycle, EventKind::Lifecycle(_))
                 | (Self::Activity, EventKind::Activity(_))
+                | (Self::Boundary, EventKind::Boundary(_))
+                | (Self::Verification, EventKind::Verification(_))
+                | (Self::Board, EventKind::Board(_))
+                | (Self::Budget, EventKind::Budget(_))
+                | (Self::Telemetry, EventKind::Telemetry(_))
+                | (Self::Usage, EventKind::Usage(_))
         )
     }
 }

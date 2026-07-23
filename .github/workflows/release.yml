@@ -1,0 +1,63 @@
+name: Release
+
+# Publish the crate reproducibly on a `v<version>` tag (issue #36). Distribution is a
+# private Git dependency (issue #35; see docs/distribution.md): a release is a tag a
+# consumer pins with `crew-substrate = { git = "...", tag = "v<version>" }`. There is
+# no registry push, so "publish" is: check the tag names the crate's own version,
+# validate the tagged commit on the pinned toolchain with the same gate CI runs, and
+# record a GitHub Release whose generated notes are the changelog for the version.
+on:
+  push:
+    tags: ["v*"]
+
+# Creating the Release needs write access to repository contents; nothing else does.
+permissions:
+  contents: write
+
+# Never cancel a release mid-flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same toolchain pinned in rust-toolchain.toml that local and CI use, so a
+      # published version is built with a known, reproducible compiler.
+      - name: Install the pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag must name the crate's own version, so a consumer that pins `v<tag>` gets
+      # exactly that version. Check it first and fail fast on a mismatch, before
+      # spending the validation on a tag that would publish the wrong version.
+      - name: Verify the tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "crew-substrate") | .version')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match crew-substrate version ${version}; bump [workspace.package] version in Cargo.toml to match before tagging"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches crew-substrate ${version}"
+
+      # A published version is a green build, validated with the same gate CI runs so a
+      # release is never a broken commit.
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Lint with clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --all-features
+
+      # Record the release. Its auto-generated notes (the pull requests merged since
+      # the previous tag) are the changelog for this version; the repository keeps no
+      # narrated changelog file (docs/distribution.md, Changelog).
+      - name: Cut the GitHub Release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

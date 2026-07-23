@@ -17,10 +17,25 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::budget::Budget;
 use crate::card::{BrokerEndpoint, RoleCard};
 use crate::id::RoleId;
+
+/// How the crew enforces lane ownership when a role edits outside its owned paths
+/// (issue #46).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneEnforcement {
+    /// Off: out-of-lane edits are not checked.
+    Off,
+    /// Warn: an out-of-lane edit is reported on the stream, but the role may proceed.
+    #[default]
+    Warn,
+    /// Block: an out-of-lane edit is refused; the role routes through the commander.
+    Block,
+}
 
 /// The default model a role runs, an alias Claude Code resolves to the current build.
 const DEFAULT_MODEL: &str = "opus";
@@ -53,10 +68,22 @@ pub struct CrewConfig {
     pub commander: RoleId,
     /// The default model every role runs, unless it overrides it.
     pub model: String,
+    /// The crew-wide token budget: the ceiling on total spend across every role (issue
+    /// #54). `None` (the default) leaves the crew unbounded. When the crew reaches it,
+    /// the supervisor idle-stops the whole crew rather than overrun (see
+    /// [`Budget`](crate::Budget) and `docs/observability.md`).
+    pub token_budget: Option<u64>,
     /// How long a role may be quiet before the supervisor idle-stops it.
     pub idle_stop: Duration,
     /// The repos in scope for the crew (paths or names the operator supplies).
     pub repos: Vec<String>,
+    /// Whether each role works in its own git worktree of the crew's repos, so
+    /// parallel roles never clobber each other's edits (issue #43). Off by default;
+    /// opt a crew in with `worktrees = true`.
+    pub worktrees: bool,
+    /// How the crew enforces lane ownership when a role edits outside its lane (issue
+    /// #46). Defaults to `warn`.
+    pub lane_enforcement: LaneEnforcement,
 }
 
 /// One role in a crew: its name, its lane, its acceptance bar, and its model.
@@ -70,6 +97,10 @@ pub struct RoleSpec {
     pub acceptance: String,
     /// The model this role runs, overriding the crew default when set.
     pub model: Option<String>,
+    /// The role's token cap: the ceiling on its own spend (issue #54). `None` leaves the
+    /// role bounded only by the crew-wide [`token_budget`](CrewConfig::token_budget). When
+    /// the role reaches its cap, the supervisor idle-stops it rather than overrun.
+    pub token_cap: Option<u64>,
 }
 
 impl Default for CrewConfig {
@@ -82,8 +113,11 @@ impl Default for CrewConfig {
             roles: default_roles(),
             commander: RoleId::new(DEFAULT_COMMANDER),
             model: DEFAULT_MODEL.to_owned(),
+            token_budget: None,
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
+            worktrees: false,
+            lane_enforcement: LaneEnforcement::default(),
         }
     }
 }
@@ -125,6 +159,7 @@ impl CrewConfig {
                     broker.clone(),
                 )
                 .with_commander(self.commander.clone())
+                .with_lane_enforcement(self.lane_enforcement)
             })
             .collect()
     }
@@ -137,6 +172,21 @@ impl CrewConfig {
             .find(|spec| &spec.role == role)
             .and_then(|spec| spec.model.as_deref())
             .unwrap_or(&self.model)
+    }
+
+    /// The crew's token [`Budget`]: the crew-wide ceiling and each role's cap (issue #54).
+    ///
+    /// The supervisor holds one and records spend against it, idle-stopping a role or the
+    /// crew when it reaches a cap. A crew with no `token_budget` and no per-role
+    /// `token_cap` is unbounded, so the budget never breaches.
+    #[must_use]
+    pub fn budget(&self) -> Budget {
+        let caps = self
+            .roles
+            .iter()
+            .filter_map(|spec| spec.token_cap.map(|cap| (spec.role.clone(), cap)))
+            .collect();
+        Budget::new(self.token_budget, caps)
     }
 
     /// Validates the resolved config, returning the first problem it finds.
@@ -216,6 +266,7 @@ fn default_roles() -> Vec<RoleSpec> {
         owned_paths: paths.iter().map(|path| (*path).to_owned()).collect(),
         acceptance: String::new(),
         model: None,
+        token_cap: None,
     };
     vec![
         role("commander", &[]),
@@ -276,9 +327,12 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     model: Option<String>,
+    token_budget: Option<u64>,
     commander: Option<String>,
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
+    worktrees: Option<bool>,
+    lane_enforcement: Option<LaneEnforcement>,
     roles: Option<Vec<RawRole>>,
 }
 
@@ -290,6 +344,7 @@ struct RawRole {
     owned_paths: Option<Vec<String>>,
     acceptance: Option<String>,
     model: Option<String>,
+    token_cap: Option<u64>,
 }
 
 impl RawConfig {
@@ -312,8 +367,11 @@ impl RawConfig {
                 |name| name.trim().to_owned(),
             )),
             model: self.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            token_budget: self.token_budget,
             idle_stop,
             repos: self.repos.unwrap_or_default(),
+            worktrees: self.worktrees.unwrap_or(false),
+            lane_enforcement: self.lane_enforcement.unwrap_or_default(),
         })
     }
 }
@@ -326,6 +384,7 @@ impl RawRole {
             owned_paths: self.owned_paths.unwrap_or_default(),
             acceptance: self.acceptance.unwrap_or_default(),
             model: self.model,
+            token_cap: self.token_cap,
         }
     }
 }
@@ -413,6 +472,8 @@ mod tests {
         commander = "commander"
         idle_stop = "10m"
         repos = ["api", "web"]
+        worktrees = true
+        lane_enforcement = "block"
 
         [[roles]]
         role = "commander"
@@ -441,6 +502,8 @@ mod tests {
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.idle_stop.as_secs(), 10 * 60);
         assert_eq!(config.repos, ["api", "web"]);
+        assert!(config.worktrees, "worktree isolation is opted in");
+        assert_eq!(config.lane_enforcement, super::LaneEnforcement::Block);
 
         // A per-role model overrides the crew default; others fall back to it.
         assert_eq!(config.model_for(&RoleId::new("backend")), "haiku");
@@ -488,6 +551,13 @@ mod tests {
         assert_eq!(config.commander, RoleId::new("commander"));
         assert_eq!(config.model, "opus");
         assert_eq!(config.idle_stop.as_secs(), 5 * 60);
+        assert!(config.repos.is_empty());
+        assert!(!config.worktrees, "worktree isolation is off by default");
+        assert_eq!(
+            config.lane_enforcement,
+            super::LaneEnforcement::Warn,
+            "lane enforcement defaults to warn"
+        );
         // The default crew round-trips through validation via an empty config document.
         assert_eq!(CrewConfig::from_toml("").unwrap(), config);
     }

@@ -3,7 +3,7 @@
 //! A Claude Code agent gets the crew tools over MCP (`crew_send`, `crew_inbox`, ...).
 //! A runtime without MCP, such as Codex, reaches the same broker through these `crew`
 //! subcommands instead. Each maps one-to-one onto an MCP tool and, crucially, uses the
-//! very same [`crew_mcp::Broker`] client the MCP server uses, so a shim agent's
+//! very same [`crew_substrate::mcp::Broker`] client the MCP server uses, so a shim agent's
 //! I/O lands on the broker identically to the MCP path (see `docs/codex.md`).
 //!
 //! Every command boots from the same role context the `crew-mcp` binary does: the role
@@ -18,9 +18,11 @@
 
 use std::path::PathBuf;
 
-use crew_broker::Config as BrokerConfig;
-use crew_core::{BrokerEndpoint, RoleCard, RoleId, ROLE_CARD_ENV};
-use crew_mcp::{Broker, InboxItem, RoleEntry};
+use crew_substrate::broker::Config as BrokerConfig;
+use crew_substrate::core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV};
+use crew_substrate::mcp::{
+    BoardSnapshot, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing,
+};
 use eyre::{eyre, Result, WrapErr};
 
 /// The resolved agent context a shim command acts as: its broker, role, and lane.
@@ -33,6 +35,8 @@ struct Agent {
     commander: RoleId,
     /// The paths the role owns, registered with the roster.
     owned_paths: Vec<String>,
+    /// How the crew enforces this role's lane (issue #46).
+    lane_enforcement: LaneEnforcement,
 }
 
 impl Agent {
@@ -95,11 +99,137 @@ pub fn inbox() -> Result<()> {
 /// Returns an error if no role context is set, or the broker cannot be reached.
 pub fn roster() -> Result<()> {
     let agent = load_agent()?;
-    let roles = agent
+    let snapshot = agent
         .broker()
         .roster()
         .map_err(|reason| eyre!("{reason}"))?;
-    print_roster(&roles);
+    print_roster(&snapshot);
+    Ok(())
+}
+
+/// Checks whether `path` is in this role's lane, warning or blocking per policy (issue
+/// #46).
+///
+/// Mirrors `crew_lane`: an in-lane path proceeds; an out-of-lane path is reported on the
+/// stream, and under a blocking policy the check fails so the role routes the change
+/// through the commander instead of editing silently.
+///
+/// # Errors
+/// Returns an error if no role context is set, the path is out of lane and enforcement
+/// is `block`, or the broker cannot be reached.
+pub fn lane(path: &str) -> Result<()> {
+    let agent = load_agent()?;
+    let verdict = agent
+        .broker()
+        .check_lane(&agent.owned_paths, agent.lane_enforcement, path)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{verdict}");
+    Ok(())
+}
+
+/// Submits this agent's finished work for adversarial verification (issue #47).
+///
+/// Mirrors `crew_submit`: the work is not done until an independent role tries to break
+/// it and passes it. `to` optionally names a reviewer role to notify.
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker rejects the submission.
+pub fn submit(task: &str, acceptance: Option<&str>, to: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .submit(task, acceptance.unwrap_or_default(), to)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Records this agent's verdict on a task another role submitted (issue #47).
+///
+/// Mirrors `crew_verdict`: a `pass` marks the task done; otherwise the work returns to
+/// its owner with the `failure`. A role cannot verify its own work.
+///
+/// # Errors
+/// Returns an error if no role context is set, the verdict is refused, or a failing
+/// verdict carries no failure.
+pub fn verdict(task: &str, pass: bool, failure: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .verdict(task, pass, failure.unwrap_or_default())
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Prints the done-gate: every task under verification and its standing (issue #47).
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn gate() -> Result<()> {
+    let agent = load_agent()?;
+    let snapshot = agent.broker().gate().map_err(|reason| eyre!("{reason}"))?;
+    print_gate(&snapshot);
+    Ok(())
+}
+
+/// Records or retracts a shared situation board entry (issue #49).
+///
+/// Mirrors `crew_record`: records a `decision`, `interface`, or `gotcha` under `key`, or,
+/// with `retract`, removes the entry. The commander curates the board.
+///
+/// # Errors
+/// Returns an error if no role context is set, a required field is missing, a retraction
+/// names a missing entry, or the broker cannot be reached.
+pub fn record(key: &str, section: Option<&str>, body: Option<&str>, retract: bool) -> Result<()> {
+    let agent = load_agent()?;
+    let broker = agent.broker();
+    let confirmation = if retract {
+        broker.retract(key)
+    } else {
+        let section = section
+            .ok_or_else(|| eyre!("recording needs --section (decision, interface, or gotcha)"))?;
+        let body = body.ok_or_else(|| eyre!("recording needs --body (the content)"))?;
+        broker.record(key, section, body)
+    }
+    .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Prints the shared situation board: the crew's durable memory (issue #49).
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn board(section: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let snapshot = agent
+        .broker()
+        .board(section)
+        .map_err(|reason| eyre!("{reason}"))?;
+    print_board(&snapshot);
+    Ok(())
+}
+
+/// Prints this role's bounded new-role briefing packet (issue #50).
+///
+/// Mirrors `crew_briefing`: the decision board and a rolling summary scoped to the role's
+/// lane, capped to a byte budget, so a fresh role catches up without reading the whole log.
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn briefing(task: Option<&str>, budget: Option<usize>) -> Result<()> {
+    let agent = load_agent()?;
+    let packet = agent
+        .broker()
+        .briefing(task, budget)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{}", packet.text);
+    let fit = if packet.capped { "capped to" } else { "within" };
+    println!(
+        "[briefing {fit} {} of {} bytes]",
+        packet.size, packet.budget
+    );
     Ok(())
 }
 
@@ -119,6 +249,7 @@ fn load_agent() -> Result<Agent> {
             role: card.role,
             commander: card.commander,
             owned_paths: card.owned_paths,
+            lane_enforcement: card.lane_enforcement,
         });
     }
 
@@ -140,6 +271,7 @@ fn load_agent() -> Result<Agent> {
         // matching `RoleCard`'s own default when a card omits it.
         commander: RoleId::new("commander"),
         owned_paths: Vec::new(),
+        lane_enforcement: LaneEnforcement::default(),
     })
 }
 
@@ -157,26 +289,93 @@ fn print_inbox(items: &[InboxItem]) {
             (detail, "") => detail.to_owned(),
             (detail, body) => format!("{detail}. {body}"),
         };
+        // A redirect or belay is a General directive to honor at once, so flag it.
+        let marker = if item.directive { "[honor now] " } else { "" };
         println!(
-            "- {} on {} ({}): {}",
-            item.from, item.channel, item.kind, content
+            "- {}{} on {} ({}): {}",
+            marker, item.from, item.channel, item.kind, content
         );
     }
 }
 
-/// Prints the roster entries, one per line.
-fn print_roster(roles: &[RoleEntry]) {
-    if roles.is_empty() {
+/// Prints the roster: the crew standing, then each role, its lane, and its liveness.
+fn print_roster(snapshot: &RosterSnapshot) {
+    if snapshot.roles.is_empty() {
         println!("The roster is empty.");
         return;
     }
-    println!("{} role(s):", roles.len());
-    for role in roles {
+    let crew_gated = snapshot.standing != Standing::Running;
+    match snapshot.standing {
+        Standing::Running => println!("{} role(s):", snapshot.roles.len()),
+        Standing::Paused => println!("{} role(s) (the crew is PAUSED):", snapshot.roles.len()),
+        Standing::StoodDown => {
+            println!("{} role(s) (the crew is STOOD DOWN):", snapshot.roles.len());
+        }
+    }
+    for role in &snapshot.roles {
         let owns = if role.owned_paths.is_empty() {
             String::new()
         } else {
             format!(" owns {}", role.owned_paths.join(", "))
         };
-        println!("- {} [{}]{}", role.role, role.liveness, owns);
+        let gated = if role.paused || crew_gated {
+            " [paused]"
+        } else {
+            ""
+        };
+        println!("- {} [{}]{}{}", role.role, role.liveness, owns, gated);
+    }
+}
+
+/// Prints the done-gate: each task under verification, its owner, verifier, and standing.
+fn print_gate(snapshot: &GateSnapshot) {
+    if snapshot.tasks.is_empty() {
+        println!("The done-gate is empty; no task is under verification.");
+        return;
+    }
+    println!("{} task(s) under the done-gate:", snapshot.tasks.len());
+    for task in &snapshot.tasks {
+        let verifier = task
+            .verifier
+            .as_deref()
+            .map(|who| format!(" by {who}"))
+            .unwrap_or_default();
+        let detail = if task.detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", task.detail)
+        };
+        println!(
+            "- {} owned by {} [{}{}]{}",
+            task.task, task.owner, task.verdict, verifier, detail
+        );
+    }
+}
+
+/// Prints the situation board: each entry, its section, author, and content.
+fn print_board(snapshot: &BoardSnapshot) {
+    if snapshot.entries.is_empty() {
+        println!("The situation board is empty.");
+        return;
+    }
+    println!(
+        "{} board entr{}:",
+        snapshot.entries.len(),
+        plural(snapshot.entries.len())
+    );
+    for entry in &snapshot.entries {
+        println!(
+            "- [{}] {} (by {}): {}",
+            entry.section, entry.key, entry.author, entry.body
+        );
+    }
+}
+
+/// The suffix for `entr(y|ies)` given a count.
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        "y"
+    } else {
+        "ies"
     }
 }

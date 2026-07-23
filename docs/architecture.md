@@ -35,7 +35,24 @@ Planned surface (illustrative, not final):
 - `GET /history?channel=all-units&summary=true` returns a compact rolling
   summary rather than the full transcript, so a late joiner spends little
   context catching up.
-- `GET /roster` lists roles, their liveness, and their owned paths.
+- `GET /roster` lists roles, their liveness, their owned paths, and the crew's pause
+  `standing`; `POST /pause`, `POST /resume`, and `POST /standdown` gate the crew's work
+  (issue #41).
+- `POST /boundary` records a role reaching outside its owned lane as a `boundary` event
+  on the stream (issue #46), so an out-of-lane edit is surfaced to the operator rather
+  than passing silently. See `docs/observability.md`.
+- `GET /gate` reads the adversarial done-gate; `POST /gate/submit` submits work for
+  verification and `POST /gate/verdict` records an independent verdict, refusing a
+  self-verdict so "done" means an independent role could not break it (issue #47). See
+  `docs/roles.md` (the done-gate).
+- `GET /board` reads the shared situation board and `POST /board` records or retracts an
+  entry (issue #49): the crew's durable memory of decisions, interfaces, and gotchas. It
+  is a projection of the `board` events, rebuilt from the log on a restart. See
+  `docs/communication.md` (context management).
+- `GET /briefing?role=<role>` assembles the bounded new-role briefing packet (issue #50):
+  the decision board plus a rolling summary scoped to the role's timeline, rendered to
+  text and capped to a byte budget, so a fresh role catches up without reading the whole
+  log. See `docs/roles.md` (the briefing packet).
 
 Why a broker beats the old shared file:
 
@@ -129,6 +146,17 @@ reaches the same broker through the CLI shim instead of MCP tools (issue #28), s
 unit can mix runtimes; the broker and roster do not care which runtime produced a
 role. See `docs/codex.md`.
 
+**Worktree-per-role isolation** keeps parallel roles from clobbering each other's edits
+(issue #43). With `worktrees` on in the config, the supervisor gives each role its own
+git worktree of each configured repo, on a `crew/<role>` branch, and points the agent's
+working directory at it, so two roles editing the same file at once never corrupt each
+other: git keeps each worktree's index and files separate. The fleet owns the worktrees
+and cleans them up on stand-down, after each agent has stopped: an unchanged worktree is
+removed (its branch, and any commits on it, survive), while one with uncommitted changes
+is kept, since integrating a role's work is a deliberate later step (issue #48).
+Isolation is opt-in and off by default; a crew with no repos configured runs each role
+in its own scratch directory as before.
+
 ### MCP server (agent-facing surface)
 
 Agents coordinate through MCP tools, not by shelling out to append to a file.
@@ -137,8 +165,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes four tools (issues #17,
-#27):
+broker's HTTP API; it never touches the store. It exposes eleven tools (issues #17,
+#27, #46, #47, #49, #50):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -154,22 +182,50 @@ broker's HTTP API; it never touches the store. It exposes four tools (issues #17
   and surfaces an order's structured fields so a specialist reads the task.
 - `crew_roster` lists every registered teammate, the paths it owns, and its
   liveness (working / idle / stopped / dead).
+- `crew_lane` checks a repo-relative path against the role's owned lane before it edits
+  a file outside its paths (issue #46). In-lane, it says proceed; out-of-lane, it reports
+  the crossing to the unit (a `boundary` event) and, under a blocking policy, refuses the
+  edit, telling the role to route the change through the commander. The policy comes from
+  the role card (`lane_enforcement`: `warn` / `block` / `off`). See `docs/roles.md`.
+- `crew_submit`, `crew_verdict`, and `crew_gate` are the adversarial done-gate (issue
+  #47). A role submits finished work for verification with `crew_submit` rather than
+  reporting it done; an independent role tries to break it and records a pass or a
+  failure with `crew_verdict`; and `crew_gate` reads the live gate. The broker refuses a
+  self-verdict, so a task is done only when a role other than the owner could not break
+  it, and a failure hands the work back to the owner's inbox. See `docs/roles.md` (the
+  done-gate).
+- `crew_board` and `crew_record` are the shared situation board (issue #49), the crew's
+  durable memory. `crew_record` records or retracts an entry (a decision, an interface, or
+  a gotcha, keyed by a stable topic); `crew_board` reads it. A role reads the board before
+  re-deriving a settled decision. It is a projection of the durable `board` events, so it
+  survives an idle-stop or a restart. See `docs/roles.md` (the situation board).
+- `crew_briefing` returns the bounded new-role briefing packet (issue #50): the decision
+  board plus a rolling summary scoped to the role's lane, capped to a byte budget. A role
+  calls it first on boot to catch up in seconds instead of reading the whole log. See
+  `docs/roles.md` (the briefing packet).
 
 Each tool documents itself and its arguments in `tools/list` so an agent calls it
 right the first time. A tool failure comes back as an `isError` result the agent
 reads, not a protocol error.
 
 MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
-the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, and
-`crew roster` act as the role the environment names and reach the broker through the
+the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, `crew roster`,
+`crew lane`, the done-gate trio `crew submit` / `crew verdict` / `crew gate`, the
+situation-board pair `crew board` / `crew record`, and `crew briefing` act as
+the role the environment names and reach the broker through the
 **same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
 broker identically. A Codex agent registers on boot and then sends and reads through
 the shim, so it appears on the roster and the stream like any other role. The parity
 and its gaps (a stateless inbox with no per-session cursor, no push, operator-launched
 rather than supervisor-spawned) are in `docs/codex.md`.
 
-The roadmap step is `crew_inbox` push: subscribing to the broker's per-role SSE
-stream for native notifications instead of the current history read on each call.
+`crew_inbox` has a push path (issue #76): the server subscribes to the broker's per-role
+SSE inbox (`GET /inbox?role=<role>`) at boot, seeding the backlog from history once and
+then buffering events on a background thread, resuming from a `Last-Event-ID` cursor across
+reconnects. A read drains the buffered batch instead of refetching the whole history, so it
+is O(new) rather than O(total) per call. The pull-based history read stays the fallback for
+a runtime without streaming. Surfacing native MCP notifications as events arrive, rather
+than only on a read, is the remaining refinement.
 
 ### CLI (`crew`, human front-end)
 
@@ -199,9 +255,24 @@ subcommand tree.
   shim (issue #28): they act as the role the environment names (`CREW_ROLE_CARD`, or
   `CREW_ROLE` plus the broker config) and reach the broker through the same client the
   MCP tools use, so a runtime without MCP coordinates the same way. See `docs/codex.md`.
-- `crew watch` tails the conversation with routing visible, and a `crew send` run
-  without a role context posts as the General to the commander by default: the human's
-  own front-end, alongside the agent shim above.
+- `crew redirect <role> "..."` and `crew belay <role> "..."` are the General's
+  command-and-control directives (issue #38): they post from the General to a role's
+  direct channel a `redirect` (steer, keep the task) or a `belay` (halt and re-task),
+  which the role honors at its next tool boundary. They need no role card, resolving the
+  broker from `--broker` or the `CREW_BROKER_*` environment. See `docs/communication.md`.
+- `crew pause [role]`, `crew resume [role]`, and `crew standdown` are the General's
+  brake and kill switch (issue #41): they post to the broker's control endpoints, so a
+  paused role, or a stood-down crew, pulls no new work, and the state shows on the
+  roster and the stream. A stand-down halts every role and preserves the durable state,
+  so the crew is recoverable. The broker is the authority; a role honors the gate.
+- `crew watch` tails the conversation live with routing visible (issue #15),
+  rendering each event from the broker's SSE feed as `from -> channel (kind) body`. It
+  reads the whole firehose (`/stream`) by default, or one role's self-filtered inbox
+  with `--role <role>`, so a peer sees a teammate's messages without polling and never
+  its own (the broker drops self-echo at the source, issue #10). The base comes from
+  `--broker`, else `CREW_BROKER_HOST` / `PORT`. This is the streaming read the upgraded
+  `coworker` skill uses in place of its `tail -F` monitor (issue #37; see
+  `docs/communication.md`).
 
 ### Observability
 
@@ -251,11 +322,25 @@ The substrate is the reusable part, so it ships as a Rust crate (the broker plus
 supervisor library) that both front-ends depend on, published under the
 **JalapenoLabs** org.
 
+The substrate is packaged as one **umbrella crate**, `crew-substrate` (issue #34),
+that re-exports the public API of the four library crates it is built from
+(`crew-core`, `crew-broker`, `crew-supervisor`, `crew-mcp`) as the modules `core`,
+`broker`, `supervisor`, and `mcp`. A front-end takes a single dependency on
+`crew-substrate` and reaches every part through it, never the individual crates; the
+CLI is the first such consumer. The umbrella adds no logic and follows
+`M-DONT-LEAK-TYPES` (footnote 2: an umbrella may leak its siblings' types), documenting
+the few third-party types it deliberately exposes for interoperability (tokio on the
+async broker boundary, serde on the wire types, chrono through `Timestamp`, and eyre as
+the entry-point error type). It builds and documents as a standalone crate. Today it is
+consumed as a private Git dependency (below), so every crate keeps `publish = false` to
+guard against an accidental crates.io publish; flipping that is part of the registry
+choice below.
+
 **Constraint:** GitHub Packages does not host cargo registries (it serves npm,
 Maven, NuGet, RubyGems, and Docker, not Rust). So "publish under JalapenoLabs"
-has three realistic shapes:
+had three realistic shapes:
 
-1. **Private Git dependency** (current lean). Consumers depend on the crate via
+1. **Private Git dependency** (the decision). Consumers depend on the crate via
    `git = "ssh://git@github.com/JalapenoLabs/crew"` pinned to a tag. No registry
    to run, private by default, works today. The cost is no semantic-version
    resolution and no `cargo publish` ergonomics.
@@ -266,9 +351,17 @@ has three realistic shapes:
    the sparse registry protocol). True org-private packages with `cargo publish`
    and version resolution. The cost is a service to run or pay for.
 
-The crate split (`M-SMALLER-CRATES`) keeps this clean: publish the substrate
-crate, keep the CLI and any Seraphim glue as consumers. Which registry to use is
-tracked in `roadmap.md`.
+**Decision (issue #35): the private Git dependency, pinned to a release tag.** It
+works today with zero infrastructure and is private by the repository's own access
+control, which matters while the substrate is org-internal. crates.io wants a stable
+API before opening to the world, and the substrate is pre-1.0 and still moving, so it
+is deferred to the 1.0 line; a private cargo registry adds a service to run or pay
+for, unjustified for one internal crate. The choice is fully reversible: migrating to
+a registry later is a re-point of the dependency, not a redesign. The crate split
+(`M-SMALLER-CRATES`) keeps this clean: a consumer takes the one `crew-substrate`
+umbrella, and the CLI and any Seraphim glue are consumers. The operational contract,
+the consumer's `Cargo.toml` snippet, the versioning scheme, and how a release tag is
+cut, is in `docs/distribution.md`.
 
 ## What this deliberately is not
 

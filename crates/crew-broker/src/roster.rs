@@ -20,9 +20,11 @@ use crew_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeSet;
+
 use crate::error::ApiError;
 use crate::events::JsonBody;
-use crate::state::AppState;
+use crate::state::{AppState, Standing};
 use crate::store::{Liveness, RoleStatus, Roster};
 
 /// The roster routes: list, register/update, and deregister a role.
@@ -32,9 +34,15 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/roster/{role}", delete(deregister))
 }
 
-/// The `GET /roster` response: the live agent count and the registered roles.
+/// The `GET /roster` response: the crew standing, the live agent count, and the roles.
 #[derive(Debug, Serialize)]
-struct RosterView {
+pub(crate) struct RosterView {
+    /// The crew's control standing: running, paused, or stood down (issue #41).
+    standing: Standing,
+    /// Whether new work is auto-paused on shared-subscription usage (issue #56). Gates
+    /// every role while set, since the crew shares one subscription; distinct from the
+    /// manual `standing`, so a role honors either. Read the gauge with `GET /usage`.
+    usage_paused: bool,
     /// The live agent count and its per-liveness breakdown.
     count: Count,
     /// The roles, sorted by id.
@@ -71,11 +79,30 @@ struct RoleView {
     owned_paths: Vec<String>,
     /// The role's current liveness.
     liveness: Liveness,
+    /// Whether the role is paused on its own (issue #41). It is also gated whenever the
+    /// crew `standing` is not `running`.
+    paused: bool,
 }
 
 impl RosterView {
+    /// The roster view for the current state: the roster snapshot and the control state.
+    pub(crate) fn from_state(state: &AppState) -> Self {
+        let (standing, paused) = state.control_snapshot();
+        Self::of(
+            &state.storage.roster(),
+            standing,
+            &paused,
+            state.is_usage_paused(),
+        )
+    }
+
     /// Renders a roster snapshot as the wire view, tallying the live count as it goes.
-    fn of(roster: &Roster) -> Self {
+    fn of(
+        roster: &Roster,
+        standing: Standing,
+        paused: &BTreeSet<RoleId>,
+        usage_paused: bool,
+    ) -> Self {
         let mut count = Count::default();
         let roles = roster
             .iter()
@@ -90,11 +117,17 @@ impl RosterView {
                     role: role.clone(),
                     owned_paths: status.owned_paths.clone(),
                     liveness: status.liveness,
+                    paused: paused.contains(role),
                 }
             })
             .collect();
         count.live = count.working + count.idle;
-        Self { count, roles }
+        Self {
+            standing,
+            usage_paused,
+            count,
+            roles,
+        }
     }
 }
 
@@ -115,7 +148,7 @@ struct Register {
 
 /// `GET /roster`: list the registered roles, their owned paths, and their liveness.
 async fn list(State(state): State<AppState>) -> Json<RosterView> {
-    Json(RosterView::of(&state.storage.roster()))
+    Json(RosterView::from_state(&state))
 }
 
 /// `POST /roster`: register a role (on join) or update its liveness and owned paths.
@@ -162,7 +195,7 @@ async fn register(
     } else {
         StatusCode::CREATED
     };
-    Ok((code, Json(RosterView::of(&state.storage.roster()))))
+    Ok((code, Json(RosterView::from_state(&state))))
 }
 
 /// `DELETE /roster/{role}`: deregister a role (on leave), publishing `stopped`.
@@ -181,7 +214,7 @@ async fn deregister(
     }
     // A role leaving the unit is not scoped to a task, so its `stopped` carries none.
     state.publish(roster_event(&role, Lifecycle::Stopped, None));
-    Ok(Json(RosterView::of(&state.storage.roster())))
+    Ok(Json(RosterView::from_state(&state)))
 }
 
 /// Validates a role name, rejecting an empty one.

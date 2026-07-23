@@ -39,12 +39,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crew_core::RoleId;
+use crew_core::{Budget, BudgetEvent, BudgetScope, RoleId, TelemetryEvent};
 use eyre::{eyre, Result};
 use tracing::{event, Level};
 
 use crate::roster::{Liveness, RosterClient};
 use crate::spawn::{spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent};
+use crate::stall::{Stall, StallMonitor};
+use crate::worktree::Worktree;
 
 /// How often a driver polls its agent, and the watchdog scans the fleet.
 ///
@@ -76,6 +78,14 @@ pub struct LifecyclePolicy {
     /// How many times a dead agent may be revived before it is left for the operator,
     /// so a crash or hang loop cannot recover forever.
     pub max_recoveries: u32,
+    /// How long a coordination wait may persist before it is escalated as a stall
+    /// (issue #48): an unanswered question, a mutual wait, or a held ledger task with no
+    /// forward motion. This is about the crew waiting on itself, not a silent process,
+    /// so it is shorter than the process `heartbeat_timeout`.
+    pub stall_timeout: Duration,
+    /// How often the coordination-stall monitor scans the stream. Coarse: a stall
+    /// evolves over minutes, so a frequent scan would only re-read the same history.
+    pub stall_scan_interval: Duration,
 }
 
 impl Default for LifecyclePolicy {
@@ -92,6 +102,11 @@ impl Default for LifecyclePolicy {
             heartbeat_timeout: Duration::from_secs(20 * 60),
             watchdog_timeout: Duration::from_secs(25 * 60),
             max_recoveries: 3,
+            // Ten minutes is long enough that a slow but progressing exchange is not
+            // flagged, short enough to catch a real deadlock before the crew wastes a
+            // shift on it; scanning once a minute keeps the read light.
+            stall_timeout: Duration::from_secs(10 * 60),
+            stall_scan_interval: Duration::from_secs(60),
         }
     }
 }
@@ -162,6 +177,20 @@ pub struct Fleet {
     incidents: Arc<Mutex<Vec<Incident>>>,
     watchdog_stop: Sender<()>,
     watchdog: Option<JoinHandle<()>>,
+    /// The coordination stalls the monitor has detected (issue #48), shared with its
+    /// thread and read by [`stalls`](Fleet::stalls).
+    stalls: Arc<Mutex<Vec<Stall>>>,
+    stall_stop: Sender<()>,
+    stall_monitor: Option<JoinHandle<()>>,
+    /// The per-role git worktrees to clean up on stand-down (issue #43); empty unless
+    /// the crew opted into worktree isolation.
+    worktrees: Vec<Worktree>,
+    /// The crew's token budget (issue #54): the accountant [`record_spend`](Fleet::record_spend)
+    /// charges spend against, idle-stopping a role or the crew at a cap. Unbounded by
+    /// default; the crew opts in through the config.
+    budget: Arc<Mutex<Budget>>,
+    /// A client for surfacing budget reports on the stream, shared with the fleet threads.
+    roster: RosterClient,
 }
 
 impl Fleet {
@@ -200,13 +229,152 @@ impl Fleet {
             thread::spawn(move || run_watchdog(&shared, &roster, &incidents, timeout, &stop))
         };
 
+        // The coordination-stall monitor: the fleet-wide half of the defibrillator that
+        // watches the stream for a crew stuck waiting on itself (issue #48).
+        let stalls = Arc::new(Mutex::new(Vec::new()));
+        let (stall_stop, stall_stop_rx) = mpsc::channel();
+        let stall_monitor = {
+            let roles: Vec<RoleId> = drivers
+                .iter()
+                .map(|driver| driver.shared.role.clone())
+                .collect();
+            let monitor = StallMonitor::new(
+                roster.clone(),
+                roles,
+                policy.stall_timeout,
+                policy.stall_scan_interval,
+                Arc::clone(&stalls),
+            );
+            thread::spawn(move || monitor.run(&stall_stop_rx))
+        };
+
         Self {
             drivers,
             output,
             incidents,
             watchdog_stop,
             watchdog: Some(watchdog),
+            stalls,
+            stall_stop,
+            stall_monitor: Some(stall_monitor),
+            worktrees: Vec::new(),
+            budget: Arc::new(Mutex::new(Budget::default())),
+            roster: roster.clone(),
         }
+    }
+
+    /// Hands the fleet the per-role worktrees to clean up on stand-down (issue #43).
+    ///
+    /// The supervisor creates them before launch; the fleet owns them so it can remove
+    /// each unchanged one once its agent has stopped (see [`shutdown`](Fleet::shutdown)).
+    #[must_use]
+    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
+        self.worktrees = worktrees;
+        self
+    }
+
+    /// Sets the crew token budget the fleet enforces (issue #54).
+    ///
+    /// Build it from the crew config with [`CrewConfig::budget`](crew_core::CrewConfig::budget).
+    /// An unbounded budget (no crew-wide budget and no per-role cap) leaves
+    /// [`record_spend`](Fleet::record_spend) a no-op, so a crew that opts out pays nothing.
+    #[must_use]
+    pub fn with_budget(self, budget: Budget) -> Self {
+        *self.budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;
+        self
+    }
+
+    /// Records a turn's `tokens` and `cost_micro_usd` for `role`: telemetry then budget.
+    ///
+    /// This is the full turn-usage seam the activity parser (issue #24) drives with each
+    /// turn's usage once it lands. It surfaces a `telemetry` event so per-role and aggregate
+    /// spend is legible off the stream regardless of any budget (issue #55, feeding
+    /// `GET /stats`), then charges the tokens against the crew budget, idle-stopping a role
+    /// or the crew at a cap (issue #54). Reporting the telemetry is best-effort (a failure
+    /// is logged, not fatal); the budget enforcement still runs.
+    ///
+    /// # Errors
+    /// Returns an error if idle-stopping a role on a budget breach fails (its driver is gone).
+    pub fn record_usage(&self, role: &RoleId, tokens: u64, cost_micro_usd: u64) -> Result<()> {
+        // Always surface the usage, so an unbounded crew is still legible (issue #55).
+        let telemetry = TelemetryEvent {
+            role: role.clone(),
+            tokens,
+            cost_micro_usd,
+        };
+        if let Err(err) = self.roster.report_telemetry(&telemetry) {
+            event!(
+                name: "supervisor.telemetry.report_failed",
+                Level::WARN,
+                crew.role = %role,
+                "could not report telemetry for `{{crew.role}}`: {err}",
+            );
+        }
+        // Then charge it against the crew budget, which enforces the caps (issue #54).
+        self.record_spend(role, tokens)
+    }
+
+    /// Charges `tokens` of spend to `role` against the crew budget, enforcing the caps.
+    ///
+    /// Surfaces a `budget` event so spend against budget is visible on the stream, and when
+    /// the spend reaches a ceiling idle-stops the role (its own cap) or the whole crew (the
+    /// crew-wide budget) rather than overrun (issue #54). An unbounded crew is a no-op.
+    ///
+    /// Prefer [`record_usage`](Fleet::record_usage), which also emits the per-turn telemetry
+    /// the `GET /stats` rollup folds; this is the budget-only path.
+    ///
+    /// # Errors
+    /// Returns an error if idle-stopping a role fails (its driver is gone).
+    pub fn record_spend(&self, role: &RoleId, tokens: u64) -> Result<()> {
+        let spend = {
+            let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
+            if !budget.is_bounded() {
+                return Ok(());
+            }
+            budget.record(role, tokens)
+        };
+        let breach = spend.breach;
+
+        // Surface the spend against budget on the stream, so a cap hit is never silent.
+        if let Err(err) = self.roster.report_budget(&BudgetEvent::from(spend)) {
+            event!(
+                name: "supervisor.budget.report_failed",
+                Level::WARN,
+                crew.role = %role,
+                "could not report budget for `{{crew.role}}`: {err}",
+            );
+        }
+
+        // Enforce: idle-stop rather than overrun. A crew breach stands the whole crew down;
+        // a role breach stops just that role.
+        match breach {
+            Some(BudgetScope::Crew) => {
+                event!(
+                    name: "supervisor.budget.crew_exhausted",
+                    Level::WARN,
+                    "the crew reached its token budget; idle-stopping every role",
+                );
+                self.stop_all()
+            }
+            Some(BudgetScope::Role) => {
+                event!(
+                    name: "supervisor.budget.role_capped",
+                    Level::WARN,
+                    crew.role = %role,
+                    "`{{crew.role}}` reached its token cap; idle-stopping it",
+                );
+                self.stop(role)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Idle-stops every agent in the fleet, keeping each roster entry (a crew budget hit).
+    fn stop_all(&self) -> Result<()> {
+        for driver in &self.drivers {
+            self.command(&driver.shared.role, Command::Stop)?;
+        }
+        Ok(())
     }
 
     /// Starts (or restarts) `role`'s agent: lazy start on first work, restart on demand.
@@ -271,12 +439,31 @@ impl Fleet {
             .clone()
     }
 
-    /// Stops the fleet: stands every agent down, deregisters its role, ends the watchdog.
+    /// A snapshot of the coordination stalls the monitor currently sees (issue #48).
+    ///
+    /// Each is a crew stuck waiting on itself: a deadlock, an unanswered question, or a
+    /// ledger with no forward motion. The monitor refreshes this every scan, so a stall
+    /// that clears leaves the list; the operator also sees each new one as a warning.
+    #[must_use]
+    pub fn stalls(&self) -> Vec<Stall> {
+        self.stalls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Stops the fleet: stands every agent down, deregisters its role, ends the
+    /// watchdog, and cleans up each role's worktree.
+    ///
+    /// Worktrees are removed only after every agent process has stopped (the driver
+    /// joins below), so no cleanup races a running agent. An unchanged worktree is
+    /// removed; one with uncommitted changes is kept for integration (issue #43).
     pub fn shutdown(mut self) {
         for driver in &self.drivers {
             let _ = driver.commands.send(Command::Shutdown);
         }
         let _ = self.watchdog_stop.send(());
+        let _ = self.stall_stop.send(());
         for driver in &mut self.drivers {
             if let Some(handle) = driver.handle.take() {
                 let _ = handle.join();
@@ -285,6 +472,11 @@ impl Fleet {
         if let Some(handle) = self.watchdog.take() {
             let _ = handle.join();
         }
+        if let Some(handle) = self.stall_monitor.take() {
+            let _ = handle.join();
+        }
+        // Every agent has stopped, so its worktree is no longer in use: clean it up.
+        crate::worktree::clean_all(&self.worktrees);
     }
 
     /// The driver for `role`, if present.
@@ -315,6 +507,7 @@ impl Drop for Fleet {
             let _ = driver.commands.send(Command::Shutdown);
         }
         let _ = self.watchdog_stop.send(());
+        let _ = self.stall_stop.send(());
     }
 }
 
@@ -776,5 +969,9 @@ mod tests {
         assert_eq!(policy.max_recoveries, 3);
         // The watchdog must sit above the in-turn heartbeat, so a live driver acts first.
         assert!(policy.watchdog_timeout > policy.heartbeat_timeout);
+        // A coordination stall is escalated well before a hung process is reaped.
+        assert_eq!(policy.stall_timeout.as_secs(), 10 * 60);
+        assert_eq!(policy.stall_scan_interval.as_secs(), 60);
+        assert!(policy.stall_timeout < policy.heartbeat_timeout);
     }
 }

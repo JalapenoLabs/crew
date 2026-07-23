@@ -21,10 +21,16 @@
 //! [`crew_core`]: crew_core
 
 mod api;
+mod board;
+mod boundary;
+mod briefing;
+mod budget;
 mod config;
+mod control;
 mod error;
 mod events;
 mod filter;
+mod gate;
 mod history;
 mod inbox;
 mod roster;
@@ -32,8 +38,10 @@ mod router;
 mod secrets;
 mod serve;
 mod state;
+mod stats;
 mod store;
 mod summary;
+mod usage;
 
 pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
 pub use error::ApiError;

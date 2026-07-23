@@ -6,7 +6,14 @@
 //!
 //! - `crew_send` (message a channel or role),
 //! - `crew_inbox` (read the messages addressed to it, self-filtered),
-//! - `crew_roster` (list teammates and the lanes they own).
+//! - `crew_roster` (list teammates and the lanes they own),
+//! - `crew_lane` (check a path against its owned lane before an out-of-lane edit),
+//! - `crew_submit` / `crew_verdict` / `crew_gate` (the adversarial done-gate: submit
+//!   work for verification, judge a teammate's work, and read the gate),
+//! - `crew_board` / `crew_record` (the shared situation board: read the crew's durable
+//!   memory, and record or retract a decision, interface, or gotcha),
+//! - `crew_briefing` (the bounded new-role briefing packet: the board and a lane-scoped
+//!   rolling summary, so a fresh role catches up without reading the whole log).
 //!
 //! The server is a thin client over the broker's HTTP + SSE API ([`crew_broker`]);
 //! it never touches the store. It acts as one role, configured when the supervisor
@@ -18,5 +25,8 @@
 mod broker;
 mod server;
 
-pub use broker::{Broker, InboxItem, RoleEntry};
+pub use broker::{
+    BoardEntryView, BoardSnapshot, BriefingPacket, Broker, GateSnapshot, GateTask, InboxItem,
+    RoleEntry, RosterSnapshot, Standing,
+};
 pub use server::Server;

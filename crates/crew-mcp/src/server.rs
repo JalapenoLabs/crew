@@ -8,9 +8,12 @@
 
 use std::io::{BufRead, Write};
 
+use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
-use crate::broker::{Broker, InboxItem, RoleEntry};
+use crate::broker::{
+    BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing,
+};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -22,13 +25,26 @@ const SERVER_NAME: &str = "crew-mcp";
 #[derive(Debug)]
 pub struct Server {
     broker: Broker,
+    /// The role's owned lane, for `crew_lane` (issue #46).
+    owned_paths: Vec<String>,
+    /// How the crew enforces this role's lane.
+    lane_enforcement: LaneEnforcement,
 }
 
 impl Server {
-    /// Builds a server that dispatches tool calls to `broker`.
+    /// Builds a server that dispatches tool calls to `broker`, enforcing the role's
+    /// lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
     #[must_use]
-    pub fn new(broker: Broker) -> Self {
-        Self { broker }
+    pub fn new(
+        broker: Broker,
+        owned_paths: Vec<String>,
+        lane_enforcement: LaneEnforcement,
+    ) -> Self {
+        Self {
+            broker,
+            owned_paths,
+            lane_enforcement,
+        }
     }
 
     /// Runs the stdio JSON-RPC loop, reading requests and writing responses, until
@@ -123,6 +139,56 @@ impl Server {
             }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
             "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
+            "crew_lane" => {
+                let path =
+                    str_arg(arguments, "path").ok_or("crew_lane requires a `path` to check")?;
+                self.broker
+                    .check_lane(&self.owned_paths, self.lane_enforcement, path)
+            }
+            "crew_submit" => {
+                let task =
+                    str_arg(arguments, "task").ok_or("crew_submit requires a `task` to submit")?;
+                self.broker.submit(
+                    task,
+                    str_arg(arguments, "acceptance").unwrap_or_default(),
+                    str_arg(arguments, "to"),
+                )
+            }
+            "crew_verdict" => {
+                let task =
+                    str_arg(arguments, "task").ok_or("crew_verdict requires a `task` to judge")?;
+                let pass = bool_arg(arguments, "pass")
+                    .ok_or("crew_verdict requires a boolean `pass` (true if it holds)")?;
+                self.broker.verdict(
+                    task,
+                    pass,
+                    str_arg(arguments, "failure").unwrap_or_default(),
+                )
+            }
+            "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
+            "crew_board" => Ok(render_board(
+                &self.broker.board(str_arg(arguments, "section"))?,
+            )),
+            "crew_record" => {
+                let key = str_arg(arguments, "key")
+                    .ok_or("crew_record requires a `key` (the entry's topic)")?;
+                if bool_arg(arguments, "retract").unwrap_or(false) {
+                    self.broker.retract(key)
+                } else {
+                    let section = str_arg(arguments, "section").ok_or(
+                        "crew_record requires a `section` (decision, interface, or gotcha) \
+                         unless retracting",
+                    )?;
+                    let body = str_arg(arguments, "body")
+                        .ok_or("crew_record requires a `body` (the content) unless retracting")?;
+                    self.broker.record(key, section, body)
+                }
+            }
+            "crew_briefing" => Ok(render_briefing(
+                &self
+                    .broker
+                    .briefing(str_arg(arguments, "task"), usize_arg(arguments, "budget"))?,
+            )),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -142,10 +208,19 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`, with docs written for a first-try correct call.
+/// The tool catalog for `tools/list`: coordination, done-gate, board, then briefing.
 fn tool_catalog() -> Value {
-    json!([
-        {
+    let mut tools = coordination_tools();
+    tools.extend(done_gate_tools());
+    tools.extend(board_tools());
+    tools.extend(briefing_tools());
+    Value::Array(tools)
+}
+
+/// The coordination tools: message, order, read the inbox and roster, and check a lane.
+fn coordination_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "crew_send",
             "description": "Send a message to a teammate or a channel, as your role. \
                 By default it goes to the commander (the unit's router), so an unaddressed \
@@ -164,8 +239,8 @@ fn tool_catalog() -> Value {
                 },
                 "required": ["body"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "crew_order",
             "description": "Issue an order: assign a scoped task to one specialist, as your \
                 role. This is the commander's fan-out handle for decomposing the General's \
@@ -189,23 +264,146 @@ fn tool_catalog() -> Value {
                 },
                 "required": ["to", "title"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "crew_inbox",
             "description": "Read the messages addressed to you since you last called this. \
                 Returns messages on your direct `@role` channel, any pair channel you belong \
                 to, and `all-units`, and never your own. Call it to catch up on what teammates \
                 have sent you.",
             "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
+        }),
+        json!({
             "name": "crew_roster",
             "description": "List the unit's roles: each teammate, the paths (lanes) it owns, \
                 and whether it is working, idle, stopped, or dead. Use it to see who is on the \
                 team and what they own before sending or claiming work.",
             "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "crew_lane",
+            "description": "Check whether a file `path` is inside your owned lane before you \
+                edit it, so you do not wander into a teammate's lane. An in-lane path is yours: \
+                proceed. An out-of-lane path is reported to the unit; do not edit it silently, \
+                route the change through the commander (crew_send) instead. Under a blocking \
+                policy the edit is refused. Call it before editing outside your obvious lane.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "The repo-relative file path you are about to edit." }
+                },
+                "required": ["path"]
+            }
+        }),
+    ]
+}
+
+/// The adversarial done-gate tools: submit work, return a verdict, and read the gate.
+fn done_gate_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "crew_submit",
+            "description": "Submit your finished work for adversarial verification instead of \
+                reporting it done yourself. Done means verified, not asserted: an independent \
+                role tries to break it against the acceptance criteria before it counts as done. \
+                `task` is the task title (match the order's title), `acceptance` restates the \
+                criteria the work must meet, and `to` optionally names the reviewer to notify \
+                (for example `to: \"qa\"`). This does not mark the task done; wait for the verdict, \
+                and if it fails, fix the specific failure and resubmit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task title, matching the order it came from." },
+                    "acceptance": { "type": "string", "description": "The acceptance criteria the work claims to meet." },
+                    "to": { "type": "string", "description": "An optional reviewer role to notify (for example `qa`)." }
+                },
+                "required": ["task"]
+            }
+        }),
+        json!({
+            "name": "crew_verdict",
+            "description": "Return a verdict on a task another role submitted for verification. \
+                You are the skeptic: actively try to break the work against its acceptance \
+                criteria. Set `pass` true only if you could not break it, which marks the task \
+                done. Set `pass` false and give the specific, actionable `failure` if you broke \
+                it, which returns the work to its owner to fix. You cannot verify your own work: \
+                an independent role must judge it. `task` is the task title.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task title under verification." },
+                    "pass": { "type": "boolean", "description": "True if you could not break it (marks it done); false if you broke it." },
+                    "failure": { "type": "string", "description": "The specific failure when `pass` is false, so the handback is actionable." }
+                },
+                "required": ["task", "pass"]
+            }
+        }),
+        json!({
+            "name": "crew_gate",
+            "description": "Read the done-gate: every task under verification, who owns it, who \
+                is verifying it, and whether it is submitted, passed, or failed. Use it to see \
+                what is awaiting an independent verifier and what has been proven done.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+    ]
+}
+
+/// The situation-board tools: read the crew's durable memory, and record or retract an entry.
+fn board_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "crew_board",
+            "description": "Read the shared situation board: the crew's durable memory of agreed \
+                interfaces, decisions and their rationale, and known gotchas. Check it before you \
+                re-derive a settled decision or re-litigate a choice; it outlives the message \
+                stream and survives a restart. Pass `section` to read just `decision`, \
+                `interface`, or `gotcha`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "section": { "type": "string", "enum": ["decision", "interface", "gotcha"], "description": "Read just this section; omit for the whole board." }
+                }
+            }
+        }),
+        json!({
+            "name": "crew_record",
+            "description": "Record a decision, an agreed interface, or a known gotcha on the shared \
+                situation board, so the crew stops re-deriving it. `key` is a stable topic (for \
+                example `auth-strategy`); recording the same key again updates the entry. \
+                `section` is `decision`, `interface`, or `gotcha`, and `body` is the content (for a \
+                decision, include the rationale). Set `retract: true` with just the `key` to remove \
+                an entry the crew no longer holds. The commander curates the board.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "The entry's stable topic key." },
+                    "section": { "type": "string", "enum": ["decision", "interface", "gotcha"], "description": "The section; required unless retracting." },
+                    "body": { "type": "string", "description": "The entry's content; required unless retracting." },
+                    "retract": { "type": "boolean", "description": "Remove the entry named by `key` instead of recording one." }
+                },
+                "required": ["key"]
+            }
+        }),
+    ]
+}
+
+/// The briefing tool: catch up with a bounded packet instead of the whole log.
+fn briefing_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "crew_briefing",
+        "description": "Get your bounded briefing packet: the current decision board and a \
+            rolling summary scoped to your lane (what has been said to you and about your \
+            work), instead of reading the whole log. Call this first thing when you boot to \
+            catch up in seconds. `budget` optionally caps the packet size in bytes; `task` \
+            optionally narrows the summary to one task's id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget": { "type": "integer", "description": "Cap the packet size in bytes (defaults to a few KB)." },
+                "task": { "type": "string", "description": "Narrow the summary to this task id, if you have one." }
+            }
         }
-    ])
+    })]
 }
 
 /// A JSON-RPC success response, moving `result` into the envelope.
@@ -234,6 +432,19 @@ fn str_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// A boolean argument, if present and a JSON boolean.
+fn bool_arg(arguments: &Value, key: &str) -> Option<bool> {
+    arguments.get(key).and_then(Value::as_bool)
+}
+
+/// A non-negative integer argument as a `usize`, if present and in range.
+fn usize_arg(arguments: &Value, key: &str) -> Option<usize> {
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 /// A string-array argument as owned strings, dropping blanks; empty if absent.
@@ -267,9 +478,11 @@ fn render_inbox(items: &[InboxItem]) -> String {
                 (detail, "") => detail.to_owned(),
                 (detail, body) => format!("{detail}. {body}"),
             };
+            // A redirect or belay is a General directive to honor at once, so flag it.
+            let marker = if item.directive { "[honor now] " } else { "" };
             format!(
-                "- {} on {} ({}): {}",
-                item.from, item.channel, item.kind, content
+                "- {}{} on {} ({}): {}",
+                marker, item.from, item.channel, item.kind, content
             )
         })
         .collect();
@@ -277,11 +490,14 @@ fn render_inbox(items: &[InboxItem]) -> String {
 }
 
 /// Renders the roster an agent reads.
-fn render_roster(roles: &[RoleEntry]) -> String {
-    if roles.is_empty() {
+fn render_roster(snapshot: &RosterSnapshot) -> String {
+    if snapshot.roles.is_empty() {
         return "The roster is empty.".to_owned();
     }
-    let lines: Vec<String> = roles
+    // The crew is gated whenever it is not running; a role is also gated on its own.
+    let crew_gated = snapshot.standing != Standing::Running;
+    let lines: Vec<String> = snapshot
+        .roles
         .iter()
         .map(|role| {
             let owns = if role.owned_paths.is_empty() {
@@ -289,10 +505,95 @@ fn render_roster(roles: &[RoleEntry]) -> String {
             } else {
                 format!(" owns {}", role.owned_paths.join(", "))
             };
-            format!("- {} [{}]{}", role.role, role.liveness, owns)
+            // Flag a role that must pull no new work: paused on its own, or crew-gated.
+            let gated = if role.paused || crew_gated {
+                " [PAUSED: pull no new work]"
+            } else {
+                ""
+            };
+            format!("- {} [{}]{}{}", role.role, role.liveness, owns, gated)
         })
         .collect();
-    format!("{} role(s):\n{}", roles.len(), lines.join("\n"))
+    let header = match snapshot.standing {
+        Standing::Running => format!("{} role(s):", snapshot.roles.len()),
+        Standing::Paused => format!("{} role(s) (the crew is PAUSED):", snapshot.roles.len()),
+        Standing::StoodDown => {
+            format!("{} role(s) (the crew is STOOD DOWN):", snapshot.roles.len())
+        }
+    };
+    format!("{header}\n{}", lines.join("\n"))
+}
+
+/// Renders the done-gate an agent reads: each task under verification and its standing.
+fn render_gate(snapshot: &GateSnapshot) -> String {
+    if snapshot.tasks.is_empty() {
+        return "The done-gate is empty; no task is under verification.".to_owned();
+    }
+    let lines: Vec<String> = snapshot
+        .tasks
+        .iter()
+        .map(|task| {
+            let verifier = task
+                .verifier
+                .as_deref()
+                .map(|who| format!(" by {who}"))
+                .unwrap_or_default();
+            let detail = if task.detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", task.detail)
+            };
+            format!(
+                "- {} owned by {} [{}{}]{}",
+                task.task, task.owner, task.verdict, verifier, detail
+            )
+        })
+        .collect();
+    format!(
+        "{} task(s) under the done-gate:\n{}",
+        snapshot.tasks.len(),
+        lines.join("\n")
+    )
+}
+
+/// Renders the situation board an agent reads: each entry, its section, author, and content.
+fn render_board(snapshot: &BoardSnapshot) -> String {
+    if snapshot.entries.is_empty() {
+        return "The situation board is empty.".to_owned();
+    }
+    let lines: Vec<String> = snapshot
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "- [{}] {} (by {}): {}",
+                entry.section, entry.key, entry.author, entry.body
+            )
+        })
+        .collect();
+    format!(
+        "{} board entr{}:\n{}",
+        snapshot.entries.len(),
+        if snapshot.entries.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        lines.join("\n")
+    )
+}
+
+/// Renders the briefing packet an agent reads on boot: the bounded text plus its size.
+fn render_briefing(packet: &BriefingPacket) -> String {
+    let note = if packet.capped {
+        format!(
+            "\n\n[briefing capped to {} of {} bytes; call crew_board or crew_inbox for more]",
+            packet.size, packet.budget
+        )
+    } else {
+        format!("\n\n[briefing: {} of {} bytes]", packet.size, packet.budget)
+    };
+    format!("{}{note}", packet.text)
 }
 
 #[cfg(test)]
@@ -305,15 +606,47 @@ mod tests {
 
     /// A server whose broker points nowhere; the protocol paths under test never call it.
     fn server() -> Server {
-        Server::new(Broker::new(
-            "http://127.0.0.1:1",
-            RoleId::new("backend"),
-            RoleId::new("commander"),
-        ))
+        Server::new(
+            Broker::new(
+                "http://127.0.0.1:1",
+                RoleId::new("backend"),
+                RoleId::new("commander"),
+            ),
+            vec!["api/".to_owned()],
+            crew_core::LaneEnforcement::Warn,
+        )
     }
 
     fn handle(server: &mut Server, message: &Value) -> Option<Value> {
         server.handle_line(&message.to_string())
+    }
+
+    #[test]
+    fn render_inbox_flags_a_general_directive_to_honor_at_once() {
+        use super::render_inbox;
+        use crate::broker::InboxItem;
+
+        let item = |kind: &str, directive: bool| InboxItem {
+            from: "general".to_owned(),
+            channel: "@backend".to_owned(),
+            kind: kind.to_owned(),
+            detail: String::new(),
+            body: "switch to the login bug".to_owned(),
+            directive,
+        };
+
+        let rendered = render_inbox(&[item("redirect", true)]);
+        assert!(
+            rendered.contains("[honor now]"),
+            "a directive is flagged: {rendered}"
+        );
+        assert!(rendered.contains("(redirect)"), "and names the kind");
+
+        let plain = render_inbox(&[item("note", false)]);
+        assert!(
+            !plain.contains("[honor now]"),
+            "a plain message is not flagged: {plain}"
+        );
     }
 
     #[test]
@@ -347,7 +680,19 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["crew_send", "crew_order", "crew_inbox", "crew_roster"]
+            [
+                "crew_send",
+                "crew_order",
+                "crew_inbox",
+                "crew_roster",
+                "crew_lane",
+                "crew_submit",
+                "crew_verdict",
+                "crew_gate",
+                "crew_board",
+                "crew_record",
+                "crew_briefing"
+            ]
         );
         // Each tool documents itself and its arguments.
         for tool in tools {
@@ -419,6 +764,52 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("to"));
+    }
+
+    #[test]
+    fn crew_verdict_without_pass_is_a_tool_error_not_a_broker_call() {
+        // A missing `pass` fails before the broker is touched, so the bogus base is fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                    "params": { "name": "crew_verdict", "arguments": { "task": "login" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pass"));
+    }
+
+    #[test]
+    fn crew_submit_without_a_task_is_a_tool_error_not_a_broker_call() {
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": { "name": "crew_submit", "arguments": {} } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("task"));
+    }
+
+    #[test]
+    fn crew_record_without_a_key_is_a_tool_error_not_a_broker_call() {
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                    "params": { "name": "crew_record", "arguments": { "section": "decision", "body": "x" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("key"));
     }
 
     #[test]

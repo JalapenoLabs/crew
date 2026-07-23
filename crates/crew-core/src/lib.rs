@@ -9,7 +9,8 @@
 //!   [`TaskId`]) and the [`Timestamp`] wrapper;
 //! - the [`Sender`] of an event (a role, or the General);
 //! - the [`Event`] stream item and its [`EventKind`] payloads ([`Message`] with a
-//!   [`MessageKind`], [`Lifecycle`], and [`Activity`]);
+//!   [`MessageKind`], [`Lifecycle`], [`Activity`], [`BoundaryEvent`], [`VerificationEvent`],
+//!   and [`BoardEvent`]);
 //! - the [`Channel`] model that names a message's audience (`all-units`, a direct
 //!   `@role`, or a `a+b` pair) and resolves which roles it reaches;
 //! - the [`RoleCard`] an agent boots from: its lane, its acceptance bar, and how to
@@ -19,16 +20,23 @@
 //! route it and any front-end can render it (see `docs/communication.md` and
 //! `docs/observability.md`).
 
+mod budget;
 mod card;
 mod channel;
 mod config;
 mod event;
 mod id;
+mod lane;
 mod time;
 
+pub use budget::{Budget, BudgetScope, Spend};
 pub use card::{BrokerEndpoint, CardError, RoleCard, ROLE_CARD_ENV};
 pub use channel::{Channel, ALL_UNITS};
-pub use config::{ConfigError, CrewConfig, RoleSpec};
-pub use event::{Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind};
+pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
+pub use event::{
+    Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, Event, EventKind,
+    Lifecycle, Message, MessageKind, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
+};
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
+pub use lane::path_in_lane;
 pub use time::Timestamp;

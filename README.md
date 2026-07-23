@@ -31,8 +31,8 @@ later.
 
 See [`docs/`](docs/) for the design: [architecture](docs/architecture.md),
 [communication](docs/communication.md), [roles](docs/roles.md), the
-[stream contract](docs/stream-contract.md) for external consumers, and the
-[roadmap](docs/roadmap.md).
+[stream contract](docs/stream-contract.md) and [distribution](docs/distribution.md)
+for external consumers, and the [roadmap](docs/roadmap.md).
 
 ## Layout
 

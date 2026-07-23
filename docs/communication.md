@@ -77,6 +77,10 @@ posts to the channel named in the path, and `GET /events` reads the log.
   - `artifact` references a produced thing (a reference plus its kind: a branch, a
     PR, a file, or a route).
   - `note` is freeform prose for anything the above do not cover.
+  - `redirect` steers a role mid-task without stopping it (the General's directive,
+    honored at once; see Command and control below).
+  - `belay` halts a role's current work and re-tasks it with a new order (the General's
+    directive).
 - `body` (markdown), plus the per-kind structured fields above, flattened onto the
   message on the wire.
 
@@ -101,6 +105,28 @@ tail, so a dropped connection loses nothing. A fresh connection with no cursor
 starts at the live tail rather than replaying the whole history (that catch-up is
 the rolling summary's job, below). The canonical channel model and membership are
 issue #11.
+
+## Command and control
+
+The General steers a running agent without tearing the crew down, the core "I am in
+command" gesture (issue #38). Two directives:
+
+- **`crew redirect <role> "..."`** injects a steering message. The role honors it at
+  its next tool boundary, keeps its current task, and adjusts course.
+- **`crew belay <role> "..."`** halts the role's current work and re-tasks it: the role
+  stops what it is doing and takes the message as its new order.
+
+Both are `MessageKind` variants (`redirect`, `belay`) posted from the General to the
+role's direct `@role` channel, so they ride the ordinary delivery path above: the
+broker stamps and stores them and fans them to the role's self-filtered inbox stream.
+Delivery is the same whether the role is mid-turn or idle. A mid-turn injection lands
+at the next tool boundary, never by killing the process: the message waits on the
+inbox, and the agent reads it between tool calls. The role card briefs every agent to
+honor a redirect or belay at once, and the inbox flags a directive (`[honor now]`), so
+the "act immediately" contract is the agent's, and delivery is the broker's.
+
+These are the General's directives, distinct from the commander's `crew_order` fan-out:
+the commander decomposes and assigns; the General interjects to steer.
 
 ## Secret scrubbing
 
@@ -130,16 +156,42 @@ it:
   (`channel`, `role`, `kind`, `task`, `since`), so a joiner can summarize one task
   or channel. A fresh SSE connection with no cursor starts at the live tail, so the
   summary is the deliberate catch-up path.
-- **Scoped reads.** A role fetches its own channels, not the whole board.
+- **Scoped reads.** A role fetches its own channels, not the whole stream.
 - **Pruning.** Old raw events age out behind the summary in the joiner's view: the
   summary stands in for them so a joiner never reads them. Physically dropping the
   aged-out events from storage (bounding the broker's own footprint over a very long
   run) is a later optimization; the durable log stays the append-only source of
   truth in the meantime.
+- **Situation board.** The rolling summary bounds the *transient* stream; the shared
+  situation board bounds re-derivation (issue #49). It is the crew's durable memory,
+  distinct from the message stream: agreed interfaces, decisions and their rationale, and
+  known gotchas. A role reads it with `crew_board` before re-deriving a settled decision,
+  and records one with `crew_record` so no one relitigates it; the commander curates it. It
+  is a projection of `board` events, so it is auditable and rebuilt from the durable log
+  across an idle-stop or a restart (see `docs/observability.md`, the situation board).
+- **New-role briefing packet.** The three bounded pieces come together at boot (issue
+  #50): a freshly spawned role catches up from its role card, the current decision board,
+  and a rolling summary scoped to its own lane, never the raw transcript. `GET
+  /briefing?role=<role>` (the `crew_briefing` tool) assembles the board plus a summary of
+  the role's timeline (what it sent and what is addressed to it, so its lane and the work
+  at hand), renders it to text, and caps it to a byte budget, reporting the measured size
+  so the packet stays small no matter how long the mission has run. A role calls
+  `crew_briefing` first thing on boot, so it joins mid-mission with bounded context and
+  acts in its lane in seconds rather than reading the whole log. See `docs/roles.md` (the
+  briefing packet).
 
 ## Relationship to the coworker skill
 
 The `coworker` skill is crew's ancestor: a shared markdown file plus a `tail -F`
-monitor. Its transport is what crew replaces. Upgrading the skill to use a broker
-instead of a file is a **separate, tracked effort** (see `roadmap.md`), so the
-skill improves for existing users without waiting on all of crew.
+monitor. Its transport is what crew replaces.
+
+crew ships the upgraded skill at `skills/coworker/` (issue #37). It keeps the skill's
+shape, an agent scoped to a lane that talks to its teammates, and swaps the transport:
+the shared file becomes `crew send`, and the `tail -F` monitor becomes `crew watch
+--role <role>`, a role's self-filtered inbox stream. So an existing coworker user gets
+routing, no self-echo, and a bounded catch-up by pointing the skill at a running
+broker, without waiting on the rest of crew. The skill shrinks to a role-card
+bootstrap (you are role X, here is your lane, here is the broker) because the broker
+now owns the routing, self-echo filtering, and catch-up the skill used to describe by
+convention. If no broker is reachable, the skill says so and asks for one rather than
+falling back to a file.

@@ -11,9 +11,12 @@ resolver = "2"
 members = ["crates/*"]
 
 # Metadata every crate inherits, so version, license, and repository stay in one
-# place across the split (`field.workspace = true` in each member).
+# place across the split (`field.workspace = true` in each member). The single
+# workspace version is the version a consumer pins by tag `v<version>` when it takes
+# the substrate as a Git dependency (issue #35; see docs/distribution.md). It is
+# pre-1.0, so a minor bump may change the API until it stabilizes.
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -44,20 +47,23 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 # Adapt a broadcast receiver into a Stream for axum's SSE fan-out.
 tokio-stream = { version = "0.1", features = ["sync"] }
-# A synchronous HTTP client for the MCP server's calls to the broker. http-only
-# (no TLS backend) since the broker is localhost, so a fresh clone builds without a
-# system OpenSSL (M-OOBE).
+# A synchronous HTTP client for the CLI (issue #15) and the MCP server (issue #17)
+# calling the broker. http-only (no TLS backend) since the broker is localhost, so a
+# fresh clone builds without a system OpenSSL (M-OOBE).
 ureq = { version = "2", default-features = false }
 # The CLI argument parser: derive the `crew` command surface (up, down, ...).
 clap = { version = "4", features = ["derive"] }
 # Internal crates. The domain graph flows toward crew-core; crew-cli is a consumer
 # only, never a dependency. crew-telemetry is a standalone infrastructure crate the
-# binaries call to initialize logging.
+# binaries call to initialize logging. crew-substrate is the umbrella that re-exports
+# the four substrate crates as one consumable dependency (issue #34); a front-end
+# depends on it, not on the individual crates.
 crew-core = { path = "crates/crew-core" }
 crew-broker = { path = "crates/crew-broker" }
 crew-supervisor = { path = "crates/crew-supervisor" }
 crew-mcp = { path = "crates/crew-mcp" }
 crew-telemetry = { path = "crates/crew-telemetry" }
+crew-substrate = { path = "crates/crew-substrate" }
 
 # The compiler and clippy lint sets from ~/.claude/docs/rust.md, defined once and
 # inherited by every member via `[lints] workspace = true`.

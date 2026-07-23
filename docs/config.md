@@ -15,7 +15,10 @@ The type is `crew_core::CrewConfig`; it is broker-agnostic and produces the per-
 model = "sonnet"          # the default model every role runs
 commander = "commander"   # the lead and router the General briefs
 idle_stop = "10m"         # how long a role may be quiet before it is stopped
+token_budget = 5_000_000  # the crew-wide token ceiling (issue #54)
 repos = ["api", "web"]    # the repos in scope
+worktrees = true          # give each role its own git worktree (issue #43)
+lane_enforcement = "warn" # what happens on an out-of-lane edit (issue #46)
 
 [[roles]]
 role = "commander"
@@ -26,6 +29,7 @@ role = "backend"
 owned_paths = ["api/", "db/"]
 acceptance = "Tests green, migrations reversible."
 model = "haiku"           # a per-role override of the crew default
+token_cap = 1_000_000     # this role's own token ceiling (issue #54)
 
 [[roles]]
 role = "frontend"
@@ -45,7 +49,24 @@ Every field is optional and takes a default:
 - `model` defaults to `opus` (a Claude Code alias that resolves to the current build).
 - `idle_stop` defaults to `5m`. It accepts a number of seconds or a number with an
   `s` / `m` / `h` suffix (`30s`, `5m`, `2h`).
+- `token_budget` (issue #54) is the crew-wide ceiling on total token spend across every
+  role; a role's `token_cap` is the ceiling on its own spend. Both default to unset, which
+  leaves the crew (or the role) unbounded. When the crew reaches its budget the supervisor
+  idle-stops every role; when a role reaches its cap it idle-stops that role, keeping its
+  roster entry so the General can raise the cap and restart it. Spend against budget rides
+  the stream as a `budget` event, so a cap hit is never silent. See `docs/observability.md`
+  (token budget).
 - `repos` defaults to empty.
+- `worktrees` defaults to `false`. With it on and `repos` set, the supervisor gives
+  each role its own git worktree of those repos (on a `crew/<role>` branch), so
+  parallel roles never clobber each other's edits (issue #43). An unchanged worktree is
+  cleaned up on stand-down; one with uncommitted changes is kept for integration (#48).
+- `lane_enforcement` defaults to `warn`. It sets what happens when a role reaches
+  outside its owned paths (issue #46): `warn` reports the crossing to the unit and lets
+  the role proceed, `block` reports and refuses the out-of-lane edit, and `off` disables
+  the check. The policy is crew-wide and rides each role card; a role checks a path with
+  the `crew_lane` tool before editing outside its lane. See `docs/roles.md` (lane
+  enforcement) and `docs/observability.md` (the `boundary` event).
 
 An empty config document (`""`) therefore resolves to the default crew, so `crew up`
 with no config still brings a full unit online.
