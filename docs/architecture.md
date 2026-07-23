@@ -154,8 +154,9 @@ role. See `docs/codex.md`.
 (issue #43). With `worktrees` on in the config, the supervisor gives each role its own
 git worktree of each configured repo, on a `crew/<role>` branch, and points the agent's
 working directory at it, so two roles editing the same file at once never corrupt each
-other: git keeps each worktree's index and files separate. The fleet owns the worktrees
-and cleans them up on stand-down, after each agent has stopped: an unchanged worktree is
+other: git keeps each worktree's index and files separate. The running crew owns the
+worktrees and cleans them up on stand-down, after each agent has stopped, whether it came
+up through the lazy `Fleet` or the eager `Crew` (issue #127): an unchanged worktree is
 removed (its branch, and any commits on it, survive), while one with uncommitted changes
 is kept, since integrating a role's work is a deliberate later step (issue #48).
 Isolation is opt-in and off by default; a crew with no repos configured runs each role

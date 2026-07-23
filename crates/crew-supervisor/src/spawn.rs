@@ -246,21 +246,37 @@ impl Supervisor {
     /// card's runtime (issue #128), each registered on the roster. Returns
     /// the running [`Crew`].
     ///
+    /// When `config` opts into worktree isolation (`worktrees` on, with
+    /// `repos`), each role works in its own git worktree and the returned crew
+    /// owns them, cleaning them up on stand-down (issue #127); pass `None` for
+    /// the plain, un-isolated bring-up. This mirrors
+    /// [`launch`](Supervisor::launch) so both spawn paths isolate the same way.
+    ///
     /// # Errors
     /// Returns an error if the MCP server cannot be located or registered, a
     /// card cannot be provisioned, or an agent cannot be registered or
-    /// spawned; any agents already started are shut down before the error
-    /// is returned.
-    pub fn up(&self, cards: &[RoleCard]) -> Result<Crew> {
+    /// spawned; any agents already started, and any worktrees already created,
+    /// are cleaned up before the error is returned.
+    pub fn up(&self, cards: &[RoleCard], config: Option<&CrewConfig>) -> Result<Crew> {
         // Only a Claude role needs the MCP server; a Codex-only crew must not
         // require `claude` (issue #128).
         register_mcp_if_needed(cards.iter().map(|card| card.runtime))?;
 
-        // The card-based entry has no config, so no repos and no worktree isolation;
-        // `config_dir` is unused without repos to resolve.
-        let (prepared, _worktrees) = self.prepare(cards, None, Path::new("."))?;
+        // Resolve worktrees when `config` opts into isolation (issue #127); the
+        // card-based entry has no config file, so the workspace anchor for a bare
+        // `repos` name is the current directory (issue #126).
+        let (prepared, worktrees) = self.prepare(cards, config, Path::new("."))?;
         let roster = RosterClient::new(self.broker.base_url());
-        Crew::spawn(&roster, prepared)
+        match Crew::spawn(&roster, prepared) {
+            // The crew owns the worktrees so they are cleaned up on stand-down.
+            Ok(crew) => Ok(crew.with_worktrees(worktrees)),
+            Err(err) => {
+                // The agents failed to spawn; remove the worktrees `prepare` made,
+                // so a failed bring-up leaves none behind.
+                worktree::clean_all(&worktrees);
+                Err(err)
+            }
+        }
     }
 
     /// Launches a lifecycle-managed [`Fleet`] for the crew described by
@@ -403,12 +419,17 @@ fn repo_name(repo: &Path) -> String {
 /// Each agent is registered on the roster while its process runs and
 /// deregistered when it exits. Read captured output with
 /// [`outputs`](Crew::outputs), and stop the
-/// crew with [`shutdown`](Crew::shutdown). Dropping the crew without shutting
-/// down still kills the processes, so it never leaks them.
+/// crew with [`shutdown`](Crew::shutdown), which also cleans up any worktrees
+/// the crew owns (see [`with_worktrees`](Crew::with_worktrees)). Dropping the
+/// crew without shutting down still kills the processes, so it never leaks
+/// them.
 #[derive(Debug)]
 pub struct Crew {
     agents: Vec<AgentHandle>,
     output: Receiver<Captured>,
+    /// The per-role git worktrees to clean up on stand-down (issue #43); empty
+    /// unless the crew opted into worktree isolation (issue #127).
+    worktrees: Vec<Worktree>,
 }
 
 impl Crew {
@@ -438,7 +459,22 @@ impl Crew {
         Ok(Self {
             agents: handles,
             output,
+            worktrees: Vec::new(),
         })
+    }
+
+    /// Hands the crew the per-role worktrees to clean up on stand-down (issue
+    /// #43, #127).
+    ///
+    /// The supervisor creates them before spawning; the crew owns them so it
+    /// can remove each unchanged one once its agent has stopped (see
+    /// [`shutdown`](Crew::shutdown)). This mirrors the lazy
+    /// [`Fleet`](crate::Fleet), so both spawn paths behave the same when
+    /// isolation is on.
+    #[must_use]
+    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
+        self.worktrees = worktrees;
+        self
     }
 
     /// The roles currently under supervision.
@@ -455,14 +491,19 @@ impl Crew {
         &self.output
     }
 
-    /// Stops the crew: kills each process and waits for its role to be
-    /// deregistered.
+    /// Stops the crew: kills each process, waits for its role to be
+    /// deregistered, then cleans up the crew's worktrees.
+    ///
+    /// Every agent has stopped before the worktrees are touched, so cleanup
+    /// never races a running agent. An unchanged worktree is removed; one with
+    /// uncommitted changes is kept for integration (issue #43).
     ///
     /// # Errors
     /// Never returns an error today; the `Result` leaves room for surfacing a
     /// shutdown fault without breaking callers.
     pub fn shutdown(mut self) -> Result<()> {
         stop_all(&mut self.agents);
+        crate::worktree::clean_all(&self.worktrees);
         Ok(())
     }
 }

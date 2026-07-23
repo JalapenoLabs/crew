@@ -508,7 +508,10 @@ lifecycle mechanics and takes fully-resolved `AgentCommand`s, so it is exercised
 tests with a stub process instead of a real `claude`. Shutting the crew down kills the
 processes and deregisters every role; a dropped crew still kills its processes.
 The roster of roles comes from the crew config (issue #25), which `up` consumes as
-role cards.
+role cards. Like the lazy `Fleet`, the eager `Crew` owns its worktrees and cleans them
+up on stand-down (`Crew::with_worktrees`, issue #127): `up` takes an optional `CrewConfig`
+and, when it opts into worktree isolation, hands the crew the per-role worktrees so both
+spawn paths isolate and clean up the same way (a failed bring-up removes any it created).
 
 `crew_supervisor::Fleet` manages each agent's lifecycle so idle roles cost nothing and
 crashes recover (issue #22). Each agent runs a state machine on its own driver thread:

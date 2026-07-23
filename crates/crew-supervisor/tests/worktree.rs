@@ -1,9 +1,11 @@
-//! Fleet-level worktree isolation and cleanup on stand-down (issue #43).
+//! Worktree isolation and cleanup on stand-down (issue #43), for both the lazy
+//! [`Fleet`] and the eager [`Crew`] spawn paths (issue #127).
 //!
 //! Proves the acceptance against a real git repo and a real in-process broker,
 //! with stub agents standing in for `claude`: two roles get isolated worktrees,
-//! and standing the fleet down cleans up an unchanged worktree while preserving
-//! a changed one for integration.
+//! and standing the crew down cleans up an unchanged worktree while preserving
+//! a changed one for integration. The same ownership and cleanup holds whether
+//! the crew came up through the fleet or the eager crew.
 
 mod common;
 
@@ -12,7 +14,7 @@ use std::{path::Path, process::Command, time::Duration};
 use common::{liveness, start_broker, wait_until};
 use crew_core::RoleId;
 use crew_supervisor::{
-    AgentCommand, Fleet, LifecyclePolicy, PreparedAgent, RosterClient, Worktree,
+    AgentCommand, Crew, Fleet, LifecyclePolicy, PreparedAgent, RosterClient, Worktree,
 };
 
 /// Runs a git command in `dir`, asserting it succeeds.
@@ -136,6 +138,38 @@ fn parallel_worktrees_are_isolated_and_cleaned_up_on_stand_down() {
         .unwrap();
     let branches = String::from_utf8_lossy(&branches.stdout);
     assert!(branches.contains("crew/backend") && branches.contains("crew/frontend"));
+}
+
+#[test]
+fn the_eager_crew_owns_and_cleans_up_its_worktrees_on_shutdown() {
+    // Issue #127: the eager Crew path gets the same worktree ownership and
+    // stand-down cleanup as the lazy Fleet, so both behave the same with
+    // isolation on.
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+
+    let root = scratch("eager-crew");
+    let repo = root.join("repo");
+    init_repo(&repo);
+
+    // One role, isolated in its own pristine (so, unchanged) worktree.
+    let backend = Worktree::create(&repo, &RoleId::new("backend"), &root.join("backend")).unwrap();
+    let backend_path = backend.path().to_path_buf();
+
+    let crew = Crew::spawn(&roster, vec![stub_in("backend", &backend_path)])
+        .expect("the crew spawns")
+        .with_worktrees(vec![backend]);
+    assert!(wait_until(
+        || liveness(&base, "backend").as_deref() == Some("working")
+    ));
+
+    // Stand down: the agent stops, and its unchanged worktree is cleaned up, the
+    // Fleet behavior now extended to the eager Crew.
+    crew.shutdown().expect("the crew stands down");
+    assert!(
+        !backend_path.exists(),
+        "the eager crew cleans up an unchanged worktree on shutdown (#127)",
+    );
 }
 
 #[test]
