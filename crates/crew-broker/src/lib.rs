@@ -7,8 +7,10 @@
 //! (issue #8). A `POST /channels/{channel}/messages` stamps the timestamp
 //! server-side (rejecting a spoofed one), masks configured secret values out of
 //! the event with the [`Scrubber`], persists it, and fans it to every subscriber
-//! on the `GET /stream` SSE feed (issue #9). The self-filtered per-role streams,
-//! the roster, and the rolling-summary history come in later tickets.
+//! on the `GET /stream` SSE feed (issue #9). A `GET /history` reads past events,
+//! filtered, time-ordered, and paginated with a cursor stable under concurrent
+//! writes (issue #12). The self-filtered per-role streams, the roster, and the
+//! rolling-summary history come in later tickets.
 //!
 //! Run it with the `crewd` binary, or drive it as a library through [`run`].
 //!
@@ -18,6 +20,7 @@ mod api;
 mod config;
 mod error;
 mod events;
+mod history;
 mod router;
 mod secrets;
 mod serve;
