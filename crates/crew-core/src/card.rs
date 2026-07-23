@@ -36,7 +36,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{config::LaneEnforcement, id::RoleId, lane::path_in_lane};
+use crate::{
+    config::{LaneEnforcement, Runtime},
+    id::RoleId,
+    lane::path_in_lane,
+};
 
 /// The environment variable naming the role card a spawned agent boots from.
 ///
@@ -93,6 +97,11 @@ pub struct RoleCard {
     /// warns, blocks, or is unchecked (issue #46). Defaults to `warn`.
     #[serde(default)]
     pub lane_enforcement: LaneEnforcement,
+    /// The runtime this role runs on (issue #128), so
+    /// [`briefing`](Self::briefing) tells a Codex agent to use the CLI shim
+    /// rather than the MCP tools. Defaults to [`Claude`](Runtime::Claude).
+    #[serde(default)]
+    pub runtime: Runtime,
     /// How to reach the unit: the broker's address.
     pub broker: BrokerEndpoint,
 }
@@ -118,6 +127,7 @@ impl RoleCard {
             acceptance: acceptance.into(),
             commander: default_commander(),
             lane_enforcement: LaneEnforcement::default(),
+            runtime: Runtime::default(),
             broker,
         }
     }
@@ -127,6 +137,14 @@ impl RoleCard {
     #[must_use]
     pub fn with_lane_enforcement(mut self, enforcement: LaneEnforcement) -> Self {
         self.lane_enforcement = enforcement;
+        self
+    }
+
+    /// Sets the runtime this role runs on (issue #128), returning the card so
+    /// calls chain.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime: Runtime) -> Self {
+        self.runtime = runtime;
         self
     }
 
@@ -204,6 +222,25 @@ impl RoleCard {
         let mut out = String::new();
         let _ = writeln!(out, "You are the {} role on a crew.", self.role);
         out.push('\n');
+
+        if self.runtime == Runtime::Codex {
+            // A Codex agent has no MCP tools, so it reaches the crew through the CLI
+            // shim (issue #28, #128). Every `crew_<tool>` named below maps to a
+            // `crew <tool>` command it runs on the shell; this note adapts the whole
+            // briefing rather than restating it per tool.
+            out.push_str(
+                "You are a Codex agent, so you do not have the crew MCP tools. Reach the unit \
+                 through the crew CLI shim instead: wherever this briefing names a `crew_<tool>`, \
+                 run the matching command on the shell as `crew <tool>` (crew_send is `crew send`, \
+                 crew_inbox is `crew inbox`, crew_roster is `crew roster`, crew_briefing is `crew \
+                 briefing`, crew_lane is `crew lane`, crew_claim is `crew claim`, crew_ledger is \
+                 `crew ledger`, crew_submit is `crew submit`, crew_verdict is `crew verdict`, \
+                 crew_board is `crew board`, crew_record is `crew record`). First thing, run `crew \
+                 register` so the unit sees you on the roster and the stream. There is no `crew \
+                 order` shim yet, so issue an order as a plain `crew send` to the specialist.\n",
+            );
+            out.push('\n');
+        }
 
         if self.owned_paths.is_empty() {
             out.push_str(
@@ -448,6 +485,45 @@ mod tests {
         let toml = card.to_toml().unwrap();
         let parsed = RoleCard::from_toml(&toml).unwrap();
         assert_eq!(parsed, card, "a serialized card parses back unchanged");
+    }
+
+    #[test]
+    fn a_codex_role_gets_the_shim_briefing_a_claude_role_does_not() {
+        use crate::Runtime;
+
+        // A Claude role (the default) reaches the crew through the MCP tools, so its
+        // briefing carries no shim adapter note.
+        let claude = sample().briefing();
+        assert!(
+            claude.contains("crew MCP tools"),
+            "a claude role uses the MCP tools"
+        );
+        assert!(
+            !claude.contains("You are a Codex agent"),
+            "a claude briefing has no shim adapter note",
+        );
+
+        // A Codex role has no MCP tools, so its briefing tells it to use the CLI shim,
+        // maps the tools to `crew <cmd>`, and reminds it to register first (issue
+        // #128).
+        let codex = sample().with_runtime(Runtime::Codex).briefing();
+        assert!(
+            codex.contains("You are a Codex agent") && codex.contains("crew CLI shim"),
+            "a codex briefing adapts to the shim: {codex}",
+        );
+        assert!(
+            codex.contains("`crew send`") && codex.contains("`crew register`"),
+            "it maps the tools to shim commands and says to register first",
+        );
+
+        // The runtime round-trips through the card TOML.
+        let parsed =
+            RoleCard::from_toml(&sample().with_runtime(Runtime::Codex).to_toml().unwrap()).unwrap();
+        assert_eq!(
+            parsed.runtime,
+            Runtime::Codex,
+            "the runtime survives serialization"
+        );
     }
 
     #[test]

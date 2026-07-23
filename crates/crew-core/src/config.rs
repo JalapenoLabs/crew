@@ -46,6 +46,26 @@ pub enum LaneEnforcement {
     Block,
 }
 
+/// The agent runtime a role runs on: which CLI the supervisor spawns, and how
+/// the role reaches the crew (issue #28, #128).
+///
+/// The broker and roster do not care which runtime produced a role, so a crew
+/// can mix them: `crew up` spawns each role on its configured runtime, and they
+/// coordinate through the same broker (see `docs/codex.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Runtime {
+    /// Claude Code (the default): the supervisor spawns `claude` with the crew
+    /// MCP server, and the agent reaches the crew through the MCP tools
+    /// (`crew_send`, `crew_inbox`, ...).
+    #[default]
+    Claude,
+    /// Codex: the supervisor spawns `codex` and the agent reaches the crew
+    /// through the CLI shim (`crew send`, `crew inbox`, ...), which mirrors the
+    /// MCP tools over the same broker client (see `docs/codex.md`).
+    Codex,
+}
+
 /// The default commander: the lead and router the General briefs.
 const DEFAULT_COMMANDER: &str = "commander";
 
@@ -137,6 +157,10 @@ pub struct RoleSpec {
     /// [`token_budget`](CrewConfig::token_budget). When the role reaches
     /// its cap, the supervisor idle-stops it rather than overrun.
     pub token_cap: Option<u64>,
+    /// The runtime the supervisor spawns this role on (issue #128). Defaults to
+    /// [`Claude`](Runtime::Claude); set `runtime = "codex"` to run it as a
+    /// Codex agent wired to the CLI shim instead.
+    pub runtime: Runtime,
 }
 
 impl Default for CrewConfig {
@@ -202,6 +226,7 @@ impl CrewConfig {
                 )
                 .with_commander(self.commander.clone())
                 .with_lane_enforcement(self.lane_enforcement)
+                .with_runtime(spec.runtime)
             })
             .collect()
     }
@@ -374,6 +399,7 @@ fn default_roles() -> Vec<RoleSpec> {
         tier: None,
         model: None,
         token_cap: None,
+        runtime: Runtime::default(),
     };
     vec![
         role("commander", &[]),
@@ -469,6 +495,7 @@ struct RawRole {
     tier: Option<ModelTier>,
     model: Option<String>,
     token_cap: Option<u64>,
+    runtime: Option<Runtime>,
 }
 
 impl RawConfig {
@@ -519,6 +546,7 @@ impl RawRole {
             tier: self.tier,
             model: normalize_alias(self.model),
             token_cap: self.token_cap,
+            runtime: self.runtime.unwrap_or_default(),
         }
     }
 }
@@ -608,8 +636,48 @@ enum ErrorKind {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{parse_duration, CrewConfig};
+    use super::{parse_duration, CrewConfig, Runtime};
     use crate::{BrokerEndpoint, RoleId};
+
+    #[test]
+    fn a_role_runtime_defaults_to_claude_and_parses_codex() {
+        let config = CrewConfig::from_toml(
+            "commander = \"backend\"\n\n\
+             [[roles]]\nrole = \"backend\"\n\n\
+             [[roles]]\nrole = \"scout\"\nruntime = \"codex\"",
+        )
+        .expect("a per-role runtime is valid config");
+        let runtime = |name: &str| {
+            config
+                .roles
+                .iter()
+                .find(|role| role.role == RoleId::new(name))
+                .unwrap()
+                .runtime
+        };
+        assert_eq!(
+            runtime("backend"),
+            Runtime::Claude,
+            "runtime defaults to claude"
+        );
+        assert_eq!(
+            runtime("scout"),
+            Runtime::Codex,
+            "runtime = \"codex\" parses"
+        );
+
+        // to_cards carries the runtime onto each card, so the spawn path can branch.
+        let cards = config.to_cards(&BrokerEndpoint::new("127.0.0.1", 2739));
+        let scout = cards
+            .iter()
+            .find(|card| card.role == RoleId::new("scout"))
+            .unwrap();
+        assert_eq!(
+            scout.runtime,
+            Runtime::Codex,
+            "the card carries the codex runtime"
+        );
+    }
 
     /// A fully specified config exercising every field, mirrored in
     /// `docs/config.md`.

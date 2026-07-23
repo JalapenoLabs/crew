@@ -47,7 +47,8 @@ per task and refuses a conflicting claim, naming the holder, so a clash surfaces
 than races. `crew_ledger` shows who holds what. See `docs/observability.md`.
 
 A crew is described by a declarative config (`crew_core::CrewConfig`, issue #25): the
-roles and the lane each owns, the model tier each runs (issue #53), the repos in scope,
+roles and the lane each owns, the model tier each runs (issue #53), the runtime each runs
+on (`claude` or `codex`, issue #128), the repos in scope,
 the idle-stop timeout, and the commander. `crew up` reads it, and it validates itself (an
 unknown commander or an overlapping ownership boundary fails with a precise message). Omit
 it and the default crew below applies, with the lead on the strong model and the
