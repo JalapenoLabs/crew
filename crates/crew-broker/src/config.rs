@@ -3,6 +3,7 @@
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use eyre::{Result, WrapErr};
 
@@ -50,6 +51,12 @@ pub struct Config {
     /// Defaults to [`DEFAULT_USAGE_THRESHOLD`]; a value at or above 100 disables the
     /// auto-pause, since a reading never reaches it.
     pub usage_threshold: u8,
+    /// The approval timeout policy (issue #40): how long a pending approval request waits
+    /// before it auto-denies, so a forgotten request does not stall the crew forever.
+    /// `None` (the default) is the **hold** policy: a request waits indefinitely until the
+    /// General decides it. `Some(d)` is the **auto-deny** policy: a request unanswered for
+    /// `d` auto-denies, and the blocked role abandons the action.
+    pub approval_timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -61,6 +68,7 @@ impl Default for Config {
             allow_non_local: false,
             secrets: Vec::new(),
             usage_threshold: DEFAULT_USAGE_THRESHOLD,
+            approval_timeout: None,
         }
     }
 }
@@ -104,6 +112,12 @@ impl Config {
             config.usage_threshold = threshold
                 .parse()
                 .wrap_err("CREW_BROKER_USAGE_THRESHOLD is not a percent (0..=100)")?;
+        }
+        if let Ok(seconds) = env::var("CREW_BROKER_APPROVAL_TIMEOUT") {
+            let seconds: u64 = seconds
+                .parse()
+                .wrap_err("CREW_BROKER_APPROVAL_TIMEOUT is not a number of seconds")?;
+            config.approval_timeout = (seconds > 0).then(|| Duration::from_secs(seconds));
         }
         Ok(config)
     }

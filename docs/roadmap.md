@@ -81,7 +81,9 @@ it.
   redirect` / `crew belay`, issue #38, done); rules-of-engagement approval gates for risky
   actions (`crew_request_approval`, issue #39, done: a role blocks on the General's sign-off
   before a gated push, merge, delete, spend, or external post, with per-role defaults and
-  per-crew overrides), with the decision UX and timeout policy to follow (issue #40); pause,
+  per-crew overrides) answered from the CLI (`crew approvals` / `crew approve` / `crew deny`,
+  issue #40, done: a native notification on a pending request, and a hold-vs-auto-deny timeout
+  policy so a forgotten request does not stall the crew forever); pause,
   resume, and emergency stand-down per role and crew-wide (`crew pause` / `crew resume` /
   `crew standdown`, issue #41, done); direct override of the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew

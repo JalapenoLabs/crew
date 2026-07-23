@@ -29,6 +29,7 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 use mimalloc::MiMalloc;
 
+mod approvals;
 mod broker;
 mod control;
 mod down;
@@ -145,6 +146,30 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// List the approval requests waiting on your sign-off (issue #40).
+    Approvals {
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Approve a pending request, so the blocked role proceeds (issue #40).
+    Approve {
+        /// The request id (from `crew approvals`).
+        id: String,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Deny a pending request with a reason, so the blocked role abandons it (issue #40).
+    Deny {
+        /// The request id (from `crew approvals`).
+        id: String,
+        /// Why it is denied, carried back to the role.
+        reason: String,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// List the unit's roster: every role, its lane, and its liveness.
     Roster,
     /// Check whether a file path is in this role's lane before editing it.
@@ -252,6 +277,9 @@ fn main() -> Result<()> {
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
         Command::Usage { broker } => usage::usage(broker.as_deref()),
+        Command::Approvals { broker } => approvals::list(broker.as_deref()),
+        Command::Approve { id, broker } => approvals::approve(broker.as_deref(), &id),
+        Command::Deny { id, reason, broker } => approvals::deny(broker.as_deref(), &id, &reason),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
         Command::Claim { task, state, title } => {

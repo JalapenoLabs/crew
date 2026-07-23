@@ -154,8 +154,10 @@ The full design is in `docs/architecture.md`. In short:
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
   `crew notify` to push a native notification on each actionable moment (a question, a
-  death, a stand-down) over that same stream, and `crew usage` to read the shared-subscription
-  usage gauge (issue #56).
+  death, a stand-down, a pending approval) over that same stream, `crew usage` to read the
+  shared-subscription usage gauge (issue #56), and the approval-decision commands
+  `crew approvals` / `crew approve` / `crew deny` (issue #40) to answer a role's request for
+  sign-off on a gated action.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -431,9 +433,22 @@ approval or denial once (409 on a second decision, and a denial needs a reason),
 event (a new `EventKind::Approval` carrying the id, role, action, detail, decision, and
 reason) published to `all-units` and filterable with `GET /history?kind=approval`, so the
 request notifies the General and the decision flows back to the blocked role. Added an
-`Approval` history-kind tag. The operator decision UX (`crew approvals` / `crew approve` /
-`crew deny`, notifications, and the timeout policy) is issue #40. See `docs/roles.md` (rules
-of engagement) and `docs/observability.md` (the approval gate).
+`Approval` history-kind tag. See `docs/roles.md` (rules of engagement) and
+`docs/observability.md` (the approval gate).
+
+The operator answers a request from wherever they are (issue #40). `crew approvals` lists the
+pending requests, and `crew approve <id>` / `crew deny <id> "reason"` resolve one over `POST
+/approvals/{id}/decision`, so the blocked role proceeds or abandons the action; the broker's
+refusal (an unknown or already-decided request) surfaces as a readable CLI error. `crew notify`
+adds a **pending approval** to its actionable moments, so a native notification pulls the
+General in when a role is blocked on sign-off (only the pending request notifies; its later
+decision is routine). A **timeout policy** keeps a forgotten request from stalling the crew
+forever (`CREW_BROKER_APPROVAL_TIMEOUT`, in seconds): unset is the **hold** policy (wait
+indefinitely), and a positive value is **auto-deny** (a request unanswered that long
+auto-denies with a timeout reason). It is enforced lazily, `AppState::expire_pending_approvals`
+resolves the expired requests whenever the gate is read or decided and rides each auto-denial
+on the stream, so no background sweeper is needed. See `docs/roles.md` (rules of engagement)
+and `docs/observability.md` (the approval gate, push notifications).
 
 The shared situation board is the crew's durable memory (issue #49), distinct from the
 transient message stream: agreed interfaces, decisions and their rationale, and known
@@ -610,24 +625,28 @@ own `crew send` / `crew watch` front-end follows.
 #52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
 sharing the `broker::tail_events` read half, so there is no separate signal path) and
 pushes a native notification on each **actionable moment**: a question asked
-(`message`/`question`), a role dead (`lifecycle`/`died`), or the crew stood down
-(`lifecycle`/`stood_down`). Routine chatter (status, notes, orders, answers, artifacts,
-ordinary lifecycle, activity, board, boundary, verification) stays quiet by default. A
-pure classifier, `notification_for`, decides per event, so the policy is fully unit-tested;
-`--mute <moments>` narrows the set and `--no-sound` drops the terminal bell. Each push
-prints a log line (the durable record), sounds the bell (mirroring Seraphim's notification
-sound), and calls the platform desktop notifier (`notify-send` on Linux, `osascript` on
-macOS), degrading quietly when no notifier is present. An approval pending (issue #40) and
-a role stalled (once the stall monitor surfaces on the stream) plug into the same
-classifier when their events land. See `docs/observability.md` (push notifications).
+(`message`/`question`), a role dead (`lifecycle`/`died`), the crew stood down
+(`lifecycle`/`stood_down`), or an approval pending (`approval`/`pending`, issue #40, so the
+General is pulled in when a role blocks on sign-off; only the pending request notifies, its
+later decision is routine). Routine chatter (status, notes, orders, answers, artifacts,
+ordinary lifecycle, activity, board, boundary, verification, resolved approvals) stays quiet
+by default. A pure classifier, `notification_for`, decides per event, so the policy is fully
+unit-tested; `--mute <moments>` narrows the set and `--no-sound` drops the terminal bell. Each
+push prints a log line (the durable record), sounds the bell (mirroring Seraphim's
+notification sound), and calls the platform desktop notifier (`notify-send` on Linux,
+`osascript` on macOS), degrading quietly when no notifier is present. A role stalled (once the
+stall monitor surfaces on the stream) plugs into the same classifier when its event lands. See
+`docs/observability.md` (push notifications).
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
 `roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`),
 `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
-out of every message before storing or streaming it), and `CREW_BROKER_USAGE_THRESHOLD`
-(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56).
+out of every message before storing or streaming it), `CREW_BROKER_USAGE_THRESHOLD`
+(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56),
+and `CREW_BROKER_APPROVAL_TIMEOUT` (seconds a pending approval waits before it auto-denies;
+unset holds it indefinitely, issue #40).
 Binding a non-loopback address is refused unless the non-local flag is set, so the
 broker never exposes itself to the network by accident.
 

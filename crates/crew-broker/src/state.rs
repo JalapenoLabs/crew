@@ -766,6 +766,43 @@ impl AppState {
         self.approvals().requests.get(&id).cloned()
     }
 
+    /// Auto-denies pending requests unanswered past the approval timeout (issue #40).
+    ///
+    /// Under the **hold** policy ([`approval_timeout`](Config::approval_timeout) unset) this
+    /// does nothing. Under **auto-deny** it resolves each request older than the timeout to
+    /// [`Denied`](ApprovalDecision::Denied) with a timeout reason, returning the outcomes so
+    /// the caller publishes their decision events. Called whenever the gate is read or
+    /// decided, so a forgotten request resolves without a background sweeper.
+    #[must_use = "the returned outcomes must be published so the auto-denials reach the stream"]
+    pub fn expire_pending_approvals(&self) -> Vec<ApprovalOutcome> {
+        let Some(timeout) = self.config.approval_timeout else {
+            return Vec::new();
+        };
+        let timeout_secs = i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX);
+        let now = Timestamp::now().to_datetime();
+        let mut expired = Vec::new();
+        let mut approvals = self.approvals();
+        for (id, entry) in &mut approvals.requests {
+            if entry.decision != ApprovalDecision::Pending {
+                continue;
+            }
+            if (now - entry.requested_at.to_datetime()).num_seconds() < timeout_secs {
+                continue;
+            }
+            entry.decision = ApprovalDecision::Denied;
+            entry.reason = format!("auto-denied: no decision within {}s", timeout.as_secs());
+            expired.push(ApprovalOutcome {
+                id: *id,
+                role: entry.role.clone(),
+                action: entry.action,
+                detail: entry.detail.clone(),
+                decision: entry.decision,
+                reason: entry.reason.clone(),
+            });
+        }
+        expired
+    }
+
     /// A snapshot of the approval gate, oldest request first (issue #39).
     #[must_use]
     pub fn approval_snapshot(&self) -> Vec<(ApprovalId, ApprovalEntry)> {

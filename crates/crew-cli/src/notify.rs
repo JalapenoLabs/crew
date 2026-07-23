@@ -16,12 +16,14 @@
 //! - **The crew stands down** ([`Lifecycle::StoodDown`]): every role halts and the mission
 //!   is on hold.
 //!
+//! - **An approval is pending** (an [`ApprovalDecision::Pending`] `approval` event): a role
+//!   is blocked on the General's sign-off for a risky action (issue #39/#40).
+//!
 //! Everything else (status, notes, orders, answers, artifacts, ordinary lifecycle such as
-//! `started` or `idle`, activity, board, boundary, and verification events) is routine and
-//! stays quiet by default. Two further moments in the issue's scope, an approval pending
-//! (issue #40) and a role stalled (surfaced on the stream as a later refinement of issue
-//! #48), light up here for free once their events reach the stream: extend [`moment_of`]
-//! and [`Moment`] and the rest of the pipeline carries them.
+//! `started` or `idle`, activity, board, boundary, verification, and resolved approval
+//! events) is routine and stays quiet by default. A role stalled (surfaced on the stream as
+//! a later refinement of issue #48) lights up here for free once its event reaches the
+//! stream: extend [`moment_of`] and [`Moment`] and the rest of the pipeline carries it.
 //!
 //! ## Configurable, quiet by default
 //!
@@ -46,7 +48,7 @@
 use std::io::Write;
 use std::process::Command;
 
-use crew_substrate::core::{Event, EventKind, Lifecycle, MessageKind, Sender};
+use crew_substrate::core::{ApprovalDecision, Event, EventKind, Lifecycle, MessageKind, Sender};
 use eyre::Result;
 
 use crate::broker;
@@ -73,6 +75,10 @@ pub(crate) enum Moment {
     /// The crew stood down: every role halted and the mission is on hold.
     #[value(name = "stood-down")]
     CrewStoodDown,
+    /// A role requested approval for a risky action and is blocked on the General's
+    /// decision (issue #39/#40).
+    #[value(name = "approval")]
+    ApprovalPending,
 }
 
 /// Which moments push a notification, and whether a push sounds the bell.
@@ -140,6 +146,10 @@ fn moment_of(event: &Event) -> Option<Moment> {
         },
         EventKind::Lifecycle(Lifecycle::Died) => Some(Moment::RoleDied),
         EventKind::Lifecycle(Lifecycle::StoodDown) => Some(Moment::CrewStoodDown),
+        // Only a pending request is actionable; the decision that follows is not.
+        EventKind::Approval(approval) if approval.decision == ApprovalDecision::Pending => {
+            Some(Moment::ApprovalPending)
+        }
         _ => None,
     }
 }
@@ -164,6 +174,26 @@ fn render(event: &Event, moment: Moment) -> Notification {
             title: "crew: the crew stood down".to_owned(),
             body: "every role halted and the mission is on hold".to_owned(),
         },
+        Moment::ApprovalPending => {
+            let detail = approval_detail(event);
+            Notification {
+                title: "crew: an approval needs you".to_owned(),
+                body: format!(
+                    "{who} is blocked on your sign-off to {detail}; crew approve or crew deny it"
+                ),
+            }
+        }
+    }
+}
+
+/// What a pending approval is asking for: the action, and the specifics when given.
+fn approval_detail(event: &Event) -> String {
+    match &event.kind {
+        EventKind::Approval(approval) if approval.detail.is_empty() => approval.action.to_string(),
+        EventKind::Approval(approval) => {
+            format!("{} ({})", approval.action, elide(&approval.detail))
+        }
+        _ => "a risky action".to_owned(),
     }
 }
 
@@ -252,8 +282,8 @@ fn deliver_native(_notification: &Notification) {}
 #[cfg(test)]
 mod tests {
     use crew_substrate::core::{
-        Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId,
-        Sender, Timestamp,
+        Activity, ApprovalDecision, ApprovalEvent, ApprovalId, ChannelId, Event, EventKind,
+        Lifecycle, Message, MessageId, MessageKind, RiskyAction, RoleId, Sender, Timestamp,
     };
 
     use super::{moment_of, notification_for, Moment, NotifyPolicy};
@@ -291,6 +321,22 @@ mod tests {
         )
     }
 
+    /// An approval event from `role` for `action` at `decision`.
+    fn approval(role: &str, action: RiskyAction, decision: ApprovalDecision) -> Event {
+        event(
+            Sender::Role(RoleId::new(role)),
+            "all-units",
+            EventKind::Approval(ApprovalEvent {
+                id: ApprovalId::new(),
+                role: RoleId::new(role),
+                action,
+                detail: "PR #42 into main".to_owned(),
+                decision,
+                reason: String::new(),
+            }),
+        )
+    }
+
     #[test]
     fn classifies_the_actionable_moments() {
         assert_eq!(
@@ -304,6 +350,36 @@ mod tests {
         assert_eq!(
             moment_of(&lifecycle("commander", Lifecycle::StoodDown)),
             Some(Moment::CrewStoodDown)
+        );
+        assert_eq!(
+            moment_of(&approval(
+                "backend",
+                RiskyAction::Merge,
+                ApprovalDecision::Pending
+            )),
+            Some(Moment::ApprovalPending),
+            "a pending approval pulls the General in",
+        );
+    }
+
+    #[test]
+    fn a_resolved_approval_is_routine() {
+        // Only a pending request is actionable; its approval or denial is not.
+        assert_eq!(
+            moment_of(&approval(
+                "backend",
+                RiskyAction::Merge,
+                ApprovalDecision::Approved
+            )),
+            None,
+        );
+        assert_eq!(
+            moment_of(&approval(
+                "backend",
+                RiskyAction::Push,
+                ApprovalDecision::Denied
+            )),
+            None,
         );
     }
 

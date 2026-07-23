@@ -251,9 +251,17 @@ Every request and decision rides the stream as an `approval` event (from the req
 on the request, from the General on the decision, to `all-units`, filterable with
 `history?kind=approval`), so the request notifies the General and the decision flows back to
 the role, and the whole exchange is auditable. The live gate lives in the broker, in memory
-like the pause state and the done-gate; the operator decision UX (`crew approvals` /
-`crew approve` / `crew deny`), the native notification on a pending request, and the timeout
-policy (hold vs auto-deny) are issue #40.
+like the pause state and the done-gate.
+
+The General answers from the CLI (issue #40): `crew approvals` lists the pending requests, and
+`crew approve <id>` / `crew deny <id> "reason"` resolve one. `crew notify` treats a pending
+request as an actionable moment (see push notifications below), so the General is pulled in
+when a role is blocked. A **timeout policy** keeps a forgotten request from stalling the crew
+forever: with `CREW_BROKER_APPROVAL_TIMEOUT` unset the request **holds** (waits indefinitely),
+and with it set to a number of seconds the request **auto-denies** when it is unanswered that
+long, with a timeout reason. Enforcement is lazy, the broker resolves expired requests whenever
+the gate is read or decided and rides each auto-denial on the stream, so it needs no background
+sweeper, mirroring the usage auto-pause's lazy lift.
 
 ## Coordination-stall detection
 
@@ -298,13 +306,16 @@ The actionable moments are the ones the stream carries today:
 - **A role dies** (a `lifecycle` `died`): a role crashed or hung past recovery.
 - **The crew stands down** (a `lifecycle` `stood_down`): every role halts and the mission
   is on hold.
+- **An approval is pending** (an `approval` of decision `pending`, issue #40): a role is
+  blocked on the General's sign-off for a risky action. Only the pending request notifies;
+  its later approval or denial is routine.
 
 Everything else, status and notes, orders, answers and artifacts, ordinary lifecycle such
-as `started` or `idle`, activity, board, boundary, and verification events, is routine and
-never notifies. The policy is configurable per moment: `--mute question,died,stood-down`
-suppresses any subset (for a General who does not want peer questions, say), and
-`--no-sound` drops the terminal bell while keeping the desktop notification and the log
-line.
+as `started` or `idle`, activity, board, boundary, verification, and resolved approval
+events, is routine and never notifies. The policy is configurable per moment:
+`--mute question,died,stood-down,approval` suppresses any subset (for a General who does not
+want peer questions, say), and `--no-sound` drops the terminal bell while keeping the desktop
+notification and the log line.
 
 Each push does three things, so it lands whatever the environment: it prints a log line
 (the durable record, shown even on a headless server), sounds the terminal bell (the
@@ -313,10 +324,9 @@ through the platform notifier (`notify-send` on Linux, `osascript` on macOS). A 
 failing notifier is not an error: the printed line and the bell already carry the alert, so
 delivery degrades quietly.
 
-Two further moments in the notification scope wait on their events reaching the stream: an
-approval pending (the approval gates of issue #40) and a role stalled (the stall monitor
-above, once it surfaces a stall on the stream). Both light up here for free when their
-events land, since the classifier is one match over the event kinds.
+One further moment in the notification scope waits on its event reaching the stream: a role
+stalled (the stall monitor above, once it surfaces a stall on the stream). It lights up here
+for free when its event lands, since the classifier is one match over the event kinds.
 
 ## Token budget
 
