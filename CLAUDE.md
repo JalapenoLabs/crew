@@ -103,8 +103,9 @@ not a reimplementation of the agent.
   agreed interfaces, decisions and their rationale, and known gotchas the crew reads and
   writes, distinct from the transient message stream, curated by the commander. It is a
   projection of `board` events, so it is auditable and rebuilt from the durable log across
-  an idle-stop or a restart. A new role boots from a briefing packet (role card + board +
-  rolling summary), never the raw log.
+  an idle-stop or a restart. A new role boots from a bounded briefing packet
+  (`crew_briefing`, issue #50: role card plus the board plus a lane-scoped rolling summary,
+  size-capped), never the raw log, so it joins mid-mission and acts in its lane in seconds.
 - **Economy.** Model per role (strong for the commander and architect, cheap for
   mechanical roles), a shared token budget with per-role caps, auto-idle with cost
   telemetry, and subscription usage awareness.
@@ -289,7 +290,7 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes ten
+API; it never touches the store. It exposes eleven
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
@@ -301,10 +302,11 @@ before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `b
 event and, under a blocking policy, refuses, routing the change through the commander;
 issue #46), the adversarial done-gate trio `crew_submit` / `crew_verdict` /
 `crew_gate` (submit finished work for verification instead of asserting it done, judge a
-teammate's work as an independent skeptic, and read the gate; issue #47), and the
+teammate's work as an independent skeptic, and read the gate; issue #47), the
 situation-board pair `crew_board` / `crew_record` (read the crew's durable memory, and
-record or retract a decision, interface, or gotcha; issue #49). A tool failure
-returns as an `isError` result, not a protocol error. The
+record or retract a decision, interface, or gotcha; issue #49), and `crew_briefing` (the
+bounded new-role briefing packet: the board plus a lane-scoped rolling summary, size-capped;
+issue #50). A tool failure returns as an `isError` result, not a protocol error. The
 roadmap step is `crew_inbox` push over the per-role SSE stream instead of the current
 history read.
 
@@ -384,6 +386,19 @@ where the in-memory pause control and done-gate do not). The whole crew reads an
 it; the commander curates it, and each role card's briefing points a role at it. Added a
 `Board` history-kind tag. See `docs/communication.md` (context management), `docs/roles.md`
 (the situation board), and `docs/observability.md`.
+
+The new-role briefing packet solves the 100k-token join problem (issue #50): a freshly
+spawned role catches up from a bounded packet, not the raw transcript. `GET
+/briefing?role=<role>` assembles the current decision board plus a rolling summary scoped
+to the role's own timeline (via the `agent` filter, so its lane and the work addressed to
+it), renders it to text, and caps it to a byte budget (`DEFAULT_BUDGET`, ~4KB, overridable
+with `?budget=`), reporting the measured `size` and a `capped` flag so the packet stays
+small no matter how long the mission ran. `crew_briefing` is the tool (and `crew briefing`
+the shim); each role card's briefing now tells a role to call it first thing on boot as the
+deliberate catch-up path, so it joins mid-mission with bounded context and acts in its lane
+in seconds. The endpoint reuses the existing rolling summary (issue #19) and board (issue
+#49) rather than adding an event kind or projection. See `docs/roles.md` (the briefing
+packet) and `docs/communication.md` (context management).
 
 `crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
 crew tools with no per-task approval (issue #20), the way Seraphim registers the
@@ -470,8 +485,9 @@ in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
 `crew inbox`, `crew roster`, `crew lane`, the done-gate trio `crew submit` /
-`crew verdict` / `crew gate` (issue #47), and the situation-board pair `crew board` /
-`crew record` (issue #49) let an agent on a runtime without MCP, such
+`crew verdict` / `crew gate` (issue #47), the situation-board pair `crew board` /
+`crew record` (issue #49), and `crew briefing` (issue #50) let an agent on a runtime
+without MCP, such
 as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
 shim's `crew_lane`, issue #46). Each boots from the same role context
 the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`

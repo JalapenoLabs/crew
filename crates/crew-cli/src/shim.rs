@@ -211,6 +211,28 @@ pub fn board(section: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Prints this role's bounded new-role briefing packet (issue #50).
+///
+/// Mirrors `crew_briefing`: the decision board and a rolling summary scoped to the role's
+/// lane, capped to a byte budget, so a fresh role catches up without reading the whole log.
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn briefing(task: Option<&str>, budget: Option<usize>) -> Result<()> {
+    let agent = load_agent()?;
+    let packet = agent
+        .broker()
+        .briefing(task, budget)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{}", packet.text);
+    let fit = if packet.capped { "capped to" } else { "within" };
+    println!(
+        "[briefing {fit} {} of {} bytes]",
+        packet.size, packet.budget
+    );
+    Ok(())
+}
+
 /// Resolves the agent context from the environment, the way the `crew-mcp` binary does.
 ///
 /// Prefers the role card at [`ROLE_CARD_ENV`], which carries the role, its lane, and

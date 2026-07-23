@@ -219,6 +219,14 @@ impl RoleCard {
             self.broker.base_url(),
         );
 
+        out.push('\n');
+        out.push_str(
+            "First thing, catch up: call crew_briefing. It returns a small, bounded packet, the \
+             decision board and a rolling summary scoped to your lane, so you start productive in \
+             seconds without reading the whole log. Do not read the raw history; the briefing is \
+             the deliberate catch-up path.\n",
+        );
+
         if !self.owned_paths.is_empty() && self.lane_enforcement != LaneEnforcement::Off {
             out.push('\n');
             out.push_str(
@@ -477,6 +485,10 @@ mod tests {
             "gives the broker address"
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
+        assert!(
+            briefing.contains("crew_briefing"),
+            "tells the role to catch up with the bounded briefing packet on boot"
+        );
         assert!(
             briefing.contains("Stay in your lane") && briefing.contains("crew_lane"),
             "tells a role with a lane and enforcement on to stay in it"

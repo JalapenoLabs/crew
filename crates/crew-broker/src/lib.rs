@@ -23,6 +23,7 @@
 mod api;
 mod board;
 mod boundary;
+mod briefing;
 mod config;
 mod control;
 mod error;

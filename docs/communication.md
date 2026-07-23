@@ -168,9 +168,17 @@ it:
   known gotchas. A role reads it with `crew_board` before re-deriving a settled decision,
   and records one with `crew_record` so no one relitigates it; the commander curates it. It
   is a projection of `board` events, so it is auditable and rebuilt from the durable log
-  across an idle-stop or a restart (see `docs/observability.md`, the situation board). A
-  new role boots from its role card plus the board and the rolling summary, never the raw
-  log.
+  across an idle-stop or a restart (see `docs/observability.md`, the situation board).
+- **New-role briefing packet.** The three bounded pieces come together at boot (issue
+  #50): a freshly spawned role catches up from its role card, the current decision board,
+  and a rolling summary scoped to its own lane, never the raw transcript. `GET
+  /briefing?role=<role>` (the `crew_briefing` tool) assembles the board plus a summary of
+  the role's timeline (what it sent and what is addressed to it, so its lane and the work
+  at hand), renders it to text, and caps it to a byte budget, reporting the measured size
+  so the packet stays small no matter how long the mission has run. A role calls
+  `crew_briefing` first thing on boot, so it joins mid-mission with bounded context and
+  acts in its lane in seconds rather than reading the whole log. See `docs/roles.md` (the
+  briefing packet).
 
 ## Relationship to the coworker skill
 

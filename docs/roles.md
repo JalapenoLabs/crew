@@ -186,6 +186,18 @@ One loader serves both boot paths, so a card means the same thing everywhere:
 states its lane and acceptance bar, and points at the broker and the MCP tools,
 and stops there. That prompt is the shape the `coworker` skill shrinks to.
 
+### The briefing packet
+
+The card is static; a role joining mid-mission also needs the current situation. The
+new-role briefing packet delivers it bounded (issue #50): on boot a role calls
+`crew_briefing` (or `crew briefing`), which returns the current decision board plus a
+rolling summary scoped to the role's own lane (what it sent and what is addressed to it),
+never the raw transcript. The broker renders it to text and caps it to a byte budget,
+reporting the measured size, so joining a long mission costs bounded context, not the
+100k-token whole-log read. The role card's briefing tells a role to catch up this way as
+its first action, so it starts productive in seconds and acts in its lane. See
+`docs/communication.md` (context management).
+
 ## Sizing guidance
 
 Match the crew to the mission:

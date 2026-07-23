@@ -90,8 +90,10 @@ it.
   monitor, issue #48, done).
 - **Team Memory + Cockpit.** A shared situation board (`crew_board` / `crew_record`,
   issue #49, done: the crew's durable memory of decisions, interfaces, and gotchas,
-  rebuilt from the log across a restart), a new-role briefing packet, the `crew top`
-  terminal cockpit, and push notifications on the actionable moments.
+  rebuilt from the log across a restart), a new-role briefing packet (`crew_briefing`,
+  issue #50, done: the board plus a lane-scoped rolling summary, size-capped, so a fresh
+  role catches up in seconds without the whole log), the `crew top` terminal cockpit, and
+  push notifications on the actionable moments.
 - **Economy.** Model per role, a shared token budget with per-role caps,
   auto-idle with cost telemetry, and subscription usage awareness.
 
