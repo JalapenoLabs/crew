@@ -4,37 +4,50 @@
 //! `crew send` posts as the General, `crew watch` tails the conversation, and
 //! `crew down` stands the crew down (see `docs/architecture.md`).
 //!
-//! The command surface lands in later phases; for now `main` establishes the
-//! application conventions (issue #4): eyre errors, the mimalloc allocator, and
-//! the shared structured-logging init, then emits a boot event.
+//! `main` establishes the application conventions (issue #4): eyre errors, the
+//! mimalloc allocator, and the shared structured-logging init, then dispatches the
+//! parsed command. `crew up` and `crew down` land here (issue #26); `crew send` and
+//! `crew watch` follow.
 
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
 use eyre::Result;
 use mimalloc::MiMalloc;
-use tracing::{event, Level};
+
+mod down;
+mod paths;
+mod up;
 
 /// mimalloc as the global allocator (M-MIMALLOC-APPS).
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the eyre Result is the intended app entry signature (M-APP-ERROR); \
-              main becomes genuinely fallible once command dispatch lands"
-)]
+/// Command a unit of role-scoped agents as if you were a general directing a team.
+#[derive(Debug, Parser)]
+#[command(name = "crew", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Bring the whole unit online from the crew config, with roles assigned.
+    Up {
+        /// The crew config to read. Defaults to `./crew.toml`, then the default crew.
+        #[arg(short, long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Stand the running crew down gracefully: stop the agents and deregister them.
+    Down,
+}
+
 fn main() -> Result<()> {
     crew_telemetry::init();
 
-    // A structured, named boot event (M-LOG-STRUCTURED): the name is
-    // `<component>.<operation>.<state>`, the fields carry the data, and the
-    // message template references them with `{{...}}` so formatting defers to
-    // viewing time.
-    event!(
-        name: "cli.boot.ready",
-        Level::INFO,
-        crew.component = "cli",
-        crew.version = env!("CARGO_PKG_VERSION"),
-        "crew {{crew.component}} ready (version {{crew.version}})",
-    );
-
-    Ok(())
+    match Cli::parse().command {
+        Command::Up { config } => up::run(config.as_deref()),
+        Command::Down => down::run(),
+    }
 }

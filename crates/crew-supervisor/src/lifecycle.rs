@@ -220,6 +220,23 @@ impl Fleet {
         self.command(role, Command::Start)
     }
 
+    /// Starts every agent in the fleet, bringing the whole unit online.
+    ///
+    /// This is what `crew up` calls after [`launch`](crate::Supervisor::launch): each
+    /// role's process spawns and registers on the roster, so the unit is live and
+    /// connected. Idle roles then park themselves on the idle-stop timeout, keeping
+    /// their roster entry, so the unit stays visible while costing nothing when quiet.
+    ///
+    /// # Errors
+    /// Returns the first error if any driver has stopped; the remaining agents are left
+    /// untouched.
+    pub fn start_all(&self) -> Result<()> {
+        for driver in &self.drivers {
+            self.command(&driver.shared.role, Command::Start)?;
+        }
+        Ok(())
+    }
+
     /// Stands `role`'s agent down: stops its process, keeping its roster entry.
     ///
     /// # Errors

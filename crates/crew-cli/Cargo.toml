@@ -23,8 +23,15 @@ eyre.workspace = true
 mimalloc.workspace = true
 crew-telemetry.workspace = true
 tracing.workspace = true
-# The substrate crates the CLI drives: `crew up`/`down` the supervisor, and
-# `crew send`/`watch` the broker (both pull crew-core transitively). The commands
-# themselves land in later phases; this fixes the consumer direction now.
+# The command surface (crew up, crew down, ...).
+clap.workspace = true
+# The substrate crates the CLI drives: `crew up`/`down` the supervisor and the
+# in-process broker, and `crew send`/`watch` the broker. crew-core carries the crew
+# config `crew up` reads.
+crew-core.workspace = true
 crew-broker.workspace = true
 crew-supervisor.workspace = true
+# `crew up` runs the broker in-process (async) and waits on a shutdown signal; ureq
+# probes an already-running broker's health before starting one.
+tokio.workspace = true
+ureq.workspace = true

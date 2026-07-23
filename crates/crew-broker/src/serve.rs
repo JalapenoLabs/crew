@@ -13,17 +13,32 @@ use crate::config::{is_bind_allowed, Config};
 use crate::state::AppState;
 use crate::store::LogStore;
 
-/// Runs the broker until a shutdown signal, then returns.
+/// Runs the broker until a shutdown signal (Ctrl-C or, on Unix, `SIGTERM`).
 ///
-/// Refuses a non-loopback bind unless [`Config::allow_non_local`] is set, ensures
-/// the state directory exists, binds the configured address, serves the HTTP
-/// surface, and shuts down gracefully on Ctrl-C or (on Unix) `SIGTERM`.
+/// This is [`run_until`] wired to the process signal handler; the `crewd` binary uses
+/// it. An embedder that owns its own shutdown (for example `crew up`, which stands the
+/// broker down alongside the crew) uses [`run_until`] directly.
 ///
 /// # Errors
-/// Returns an error if the configured address is non-loopback and not opted in,
-/// if the state directory cannot be created, if the address cannot be bound, or
-/// if the server errors while running.
+/// See [`run_until`].
 pub async fn run(config: Config) -> Result<()> {
+    run_until(config, shutdown_signal()).await
+}
+
+/// Runs the broker until `shutdown` resolves, then returns.
+///
+/// Refuses a non-loopback bind unless [`Config::allow_non_local`] is set, ensures the
+/// state directory exists, opens the durable log, binds the configured address, and
+/// serves the HTTP surface, draining gracefully when `shutdown` resolves.
+///
+/// # Errors
+/// Returns an error if the configured address is non-loopback and not opted in, if the
+/// state directory cannot be created, if the durable log cannot be opened, if the
+/// address cannot be bound, or if the server errors while running.
+pub async fn run_until(
+    config: Config,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let addr = config.bind_addr();
     if !is_bind_allowed(addr.ip(), config.allow_non_local) {
         return Err(eyre!(
@@ -44,7 +59,7 @@ pub async fn run(config: Config) -> Result<()> {
         .wrap_err_with(|| format!("could not bind {addr}"))?;
 
     let state = AppState::with_storage(config, storage);
-    serve(listener, state, shutdown_signal()).await
+    serve(listener, state, shutdown).await
 }
 
 /// Serves the broker's HTTP surface on `listener` until `shutdown` resolves.
