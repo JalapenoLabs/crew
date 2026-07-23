@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crew_broker::{AppState, Config};
+use crew_substrate::broker::{AppState, Config};
 use serde_json::Value;
 
 /// Starts a broker over a fresh in-memory store, returning the loopback port it serves.
@@ -28,7 +28,8 @@ fn start_broker() -> u16 {
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
             let state = AppState::new(Config::default());
-            let _ = crew_broker::serve(listener, state, std::future::pending::<()>()).await;
+            let _ =
+                crew_substrate::broker::serve(listener, state, std::future::pending::<()>()).await;
         });
     });
 

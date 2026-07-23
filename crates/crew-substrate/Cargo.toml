@@ -1,0 +1,24 @@
+[package]
+name = "crew-substrate"
+description = "The crew coordination substrate as one crate: the broker, the supervisor, the MCP surface, and the shared types both front-ends depend on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Distributed as a private Git dependency today (see docs/architecture.md,
+# Distribution); `publish = false` guards against an accidental crates.io publish
+# while the registry choice is a Phase 4 decision (docs/roadmap.md).
+publish = false
+
+[lints]
+workspace = true
+
+# The umbrella depends on every substrate crate and re-exports their public API. It
+# adds no logic of its own; consumers depend on this crate alone (M-DONT-LEAK-TYPES,
+# footnote 2: an umbrella may leak its siblings' types).
+[dependencies]
+crew-core.workspace = true
+crew-broker.workspace = true
+crew-supervisor.workspace = true
+crew-mcp.workspace = true

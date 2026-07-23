@@ -6,7 +6,7 @@
 //! it started. The graceful shutdown itself lives in `crew up`, so `crew down` is a
 //! thin, reliable trigger with a single source of truth for how a unit stands down.
 
-use crew_broker::Config as BrokerConfig;
+use crew_substrate::broker::Config as BrokerConfig;
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
 

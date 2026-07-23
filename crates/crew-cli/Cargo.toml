@@ -25,16 +25,13 @@ crew-telemetry.workspace = true
 tracing.workspace = true
 # The command surface (crew up, crew down, ...).
 clap.workspace = true
-# The substrate crates the CLI drives: `crew up`/`down` the supervisor and the
-# in-process broker, and `crew send`/`watch` the broker. crew-core carries the crew
-# config `crew up` reads.
-crew-core.workspace = true
-crew-broker.workspace = true
-crew-supervisor.workspace = true
-# The agent CLI shim (`crew send`/`inbox`/`roster`/`register`, issue #28) reuses the
-# same `Broker` client the MCP server does, so a runtime without MCP maps its I/O onto
-# the broker identically to the MCP path.
-crew-mcp.workspace = true
+# The substrate, as one dependency (issue #34): `crew up`/`down` drive the supervisor
+# and the in-process broker through `crew_substrate::{broker, supervisor}`, `crew send`
+# reads the config from `crew_substrate::core`, and the agent CLI shim (issue #28)
+# reuses `crew_substrate::mcp::Broker` so a runtime without MCP maps its I/O onto the
+# broker identically to the MCP path. The CLI depends only on the substrate's public
+# API, not the individual crates.
+crew-substrate.workspace = true
 # `crew up` runs the broker in-process (async) and waits on a shutdown signal; ureq
 # probes an already-running broker's health before starting one.
 tokio.workspace = true
