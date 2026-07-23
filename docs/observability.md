@@ -98,7 +98,8 @@ structured rather than a firehose.
 
 The broker serves it both ways under one filter, so the live and historical views
 always agree (issues #12, #31). Historically, `GET /history` reads the past: filters
-(`channel`, `role` sent-by, `agent` a role's timeline, `kind`, `task`, `since`),
+(`channel`, `role` sent-by, `agent` a role's timeline, `kind` (a comma-separated set
+keeps several kinds in one query, issue #125), `task`, `since`),
 deterministic ordering by `ts` then log position, and cursor pagination that stays
 stable under concurrent writes, so a consumer or a late joiner reads the past without
 holding the stream open. `summary=true` returns the rolling compaction instead (issue

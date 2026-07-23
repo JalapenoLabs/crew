@@ -254,8 +254,11 @@ pub struct EventFilter {
     /// (messages, its lifecycle, its activity) plus the messages addressed
     /// to it (issue #30).
     pub agent: Option<RoleId>,
-    /// Keep only events of this kind.
-    pub kind: Option<EventKindTag>,
+    /// Keep only events of these kinds; an empty set matches every kind, so a
+    /// consumer can narrow to a subset (e.g. `message,ledger,verification`) in
+    /// one query rather than fetching everything and filtering client-side
+    /// (issue #125).
+    pub kind: Vec<EventKindTag>,
     /// Keep only events belonging to this task.
     pub task: Option<TaskId>,
     /// Keep only events at or after this instant.
@@ -295,10 +298,8 @@ impl EventFilter {
                 return false;
             }
         }
-        if let Some(kind) = self.kind {
-            if !kind.matches(&event.kind) {
-                return false;
-            }
+        if !self.kind.is_empty() && !self.kind.iter().any(|tag| tag.matches(&event.kind)) {
+            return false;
         }
         true
     }
@@ -821,11 +822,27 @@ mod tests {
         assert_eq!(by_role.len(), 1);
 
         let by_kind = filtered(EventFilter {
-            kind: Some(EventKindTag::Lifecycle),
+            kind: vec![EventKindTag::Lifecycle],
             ..EventFilter::default()
         });
         assert_eq!(by_kind.len(), 1);
         assert!(matches!(by_kind[0].kind, EventKind::Lifecycle(_)));
+
+        // A multi-kind filter keeps every event of any listed kind, in one query.
+        let by_kinds = filtered(EventFilter {
+            kind: vec![EventKindTag::Lifecycle, EventKindTag::Message],
+            ..EventFilter::default()
+        });
+        assert!(
+            by_kinds
+                .iter()
+                .all(|event| matches!(event.kind, EventKind::Lifecycle(_) | EventKind::Message(_))),
+            "only the listed kinds pass",
+        );
+        assert!(
+            by_kinds.len() >= by_kind.len(),
+            "the union keeps at least the single-kind subset",
+        );
 
         let by_since = filtered(EventFilter {
             since: Some(ts(3)),

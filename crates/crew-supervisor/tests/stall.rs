@@ -8,7 +8,9 @@
 //! the same `history_since` fetch the fleet's stall monitor uses, so this
 //! exercises the wire path, not just the pure logic. It also proves the
 //! monitor's `report_stall` surfaces a detected or resolved stall as a
-//! first-class `stall` event, filterable by `kind=stall`.
+//! first-class `stall` event, filterable by `kind=stall`, and that the scan's
+//! fetch filters to the kinds it inspects server-side, dropping noise (issue
+//! #125).
 
 mod common;
 
@@ -67,7 +69,9 @@ fn a_mutual_wait_deadlock_is_read_off_the_stream_and_named() {
     post_message(&base, "backend", "@frontend", "question", "which auth lib?");
     post_message(&base, "frontend", "@backend", "question", "what token TTL?");
 
-    let events = roster_client.history_since(since).unwrap();
+    let events = roster_client
+        .history_since(since, &["message", "ledger", "verification"])
+        .unwrap();
     let stalls = detect_stalls(&events, &roster(), Timestamp::now(), IMMEDIATE);
 
     assert_eq!(stalls.len(), 1, "one deadlock: {stalls:?}");
@@ -90,7 +94,9 @@ fn an_answered_exchange_is_not_a_stall() {
     post_message(&base, "backend", "@frontend", "question", "which auth lib?");
     post_message(&base, "frontend", "@backend", "answer", "use the crew one");
 
-    let events = roster_client.history_since(since).unwrap();
+    let events = roster_client
+        .history_since(since, &["message", "ledger", "verification"])
+        .unwrap();
     let stalls = detect_stalls(&events, &roster(), Timestamp::now(), IMMEDIATE);
 
     assert!(stalls.is_empty(), "the question was answered: {stalls:?}");
@@ -114,7 +120,9 @@ fn a_submitted_task_with_no_verdict_is_a_stalled_ledger() {
         )
         .unwrap();
 
-    let events = roster_client.history_since(since).unwrap();
+    let events = roster_client
+        .history_since(since, &["message", "ledger", "verification"])
+        .unwrap();
     let stalls = detect_stalls(&events, &roster(), Timestamp::now(), IMMEDIATE);
 
     assert_eq!(stalls.len(), 1, "one stalled task: {stalls:?}");
@@ -171,4 +179,42 @@ fn a_resolved_stall_is_surfaced_and_filterable() {
     let events = stall_events(&base);
     assert_eq!(events.len(), 1, "the resolved stall is on the stream");
     assert_eq!(events[0]["kind"]["data"]["status"], "resolved");
+}
+
+#[test]
+fn the_stall_fetch_filters_noise_kinds_server_side() {
+    // Issue #125: a scan fetches only the kinds the detector inspects, so a busy
+    // crew's high-volume events it ignores never ride the wire each interval.
+    let base = start_broker();
+    let roster_client = RosterClient::new(base.clone());
+    let since = Timestamp::now();
+
+    // A role registering emits a `lifecycle` event, which the detector ignores.
+    ureq::post(&format!("{base}/roster"))
+        .set("content-type", "application/json")
+        .send_string(&json!({ "role": "backend", "owned_paths": ["api/"] }).to_string())
+        .unwrap();
+    // A `question` is a kind the detector does inspect.
+    post_message(&base, "frontend", "@backend", "question", "which auth lib?");
+
+    let filtered = roster_client
+        .history_since(since, &["message", "ledger", "verification"])
+        .unwrap();
+    assert!(
+        filtered
+            .iter()
+            .all(|event| event["kind"]["kind"] == "message"),
+        "only the requested kinds ride the wire, not the lifecycle noise: {filtered:?}",
+    );
+    assert_eq!(filtered.len(), 1, "the question is still fetched");
+
+    // Without a filter the same window includes the lifecycle event, so the
+    // filter is what drops it, not an empty window.
+    let unfiltered = roster_client.history_since(since, &[]).unwrap();
+    assert!(
+        unfiltered
+            .iter()
+            .any(|event| event["kind"]["kind"] == "lifecycle"),
+        "the noise is in the window; the server-side filter is what drops it",
+    );
 }

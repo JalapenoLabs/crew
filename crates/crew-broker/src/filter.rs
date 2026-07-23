@@ -35,7 +35,9 @@ pub(crate) struct FilterQuery {
     /// (messages it sent, its lifecycle, its activity) plus the messages
     /// addressed to it (issue #30).
     pub agent: Option<String>,
-    /// Keep only events of this kind: `message`, `lifecycle`, or `activity`.
+    /// Keep only events of these kinds, comma-separated (e.g.
+    /// `message,ledger,verification`); a single value keeps one kind. Absent or
+    /// blank imposes no constraint (issue #125).
     pub kind: Option<String>,
     /// Keep only events belonging to this task (a UUID).
     pub task: Option<String>,
@@ -47,17 +49,22 @@ impl FilterQuery {
     /// Parses and validates the params into a backend-neutral [`EventFilter`].
     ///
     /// # Errors
-    /// Returns a 400 [`ApiError`] if `kind` is not a known kind, or `task` /
-    /// `since` is malformed.
+    /// Returns a 400 [`ApiError`] if any `kind` token is not a known kind, or
+    /// `task` / `since` is malformed.
     pub(crate) fn to_filter(&self) -> Result<EventFilter, ApiError> {
-        let kind = match nonempty(self.kind.as_deref()) {
-            Some(kind) => Some(EventKindTag::parse(kind).ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "unknown kind `{kind}`; expected message, lifecycle, or activity"
-                ))
-            })?),
-            None => None,
-        };
+        // `kind` is a comma-separated set (issue #125): each non-blank token must
+        // name a known kind, and an absent or all-blank value is no constraint.
+        let kind = self
+            .kind
+            .as_deref()
+            .into_iter()
+            .flat_map(|raw| raw.split(','))
+            .filter_map(|token| nonempty(Some(token)))
+            .map(|token| {
+                EventKindTag::parse(token)
+                    .ok_or_else(|| ApiError::bad_request(format!("unknown event kind `{token}`")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(EventFilter {
             channel: nonempty(self.channel.as_deref()).map(ChannelId::new),
             role: nonempty(self.role.as_deref()).map(RoleId::new),
@@ -110,8 +117,37 @@ mod tests {
         .expect("a valid filter");
         assert_eq!(filter.channel.unwrap().as_str(), "@backend");
         assert_eq!(filter.role.unwrap().as_str(), "commander");
-        assert!(matches!(filter.kind, Some(EventKindTag::Lifecycle)));
+        assert_eq!(filter.kind, vec![EventKindTag::Lifecycle]);
         assert!(filter.task.is_none() && filter.since.is_none());
+    }
+
+    #[test]
+    fn parses_a_comma_separated_set_of_kinds() {
+        // A consumer narrows to a subset in one query (issue #125): the stall
+        // monitor fetches only message/ledger/verification.
+        let filter = FilterQuery {
+            kind: Some("message, ledger ,verification".to_owned()),
+            ..FilterQuery::default()
+        }
+        .to_filter()
+        .expect("a valid multi-kind filter");
+        assert_eq!(
+            filter.kind,
+            vec![
+                EventKindTag::Message,
+                EventKindTag::Ledger,
+                EventKindTag::Verification
+            ]
+        );
+
+        // An absent or all-blank value is no constraint, not an error.
+        let unset = FilterQuery {
+            kind: Some(" , ".to_owned()),
+            ..FilterQuery::default()
+        }
+        .to_filter()
+        .expect("a blank kind list is no constraint");
+        assert!(unset.kind.is_empty());
     }
 
     #[test]
