@@ -45,6 +45,7 @@ use tracing::{event, Level};
 
 use crate::roster::{Liveness, RosterClient};
 use crate::spawn::{spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent};
+use crate::stall::{Stall, StallMonitor};
 use crate::worktree::Worktree;
 
 /// How often a driver polls its agent, and the watchdog scans the fleet.
@@ -77,6 +78,14 @@ pub struct LifecyclePolicy {
     /// How many times a dead agent may be revived before it is left for the operator,
     /// so a crash or hang loop cannot recover forever.
     pub max_recoveries: u32,
+    /// How long a coordination wait may persist before it is escalated as a stall
+    /// (issue #48): an unanswered question, a mutual wait, or a held ledger task with no
+    /// forward motion. This is about the crew waiting on itself, not a silent process,
+    /// so it is shorter than the process `heartbeat_timeout`.
+    pub stall_timeout: Duration,
+    /// How often the coordination-stall monitor scans the stream. Coarse: a stall
+    /// evolves over minutes, so a frequent scan would only re-read the same history.
+    pub stall_scan_interval: Duration,
 }
 
 impl Default for LifecyclePolicy {
@@ -93,6 +102,11 @@ impl Default for LifecyclePolicy {
             heartbeat_timeout: Duration::from_secs(20 * 60),
             watchdog_timeout: Duration::from_secs(25 * 60),
             max_recoveries: 3,
+            // Ten minutes is long enough that a slow but progressing exchange is not
+            // flagged, short enough to catch a real deadlock before the crew wastes a
+            // shift on it; scanning once a minute keeps the read light.
+            stall_timeout: Duration::from_secs(10 * 60),
+            stall_scan_interval: Duration::from_secs(60),
         }
     }
 }
@@ -163,6 +177,11 @@ pub struct Fleet {
     incidents: Arc<Mutex<Vec<Incident>>>,
     watchdog_stop: Sender<()>,
     watchdog: Option<JoinHandle<()>>,
+    /// The coordination stalls the monitor has detected (issue #48), shared with its
+    /// thread and read by [`stalls`](Fleet::stalls).
+    stalls: Arc<Mutex<Vec<Stall>>>,
+    stall_stop: Sender<()>,
+    stall_monitor: Option<JoinHandle<()>>,
     /// The per-role git worktrees to clean up on stand-down (issue #43); empty unless
     /// the crew opted into worktree isolation.
     worktrees: Vec<Worktree>,
@@ -204,12 +223,34 @@ impl Fleet {
             thread::spawn(move || run_watchdog(&shared, &roster, &incidents, timeout, &stop))
         };
 
+        // The coordination-stall monitor: the fleet-wide half of the defibrillator that
+        // watches the stream for a crew stuck waiting on itself (issue #48).
+        let stalls = Arc::new(Mutex::new(Vec::new()));
+        let (stall_stop, stall_stop_rx) = mpsc::channel();
+        let stall_monitor = {
+            let roles: Vec<RoleId> = drivers
+                .iter()
+                .map(|driver| driver.shared.role.clone())
+                .collect();
+            let monitor = StallMonitor::new(
+                roster.clone(),
+                roles,
+                policy.stall_timeout,
+                policy.stall_scan_interval,
+                Arc::clone(&stalls),
+            );
+            thread::spawn(move || monitor.run(&stall_stop_rx))
+        };
+
         Self {
             drivers,
             output,
             incidents,
             watchdog_stop,
             watchdog: Some(watchdog),
+            stalls,
+            stall_stop,
+            stall_monitor: Some(stall_monitor),
             worktrees: Vec::new(),
         }
     }
@@ -286,6 +327,19 @@ impl Fleet {
             .clone()
     }
 
+    /// A snapshot of the coordination stalls the monitor currently sees (issue #48).
+    ///
+    /// Each is a crew stuck waiting on itself: a deadlock, an unanswered question, or a
+    /// ledger with no forward motion. The monitor refreshes this every scan, so a stall
+    /// that clears leaves the list; the operator also sees each new one as a warning.
+    #[must_use]
+    pub fn stalls(&self) -> Vec<Stall> {
+        self.stalls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Stops the fleet: stands every agent down, deregisters its role, ends the
     /// watchdog, and cleans up each role's worktree.
     ///
@@ -297,12 +351,16 @@ impl Fleet {
             let _ = driver.commands.send(Command::Shutdown);
         }
         let _ = self.watchdog_stop.send(());
+        let _ = self.stall_stop.send(());
         for driver in &mut self.drivers {
             if let Some(handle) = driver.handle.take() {
                 let _ = handle.join();
             }
         }
         if let Some(handle) = self.watchdog.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stall_monitor.take() {
             let _ = handle.join();
         }
         // Every agent has stopped, so its worktree is no longer in use: clean it up.
@@ -337,6 +395,7 @@ impl Drop for Fleet {
             let _ = driver.commands.send(Command::Shutdown);
         }
         let _ = self.watchdog_stop.send(());
+        let _ = self.stall_stop.send(());
     }
 }
 
@@ -798,5 +857,9 @@ mod tests {
         assert_eq!(policy.max_recoveries, 3);
         // The watchdog must sit above the in-turn heartbeat, so a live driver acts first.
         assert!(policy.watchdog_timeout > policy.heartbeat_timeout);
+        // A coordination stall is escalated well before a hung process is reaped.
+        assert_eq!(policy.stall_timeout.as_secs(), 10 * 60);
+        assert_eq!(policy.stall_scan_interval.as_secs(), 60);
+        assert!(policy.stall_timeout < policy.heartbeat_timeout);
     }
 }

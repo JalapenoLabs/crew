@@ -96,7 +96,9 @@ not a reimplementation of the agent.
   an independent role tries to break it against the acceptance and passes or hands it
   back, and the broker refuses a self-verdict so "done" means an independent role could
   not break it); the defibrillator also catches coordination stalls, not just dead
-  agents.
+  agents (issue #48: a fleet-wide stall monitor reads the event stream for a deadlock, an
+  unanswered question, or a ledger with no forward motion, and escalates the specific
+  cause to the General, telling a true deadlock from a legitimate wait for input).
 - **Team memory.** A shared decision board (agreed interfaces, decisions,
   gotchas) the crew reads and writes, distinct from the transient message stream;
   a new role boots from a briefing packet (role card + board + rolling summary),
@@ -408,6 +410,22 @@ a twenty-five-minute watchdog, and three recoveries. Precise hang-versus-idle
 discrimination awaits the activity parser's turn boundaries (issue #24), so by default
 a quiet agent parks rather than being force-recovered. (Unifying the eager `Crew` from
 #21 into the lifecycle-managed `Fleet` is a later cleanup.)
+
+The defibrillator also catches a crew stuck waiting on itself, not just a dead agent
+(issue #48, `crew_supervisor::stall`). A fleet-wide **stall monitor** thread reads a
+recent window of the event stream (`RosterClient::history_since`, over the stable stream
+contract rather than `crew_core::EventKind`, so a kind it does not model passes through)
+on the `stall_scan_interval` and runs `detect_stalls`, a pure function that finds three
+shapes past the `stall_timeout` (ten minutes by default, below the process heartbeat): a
+**deadlock** (a cycle of unanswered questions), an **unanswered question** (a one-sided
+wait with no cycle), and a **stalled ledger** (a task with no forward motion, a `ledger`
+claim not yet `done` from issue #45 or a `verification` submission with no verdict from
+issue #47). A question broadcast to `all-units`, or to anyone who is not a live agent, is
+a legitimate wait for the General, not a deadlock, so it is never escalated. A new stall
+is escalated as a specific `supervisor.stall.detected` warning (who is waiting on what)
+and recorded (read with `Fleet::stalls`), once per stall until it resolves. It reads the
+stream over HTTP rather than adding an event kind, keeping it out of the in-flight ledger
+PR's path; surfacing a stall on the stream for the cockpit is a later refinement.
 
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config

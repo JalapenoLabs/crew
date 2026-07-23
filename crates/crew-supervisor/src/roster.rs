@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use crew_core::{RoleId, TaskId};
+use crew_core::{RoleId, TaskId, Timestamp};
 use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -170,6 +170,49 @@ impl RosterClient {
             .map_err(|err| eyre!("could not parse the roster response: {err}"))?;
         Ok(view.roles.into_iter().map(|entry| entry.role).collect())
     }
+
+    /// Reads the events at or after `since`, oldest first, following the history pages.
+    ///
+    /// The coordination-stall monitor (issue #48) reads a recent window of the stream to
+    /// look for a crew stuck waiting on itself. Events are returned as raw JSON so the
+    /// supervisor reads the broker's stable stream contract rather than coupling to
+    /// `crew_core::EventKind`, which lets an event kind it does not model pass through.
+    ///
+    /// # Errors
+    /// Returns an error if the broker cannot be reached or a page is malformed.
+    pub fn history_since(&self, since: Timestamp) -> Result<Vec<Value>> {
+        let url = format!("{}/history", self.base);
+        let since = since.to_string();
+        let mut events = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut request = self.agent.get(&url).query("since", &since);
+            if let Some(cursor) = &after {
+                request = request.query("after", cursor);
+            }
+            let text = request
+                .call()
+                .map_err(|err| eyre!("could not read the broker history: {err}"))?
+                .into_string()
+                .map_err(|err| eyre!("could not read the history response: {err}"))?;
+            let page: HistoryPage = serde_json::from_str(&text)
+                .map_err(|err| eyre!("could not parse the history response: {err}"))?;
+            events.extend(page.events);
+            match page.next_cursor {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+        Ok(events)
+    }
+}
+
+/// One page of `GET /history`: the events, and the cursor to the next page if any.
+#[derive(Debug, Deserialize)]
+struct HistoryPage {
+    events: Vec<Value>,
+    #[serde(default)]
+    next_cursor: Option<String>,
 }
 
 /// The shape of `GET /roster` (only the role ids are read here).

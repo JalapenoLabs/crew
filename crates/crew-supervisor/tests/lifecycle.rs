@@ -25,6 +25,7 @@ fn an_idle_role_stops_and_restarts_on_demand() {
         heartbeat_timeout: Duration::from_secs(30),
         watchdog_timeout: Duration::from_secs(60),
         max_recoveries: 3,
+        ..LifecyclePolicy::default()
     };
     // The stub prints once (activity), then idles, standing in for a finished turn.
     let fleet = Fleet::launch(

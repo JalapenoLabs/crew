@@ -172,6 +172,35 @@ budget, revives it (a `recovered` event); it also records the diagnostic inciden
 behind each death. So the stream and the live count reflect lazy start, idle-stop,
 restart, and death-and-recovery with no separate signal.
 
+## Coordination-stall detection
+
+A dead agent is not the only way a crew stops making progress. A crew can be fully alive
+yet stuck waiting on itself: two roles each holding for the other to answer, or a task
+that no one moves. Silence then reads as progress when it is really a deadlock. The
+supervisor's defibrillator extends to this (issue #48): a fleet-wide **stall monitor**
+reads a recent window of the event stream (`GET /history?since=`) on a timer and finds
+the three shapes of a coordination stall.
+
+- **A deadlock**: a cycle of unanswered questions on the stream (`backend` asked
+  `frontend` and is waiting, `frontend` asked `backend` and is waiting), so neither can
+  proceed.
+- **An unanswered question**: one agent has waited past the threshold for another to
+  answer, with no cycle; the blocker is simply not responding.
+- **A stalled ledger**: a task with no forward motion past the threshold, read from the
+  stream as a held work-ledger claim (a `ledger` event not yet `done`, issue #45) or a
+  done-gate submission with no verdict (a `verification` event still `submitted`, issue
+  #47).
+
+The monitor distinguishes a true deadlock from a legitimate wait for input: a question
+broadcast to `all-units`, or addressed to anyone who is not a live agent, is the crew
+waiting on the General, not on itself, so it is never escalated. When it does find a
+stall, it escalates the specific cause to the operator, who is waiting on what, as a
+warning in the `crew up` foreground (a `supervisor.stall.detected` event) rather than a
+generic timeout, and records it (read with `Fleet::stalls`) so a persistent stall is
+escalated once and a resolved-then-recurring one afresh. Because the monitor reads the
+stable stream contract rather than the in-memory ledger, it needs no new event kind, and
+surfacing a stall on the stream for the cockpit is a later refinement.
+
 ## Runewood
 
 Runewood (the Gource-style WebGL visualization spun off from Seraphim's watch
