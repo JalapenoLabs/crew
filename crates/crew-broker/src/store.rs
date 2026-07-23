@@ -184,6 +184,8 @@ pub enum EventKindTag {
     Board,
     /// A token-spend report against the crew budget (issue #54).
     Budget,
+    /// A per-turn token-and-cost usage report (issue #55).
+    Telemetry,
 }
 
 impl EventKindTag {
@@ -198,6 +200,7 @@ impl EventKindTag {
             "verification" => Some(Self::Verification),
             "board" => Some(Self::Board),
             "budget" => Some(Self::Budget),
+            "telemetry" => Some(Self::Telemetry),
             _ => None,
         }
     }
@@ -213,6 +216,7 @@ impl EventKindTag {
                 | (Self::Verification, EventKind::Verification(_))
                 | (Self::Board, EventKind::Board(_))
                 | (Self::Budget, EventKind::Budget(_))
+                | (Self::Telemetry, EventKind::Telemetry(_))
         )
     }
 }
