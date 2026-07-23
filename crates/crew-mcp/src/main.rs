@@ -56,7 +56,12 @@ fn main() -> Result<()> {
         eprintln!("crew-mcp: inbox streaming unavailable, using pull reads: {reason}");
     }
 
-    let mut server = Server::new(broker, card.owned_paths.clone(), card.lane_enforcement);
+    let mut server = Server::new(
+        broker,
+        card.owned_paths.clone(),
+        card.lane_enforcement,
+        card.roe.clone(),
+    );
     server
         .serve(BufReader::new(stdin().lock()), stdout().lock())
         .wrap_err("the MCP server exited with an I/O error")

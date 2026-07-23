@@ -372,6 +372,8 @@ fn message_kind(kind: &MessageKind) -> &'static str {
         MessageKind::Note => "note",
         MessageKind::Redirect => "redirect",
         MessageKind::Belay => "belay",
+        MessageKind::ApprovalRequest { .. } => "approval-request",
+        MessageKind::ApprovalDecision { .. } => "approval-decision",
     }
 }
 

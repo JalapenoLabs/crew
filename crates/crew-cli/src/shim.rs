@@ -24,9 +24,13 @@ use std::path::PathBuf;
 use crew_substrate::{
     broker::Config as BrokerConfig,
     client::{
-        BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing,
+        ApprovalOutcome, BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem,
+        RosterSnapshot, Standing, APPROVAL_TIMEOUT,
     },
-    core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV},
+    core::{
+        default_roe_for, ActionKind, BrokerEndpoint, LaneEnforcement, RoleCard, RoleId,
+        RulesOfEngagement, ROLE_CARD_ENV,
+    },
 };
 use eyre::{eyre, Result, WrapErr};
 
@@ -45,6 +49,9 @@ struct Agent {
     owned_paths: Vec<String>,
     /// How the crew enforces this role's lane (issue #46).
     lane_enforcement: LaneEnforcement,
+    /// The role's rules of engagement: the actions it needs approval for (issue
+    /// #39).
+    roe: RulesOfEngagement,
 }
 
 impl Agent {
@@ -259,6 +266,67 @@ pub fn lane(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Requests the General's approval for a risky action, blocking until the
+/// decision (issue #39).
+///
+/// Mirrors `crew_request_approval`: if the role's rules of engagement gate
+/// `action` (with `amount` for a spend), it posts the request and waits for the
+/// General; an ungated action proceeds at once. It exits non-zero when the
+/// action is denied or times out, so a shell script that gates a command on it
+/// does not proceed without a grant.
+///
+/// # Errors
+/// Returns an error if no role context is set, the action is not known, the
+/// broker cannot be reached, or the General denies or does not answer the
+/// request.
+pub fn request_approval(action: &str, amount: Option<u64>, detail: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let action = ActionKind::parse(action).ok_or_else(|| {
+        eyre!("`{action}` is not a known action; use push, merge, delete, spend, or external_post")
+    })?;
+    let outcome = agent
+        .broker()
+        .request_approval(
+            &agent.roe,
+            action,
+            amount,
+            detail.unwrap_or_default(),
+            APPROVAL_TIMEOUT,
+        )
+        .map_err(|reason| eyre!("{reason}"))?;
+    match outcome {
+        ApprovalOutcome::NotGated => {
+            println!(
+                "`{}` needs no approval for your role; proceed.",
+                action.label()
+            );
+            Ok(())
+        }
+        ApprovalOutcome::Granted => {
+            println!(
+                "The General approved `{}`. You may proceed.",
+                action.label()
+            );
+            Ok(())
+        }
+        ApprovalOutcome::Denied { reason } => {
+            let reason = if reason.is_empty() {
+                String::new()
+            } else {
+                format!(": {reason}")
+            };
+            Err(eyre!(
+                "the General denied `{}`{reason}. Do not proceed.",
+                action.label()
+            ))
+        }
+        ApprovalOutcome::TimedOut => Err(eyre!(
+            "no decision on `{}` in time; treat it as not approved and do not proceed.",
+            action.label()
+        )),
+    }
+}
+
 /// Submits this agent's finished work for adversarial verification (issue #47).
 ///
 /// Mirrors `crew_submit`: the work is not done until an independent role tries
@@ -407,6 +475,7 @@ fn load_agent() -> Result<Agent> {
             commander: card.commander,
             owned_paths: card.owned_paths,
             lane_enforcement: card.lane_enforcement,
+            roe: card.roe,
         });
     }
 
@@ -429,6 +498,9 @@ fn load_agent() -> Result<Agent> {
         commander: RoleId::new("commander"),
         owned_paths: Vec::new(),
         lane_enforcement: LaneEnforcement::default(),
+        // No card to carry rules of engagement, so err toward the gated specialist
+        // default, matching `RoleCard`'s own default (issue #39).
+        roe: default_roe_for(false),
     })
 }
 

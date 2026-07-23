@@ -36,6 +36,9 @@ owned_paths = ["api/", "db/"]
 acceptance = "Tests green, migrations reversible."
 model = "haiku"           # an exact model, the escape hatch that wins over any tier
 token_cap = 1_000_000     # this role's own token ceiling (issue #54)
+[roles.roe]               # rules of engagement: risky actions this role needs approval for (issue #39)
+gated = ["push", "merge", "delete", "external_post", "spend"]
+spend_threshold = 500_000 # a spend at or above this many tokens needs approval
 
 [[roles]]
 role = "frontend"
@@ -89,6 +92,16 @@ Every field is optional and takes a default:
   `codex` wired to the CLI shim (`crew send`, ...). Different roles can run different
   runtimes, so `crew up` brings up a mixed unit in one command; the MCP server is
   registered only when the crew has a Claude role, so a Codex-only crew needs no `claude`.
+- a role's `[roles.roe]` sub-table sets its **rules of engagement**: the risky actions it
+  needs the General's approval for before taking them (issue #39). `gated` is the list of
+  `push` / `merge` / `delete` / `external_post` / `spend` that require sign-off, and
+  `spend_threshold` (tokens) is the amount at or above which a gated `spend` needs it.
+  Both default by role: the commander integrates work so it may push, merge, and spend
+  (gated only on `delete` and `external_post`), and every other role is gated on all five.
+  Set `[roles.roe]` to override either field for a role. Before a gated action a role calls
+  `crew_request_approval` and blocks until the General answers with `crew approve`; an
+  ungated action proceeds. See `docs/roles.md` and `docs/communication.md` (rules of
+  engagement).
   See `docs/codex.md`.
 
 An empty config document (`""`) therefore resolves to the default crew, so `crew up`

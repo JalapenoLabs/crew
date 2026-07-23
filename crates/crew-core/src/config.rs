@@ -24,6 +24,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    approval::{default_roe_for, ActionKind, RulesOfEngagement},
     budget::Budget,
     card::{BrokerEndpoint, RoleCard},
     id::RoleId,
@@ -161,6 +162,11 @@ pub struct RoleSpec {
     /// [`Claude`](Runtime::Claude); set `runtime = "codex"` to run it as a
     /// Codex agent wired to the CLI shim instead.
     pub runtime: Runtime,
+    /// The role's rules of engagement: the risky actions it needs the General's
+    /// approval for (issue #39). Defaults by role (the commander may push,
+    /// merge, and spend; a specialist is gated on all five), overridable with a
+    /// `[roles.roe]` table (see [`default_roe_for`] and `docs/config.md`).
+    pub roe: RulesOfEngagement,
 }
 
 impl Default for CrewConfig {
@@ -227,8 +233,27 @@ impl CrewConfig {
                 .with_commander(self.commander.clone())
                 .with_lane_enforcement(self.lane_enforcement)
                 .with_runtime(spec.runtime)
+                .with_roe(spec.roe.clone())
             })
             .collect()
+    }
+
+    /// The rules of engagement for `role`: the risky actions it needs the
+    /// General's approval for (issue #39).
+    ///
+    /// A declared role carries its resolved rules (its per-role
+    /// [`roe`](RoleSpec::roe)); a role not in the crew falls back to the
+    /// sensible default for whether it is the commander (see
+    /// [`default_roe_for`]).
+    #[must_use]
+    pub fn roe_for(&self, role: &RoleId) -> RulesOfEngagement {
+        self.roles
+            .iter()
+            .find(|spec| &spec.role == role)
+            .map_or_else(
+                || default_roe_for(role == &self.commander),
+                |spec| spec.roe.clone(),
+            )
     }
 
     /// The model alias `role` runs, resolved by the tier precedence (issue
@@ -400,6 +425,8 @@ fn default_roles() -> Vec<RoleSpec> {
         model: None,
         token_cap: None,
         runtime: Runtime::default(),
+        // The default commander is named `commander`, so it gets the lead's rules.
+        roe: default_roe_for(name == DEFAULT_COMMANDER),
     };
     vec![
         role("commander", &[]),
@@ -496,6 +523,46 @@ struct RawRole {
     model: Option<String>,
     token_cap: Option<u64>,
     runtime: Option<Runtime>,
+    roe: Option<RawRoe>,
+}
+
+/// The TOML wire form of a role's rules of engagement override (issue #39).
+///
+/// An omitted field keeps the role's default: `gated` replaces which actions
+/// need approval, `spend_threshold` replaces the token amount above which a
+/// gated spend needs it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoe {
+    gated: Option<Vec<String>>,
+    spend_threshold: Option<u64>,
+}
+
+impl RawRoe {
+    /// Applies this override onto `base`, resolving each action label.
+    ///
+    /// # Errors
+    /// Returns an invalid-config error naming an unknown action label.
+    fn apply(self, base: RulesOfEngagement) -> Result<RulesOfEngagement, ConfigError> {
+        let mut roe = base;
+        if let Some(labels) = self.gated {
+            let actions = labels
+                .iter()
+                .map(|label| {
+                    ActionKind::parse(label).ok_or_else(|| {
+                        ConfigError::invalid(format!(
+                            "unknown gated action `{label}`; use push, merge, delete, spend, or external_post"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            roe = roe.with_gated(actions);
+        }
+        if let Some(threshold) = self.spend_threshold {
+            roe = roe.with_spend_threshold(threshold);
+        }
+        Ok(roe)
+    }
 }
 
 impl RawConfig {
@@ -507,16 +574,22 @@ impl RawConfig {
             })?,
             None => DEFAULT_IDLE_STOP,
         };
+        // Resolve the commander name first: a role's rules of engagement default by
+        // whether it is the commander (issue #39), so each role needs to know it.
+        let commander = self.commander.map_or_else(
+            || DEFAULT_COMMANDER.to_owned(),
+            |name| name.trim().to_owned(),
+        );
         let roles = match self.roles {
-            Some(roles) => roles.into_iter().map(RawRole::resolve).collect(),
+            Some(roles) => roles
+                .into_iter()
+                .map(|role| role.resolve(&commander))
+                .collect::<Result<Vec<_>, _>>()?,
             None => default_roles(),
         };
         Ok(CrewConfig {
             roles,
-            commander: RoleId::new(self.commander.map_or_else(
-                || DEFAULT_COMMANDER.to_owned(),
-                |name| name.trim().to_owned(),
-            )),
+            commander: RoleId::new(commander),
             model: normalize_alias(self.model),
             models: self.models.map(RawModels::resolve).unwrap_or_default(),
             token_budget: self.token_budget,
@@ -537,9 +610,20 @@ impl RawModels {
 }
 
 impl RawRole {
-    /// Applies per-role defaults.
-    fn resolve(self) -> RoleSpec {
-        RoleSpec {
+    /// Applies per-role defaults, resolving the rules of engagement against
+    /// whether this role is the crew's `commander`.
+    ///
+    /// # Errors
+    /// Returns an invalid-config error if a `[roles.roe]` override names an
+    /// unknown gated action.
+    fn resolve(self, commander: &str) -> Result<RoleSpec, ConfigError> {
+        let is_commander = self.role.trim() == commander;
+        let base = default_roe_for(is_commander);
+        let roe = match self.roe {
+            Some(raw) => raw.apply(base)?,
+            None => base,
+        };
+        Ok(RoleSpec {
             role: RoleId::new(self.role.trim()),
             owned_paths: self.owned_paths.unwrap_or_default(),
             acceptance: self.acceptance.unwrap_or_default(),
@@ -547,7 +631,8 @@ impl RawRole {
             model: normalize_alias(self.model),
             token_cap: self.token_cap,
             runtime: self.runtime.unwrap_or_default(),
-        }
+            roe,
+        })
     }
 }
 
@@ -676,6 +761,91 @@ mod tests {
             scout.runtime,
             Runtime::Codex,
             "the card carries the codex runtime"
+        );
+    }
+
+    #[test]
+    fn rules_of_engagement_default_by_role_and_override_per_crew() {
+        use crate::ActionKind;
+
+        let config = CrewConfig::from_toml(
+            "commander = \"commander\"\n\
+             [[roles]]\nrole = \"commander\"\n\
+             [[roles]]\nrole = \"backend\"\nowned_paths = [\"api/\"]\n\
+             [[roles]]\nrole = \"frontend\"\nowned_paths = [\"web/\"]\n\
+             [roles.roe]\ngated = [\"push\", \"spend\"]\nspend_threshold = 500",
+        )
+        .expect("a per-role roe override is valid config");
+
+        // The commander gets the lead's rules by default: it may merge, but not delete.
+        let commander = config.roe_for(&RoleId::new("commander"));
+        assert!(
+            !commander.requires_approval(ActionKind::Merge, None),
+            "the commander may merge"
+        );
+        assert!(
+            commander.requires_approval(ActionKind::Delete, None),
+            "but not delete"
+        );
+
+        // A specialist is gated on everything by default.
+        let backend = config.roe_for(&RoleId::new("backend"));
+        assert!(
+            backend.requires_approval(ActionKind::Merge, None),
+            "a specialist may not merge"
+        );
+
+        // The frontend override replaces the gated set and the threshold.
+        let frontend = config.roe_for(&RoleId::new("frontend"));
+        assert!(
+            frontend.requires_approval(ActionKind::Push, None),
+            "push is still gated"
+        );
+        assert!(
+            !frontend.requires_approval(ActionKind::Merge, None),
+            "merge is no longer gated"
+        );
+        assert!(
+            frontend.requires_approval(ActionKind::Spend, Some(500)),
+            "spend gates at the override"
+        );
+
+        // to_cards carries each role's resolved rules onto the card.
+        let cards = config.to_cards(&BrokerEndpoint::new("127.0.0.1", 2739));
+        let card_backend = cards
+            .iter()
+            .find(|c| c.role == RoleId::new("backend"))
+            .unwrap();
+        assert_eq!(
+            card_backend.roe, backend,
+            "the card carries the resolved rules"
+        );
+    }
+
+    #[test]
+    fn an_unknown_gated_action_is_a_precise_config_error() {
+        let error = CrewConfig::from_toml(
+            "[[roles]]\nrole = \"backend\"\n[roles.roe]\ngated = [\"launch_nukes\"]",
+        )
+        .expect_err("an unknown action is rejected");
+        assert!(error.is_invalid(), "{error}");
+        assert!(error.to_string().contains("launch_nukes"), "{error}");
+    }
+
+    #[test]
+    fn a_renamed_commander_still_gets_the_lead_rules() {
+        use crate::ActionKind;
+        // The lead's rules follow the crew's commander, not the literal name
+        // `commander`.
+        let config = CrewConfig::from_toml(
+            "commander = \"lead\"\n[[roles]]\nrole = \"lead\"\n[[roles]]\nrole = \"backend\"",
+        )
+        .unwrap();
+        assert!(
+            !config
+                .roe_for(&RoleId::new("lead"))
+                .requires_approval(ActionKind::Merge, None),
+            "the renamed commander may still merge",
         );
     }
 
