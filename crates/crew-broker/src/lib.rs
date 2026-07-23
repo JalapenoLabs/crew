@@ -9,8 +9,9 @@
 //! the event with the [`Scrubber`], persists it, and fans it to every subscriber
 //! (issue #9). Subscribers read either `GET /stream`, the whole live feed, or
 //! `GET /inbox?role=<role>`, a role's live, self-filtered events resumable from a
-//! `Last-Event-ID` cursor (issue #10). The roster and the rolling-summary history
-//! come in later tickets.
+//! `Last-Event-ID` cursor (issue #10). A `GET /history` reads past events, filtered,
+//! time-ordered, and paginated with a cursor stable under concurrent writes
+//! (issue #12). The roster and the rolling-summary history come in later tickets.
 //!
 //! Run it with the `crewd` binary, or drive it as a library through [`run`].
 //!
@@ -20,6 +21,7 @@ mod api;
 mod config;
 mod error;
 mod events;
+mod history;
 mod inbox;
 mod router;
 mod secrets;

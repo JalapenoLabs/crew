@@ -6,19 +6,21 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::state::AppState;
-use crate::{events, inbox};
+use crate::{events, history, inbox};
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
 ///
 /// Serves `GET /health`, `POST /channels/{channel}/messages` (post a message),
-/// `GET /events` (read the log), `GET /stream` (the whole live feed), and
-/// `GET /inbox?role=<role>` (a role's live, self-filtered SSE stream). The roster
-/// and the rolling-summary history come in later tickets.
+/// `GET /events` (read the log), `GET /stream` (the whole live feed),
+/// `GET /inbox?role=<role>` (a role's live, self-filtered SSE stream), and
+/// `GET /history` (read past events, filtered and paginated). The roster and the
+/// rolling-summary history come in later tickets.
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .merge(events::routes())
         .merge(inbox::routes())
+        .merge(history::routes())
         .with_state(state)
 }
 

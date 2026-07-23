@@ -176,7 +176,7 @@ vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
-`crewd` (the broker, issues #7, #8, #9, #10 and #11)
+`crewd` (the broker, issues #7, #8, #9, #10, #11 and #12)
 starts on loopback, serves `GET /health`, and shuts down gracefully. It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
 reads the log over `GET /events`, and accepts messages over `POST
@@ -186,11 +186,15 @@ masks configured secret values out of the event, persists it, and fans it to eve
 subscriber. Subscribers read either `GET /stream`, the whole live feed, or
 `GET /inbox?role=<role>`, a role's live events filtered to its direct, pair, and
 `all-units` channels with its own messages dropped at the source and resumable from
-a `Last-Event-ID` cursor without loss (issue #10). Its `ChannelRouter` resolves a
-channel to the roles it reaches (issue #11), filtering a supplied roster through the
-`Channel` membership test. The live roster that feeds routing and the rolling-summary
-history are still scaffolds waiting for the phased build in `docs/roadmap.md`. Verify
-with `cargo build` and `cargo test` at the root.
+a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
+filtered by `channel`, `role`, `kind`, `task`, and `since`, ordered by `ts` then log
+position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
+under concurrent writes; `summary=true` is reserved (a `501` hook) for the Phase 2
+compaction (issue #12). Its `ChannelRouter` resolves a channel to the roles it
+reaches (issue #11), filtering a supplied roster through the `Channel` membership
+test. The live roster that feeds routing and the rolling-summary history are still
+scaffolds waiting for the phased build in `docs/roadmap.md`. Verify with `cargo
+build` and `cargo test` at the root.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
