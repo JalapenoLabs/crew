@@ -84,14 +84,28 @@ it.
   the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
   config, issue #43, done) with an integrator to follow, a work ledger with claims
-  (issue #45, done), lane-ownership enforcement (`lane_enforcement` and the `crew_lane`
-  tool, issue #46, done), an adversarial done-gate (`crew_submit` / `crew_verdict` /
-  `crew_gate`, issue #47, done), and coordination-stall detection.
-- **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
-  the `crew top` terminal cockpit, and push notifications on the actionable
-  moments.
-- **Economy.** Model per role, a shared token budget with per-role caps,
-  auto-idle with cost telemetry, and subscription usage awareness.
+  (`crew_claim` / `crew_ledger`, issue #45, done), lane-ownership enforcement
+  (`lane_enforcement` and the `crew_lane` tool, issue #46, done), an adversarial done-gate
+  (`crew_submit` / `crew_verdict` / `crew_gate`, issue #47, done), and coordination-stall
+  detection (the defibrillator's fleet-wide stall monitor, issue #48, done).
+- **Team Memory + Cockpit.** A shared situation board (`crew_board` / `crew_record`,
+  issue #49, done: the crew's durable memory of decisions, interfaces, and gotchas,
+  rebuilt from the log across a restart), a new-role briefing packet (`crew_briefing`,
+  issue #50, done: the board plus a lane-scoped rolling summary, size-capped, so a fresh
+  role catches up in seconds without the whole log), the `crew top` terminal cockpit, and
+  push notifications on the actionable moments (`crew notify`, issue #52, done: a native
+  notification when a question is asked, a role dies, or the crew stands down, configurable
+  per moment and quiet on routine chatter, over the same event stream).
+- **Economy.** Model per role; a shared token budget with per-role caps (issue #54, done: a
+  crew-wide `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the
+  crew at a cap and surfaced as a `budget` event over the stream, with the live token feed
+  awaiting the stream-json activity parser, issue #24); auto-idle on quiet with cost and
+  token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role, and a
+  `GET /stats` rollup folds per-turn `telemetry` events and the roles' `lifecycle` events
+  into tokens, cost, and working time per role and in aggregate, feeding the cockpit and the
+  Seraphim stats); and subscription usage awareness (issue #56, done: one shared usage gauge
+  auto-pauses new work when a reading crosses `CREW_BROKER_USAGE_THRESHOLD`, lifts at the
+  window reset, and lets the operator resume early with `crew resume`).
 
 ## Parallel track: coworker skill transport upgrade (done)
 

@@ -23,6 +23,9 @@ serde.workspace = true
 serde_json.workspace = true
 # Structured logging for spawn and lifecycle events (M-LOG-STRUCTURED).
 tracing.workspace = true
+# Timestamp math for the coordination-stall monitor: the age of an unanswered wait
+# or a held ledger task, read from the event stream (issue #48).
+chrono.workspace = true
 
 [dev-dependencies]
 # Run a real broker in-process for the end-to-end spawn test (issue #21).

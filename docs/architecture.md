@@ -47,6 +47,14 @@ Planned surface (illustrative, not final):
   verification and `POST /gate/verdict` records an independent verdict, refusing a
   self-verdict so "done" means an independent role could not break it (issue #47). See
   `docs/roles.md` (the done-gate).
+- `GET /board` reads the shared situation board and `POST /board` records or retracts an
+  entry (issue #49): the crew's durable memory of decisions, interfaces, and gotchas. It
+  is a projection of the `board` events, rebuilt from the log on a restart. See
+  `docs/communication.md` (context management).
+- `GET /briefing?role=<role>` assembles the bounded new-role briefing packet (issue #50):
+  the decision board plus a rolling summary scoped to the role's timeline, rendered to
+  text and capped to a byte budget, so a fresh role catches up without reading the whole
+  log. See `docs/roles.md` (the briefing packet).
 
 Why a broker beats the old shared file:
 
@@ -159,8 +167,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes ten tools (issues #17,
-#27, #45, #46, #47):
+broker's HTTP API; it never touches the store. It exposes thirteen tools (issues #17,
+#27, #45, #46, #47, #49, #50):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -192,6 +200,15 @@ broker's HTTP API; it never touches the store. It exposes ten tools (issues #17,
   self-verdict, so a task is done only when a role other than the owner could not break
   it, and a failure hands the work back to the owner's inbox. See `docs/roles.md` (the
   done-gate).
+- `crew_board` and `crew_record` are the shared situation board (issue #49), the crew's
+  durable memory. `crew_record` records or retracts an entry (a decision, an interface, or
+  a gotcha, keyed by a stable topic); `crew_board` reads it. A role reads the board before
+  re-deriving a settled decision. It is a projection of the durable `board` events, so it
+  survives an idle-stop or a restart. See `docs/roles.md` (the situation board).
+- `crew_briefing` returns the bounded new-role briefing packet (issue #50): the decision
+  board plus a rolling summary scoped to the role's lane, capped to a byte budget. A role
+  calls it first on boot to catch up in seconds instead of reading the whole log. See
+  `docs/roles.md` (the briefing packet).
 
 Each tool documents itself and its arguments in `tools/list` so an agent calls it
 right the first time. A tool failure comes back as an `isError` result the agent
@@ -199,7 +216,9 @@ reads, not a protocol error.
 
 MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
 the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, `crew roster`,
-`crew lane`, and the done-gate trio `crew submit` / `crew verdict` / `crew gate` act as
+`crew lane`, the work-ledger pair `crew claim` / `crew ledger`, the done-gate trio
+`crew submit` / `crew verdict` / `crew gate`, the situation-board pair `crew board` /
+`crew record`, and `crew briefing` act as
 the role the environment names and reach the broker through the
 **same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
 broker identically. A Codex agent registers on boot and then sends and reads through
@@ -207,8 +226,13 @@ the shim, so it appears on the roster and the stream like any other role. The pa
 and its gaps (a stateless inbox with no per-session cursor, no push, operator-launched
 rather than supervisor-spawned) are in `docs/codex.md`.
 
-The roadmap step is `crew_inbox` push: subscribing to the broker's per-role SSE
-stream for native notifications instead of the current history read on each call.
+`crew_inbox` has a push path (issue #76): the server subscribes to the broker's per-role
+SSE inbox (`GET /inbox?role=<role>`) at boot, seeding the backlog from history once and
+then buffering events on a background thread, resuming from a `Last-Event-ID` cursor across
+reconnects. A read drains the buffered batch instead of refetching the whole history, so it
+is O(new) rather than O(total) per call. The pull-based history read stays the fallback for
+a runtime without streaming. Surfacing native MCP notifications as events arrive, rather
+than only on a read, is the remaining refinement.
 
 ### CLI (`crew`, human front-end)
 

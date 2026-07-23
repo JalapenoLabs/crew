@@ -10,7 +10,9 @@
 //! - the [`Sender`] of an event (a role, or the General);
 //! - the [`Event`] stream item and its [`EventKind`] payloads ([`Message`] with a
 //!   [`MessageKind`], [`Lifecycle`], [`Activity`], a [`LedgerEvent`] work claim, a
-//!   [`BoundaryEvent`] lane crossing, and a [`VerificationEvent`] done-gate step);
+//!   [`BoundaryEvent`] lane crossing, a [`VerificationEvent`] done-gate step, a
+//!   [`BoardEvent`] board change, and the [`BudgetEvent`], [`TelemetryEvent`], and
+//!   [`UsageEvent`] economy reports);
 //! - the [`Channel`] model that names a message's audience (`all-units`, a direct
 //!   `@role`, or a `a+b` pair) and resolves which roles it reaches;
 //! - the [`RoleCard`] an agent boots from: its lane, its acceptance bar, and how to
@@ -20,6 +22,7 @@
 //! route it and any front-end can render it (see `docs/communication.md` and
 //! `docs/observability.md`).
 
+mod budget;
 mod card;
 mod channel;
 mod config;
@@ -28,12 +31,14 @@ mod id;
 mod lane;
 mod time;
 
+pub use budget::{Budget, BudgetScope, Spend};
 pub use card::{BrokerEndpoint, CardError, RoleCard, ROLE_CARD_ENV};
 pub use channel::{Channel, ALL_UNITS};
 pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
 pub use event::{
-    Activity, ArtifactKind, BoundaryEvent, Event, EventKind, LedgerEvent, Lifecycle, Message,
-    MessageKind, TaskState, Verdict, VerificationEvent,
+    Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, Event, EventKind,
+    LedgerEvent, Lifecycle, Message, MessageKind, TaskState, TelemetryEvent, UsageEvent, Verdict,
+    VerificationEvent,
 };
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use lane::path_in_lane;

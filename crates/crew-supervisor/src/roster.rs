@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use crew_core::{RoleId, TaskId};
+use crew_core::{BudgetEvent, RoleId, TaskId, TelemetryEvent, Timestamp};
 use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -126,6 +126,70 @@ impl RosterClient {
             .map_err(|err| eyre!("could not mark role `{role}` as {}: {err}", liveness.wire()))
     }
 
+    /// Reports a role's token spend against the crew budget (`POST /budget`, issue #54).
+    ///
+    /// The broker records it as a `budget` event on the stream, so spend against budget is
+    /// visible and a cap hit is never silent. The supervisor computes the totals from the
+    /// crew [`Budget`](crew_core::Budget); this only surfaces them.
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_budget(&self, event: &BudgetEvent) -> Result<()> {
+        let url = format!("{}/budget", self.base);
+        let body = serde_json::to_string(event)
+            .map_err(|err| eyre!("could not encode the budget report: {err}"))?;
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not report budget for role `{}`: {err}", event.role))
+    }
+
+    /// Reports a role's per-turn token-and-cost usage (`POST /telemetry`, issue #55).
+    ///
+    /// The broker records it as a `telemetry` event and folds it into the `GET /stats`
+    /// rollup, so per-role and aggregate spend is legible regardless of any budget.
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_telemetry(&self, event: &TelemetryEvent) -> Result<()> {
+        let url = format!("{}/telemetry", self.base);
+        let body = serde_json::to_string(event)
+            .map_err(|err| eyre!("could not encode the telemetry report: {err}"))?;
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_response| ())
+            .map_err(|err| {
+                eyre!(
+                    "could not report telemetry for role `{}`: {err}",
+                    event.role
+                )
+            })
+    }
+
+    /// Reports a shared-subscription usage reading (`POST /usage`, issue #56).
+    ///
+    /// The crew shares one subscription, so a single reading of the window against its limit
+    /// drives the broker's one gauge: at or above the threshold it auto-pauses new work until
+    /// `window_reset`. This is the seam the rate-limit detection (the stream-json parser,
+    /// issue #24) drives; `percent` is the window fill (`0..=100`).
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_usage(&self, percent: u8, window_reset: Timestamp) -> Result<()> {
+        let url = format!("{}/usage", self.base);
+        let body = json!({ "percent": percent, "window_reset": window_reset });
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not report subscription usage: {err}"))
+    }
+
     /// Adds the task id to a roster request body when a task context is set.
     fn attach_task(&self, body: &mut Value) {
         if let (Some(task), Value::Object(fields)) = (self.task, body) {
@@ -170,6 +234,49 @@ impl RosterClient {
             .map_err(|err| eyre!("could not parse the roster response: {err}"))?;
         Ok(view.roles.into_iter().map(|entry| entry.role).collect())
     }
+
+    /// Reads the events at or after `since`, oldest first, following the history pages.
+    ///
+    /// The coordination-stall monitor (issue #48) reads a recent window of the stream to
+    /// look for a crew stuck waiting on itself. Events are returned as raw JSON so the
+    /// supervisor reads the broker's stable stream contract rather than coupling to
+    /// `crew_core::EventKind`, which lets an event kind it does not model pass through.
+    ///
+    /// # Errors
+    /// Returns an error if the broker cannot be reached or a page is malformed.
+    pub fn history_since(&self, since: Timestamp) -> Result<Vec<Value>> {
+        let url = format!("{}/history", self.base);
+        let since = since.to_string();
+        let mut events = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut request = self.agent.get(&url).query("since", &since);
+            if let Some(cursor) = &after {
+                request = request.query("after", cursor);
+            }
+            let text = request
+                .call()
+                .map_err(|err| eyre!("could not read the broker history: {err}"))?
+                .into_string()
+                .map_err(|err| eyre!("could not read the history response: {err}"))?;
+            let page: HistoryPage = serde_json::from_str(&text)
+                .map_err(|err| eyre!("could not parse the history response: {err}"))?;
+            events.extend(page.events);
+            match page.next_cursor {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+        Ok(events)
+    }
+}
+
+/// One page of `GET /history`: the events, and the cursor to the next page if any.
+#[derive(Debug, Deserialize)]
+struct HistoryPage {
+    events: Vec<Value>,
+    #[serde(default)]
+    next_cursor: Option<String>,
 }
 
 /// The shape of `GET /roster` (only the role ids are read here).

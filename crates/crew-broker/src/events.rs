@@ -410,7 +410,11 @@ mod tests {
             | EventKind::Activity(_)
             | EventKind::Ledger(_)
             | EventKind::Boundary(_)
-            | EventKind::Verification(_) => {
+            | EventKind::Verification(_)
+            | EventKind::Board(_)
+            | EventKind::Budget(_)
+            | EventKind::Telemetry(_)
+            | EventKind::Usage(_) => {
                 panic!("expected a message")
             }
         };

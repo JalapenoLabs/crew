@@ -4,12 +4,24 @@
 //! server never touches the store directly. It acts as one role (the agent it
 //! serves): `send` posts as that role, `inbox` reads the messages addressed to it
 //! (self-filtered), and `roster` lists the unit.
+//!
+//! `inbox` has two paths (issue #76). With [`subscribe`](Broker::subscribe) it holds a
+//! background subscription to the broker's per-role SSE inbox (`GET /inbox?role=<role>`,
+//! issue #10), buffering events as they arrive; a read then drains the buffered batch
+//! rather than refetching the whole message history. Without a subscription (a runtime
+//! without streaming) it falls back to the pull-based history read.
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::io::{BufRead, BufReader, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use crew_core::{
-    path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageKind, RoleId, Sender,
+    path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind, RoleId,
+    Sender,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -22,6 +34,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// surfaces as a tool error rather than hanging the agent.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the inbox stream waits before retrying a dropped connection.
+///
+/// Short, since the broker is on localhost and usually returns at once; long enough that
+/// a genuinely down broker is not hammered. A resume carries the `Last-Event-ID` cursor,
+/// so nothing is missed across the gap.
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+
 /// The broker client for one agent role.
 #[derive(Debug)]
 pub struct Broker {
@@ -29,10 +48,14 @@ pub struct Broker {
     role: RoleId,
     commander: RoleId,
     agent: ureq::Agent,
-    /// How many message events the inbox has already delivered, so a later read
-    /// returns only what is new. The event log is append-only, so the count is a
-    /// stable cursor.
+    /// How many message events the pull-based inbox has already delivered, so a later
+    /// read returns only what is new. The event log is append-only, so the count is a
+    /// stable cursor. Used only in the pull fallback; the push path uses [`InboxStream`].
     read_through: usize,
+    /// The live inbox subscription, when [`subscribe`](Broker::subscribe) has established
+    /// one (issue #76). When set, [`inbox`](Broker::inbox) drains its buffer; when `None`,
+    /// it falls back to the pull-based read.
+    inbox_stream: Option<InboxStream>,
 }
 
 impl Broker {
@@ -54,6 +77,7 @@ impl Broker {
             commander,
             agent,
             read_through: 0,
+            inbox_stream: None,
         }
     }
 
@@ -175,15 +199,85 @@ impl Broker {
         }
     }
 
-    /// Returns the messages addressed to this role that arrived since the last read.
+    /// Subscribes to this role's live inbox, so [`inbox`](Broker::inbox) drains buffered
+    /// events instead of refetching the whole history each call (issue #76).
     ///
-    /// Reads through the broker's history and keeps the message events on the role's
-    /// channels (direct, a pair it belongs to, or `all-units`), dropping its own so a
-    /// role never sees its own messages.
+    /// Opens the broker's per-role SSE inbox (`GET /inbox?role=<role>`, issue #10) and
+    /// seeds the backlog from history once, since a fresh stream starts at the live tail;
+    /// a background thread then buffers new events as they arrive, resuming from a
+    /// `Last-Event-ID` cursor across reconnects so nothing is missed. The push path takes
+    /// over from the pull fallback from here on.
+    ///
+    /// If the stream cannot be opened (a runtime without streaming), this returns an error
+    /// and leaves the client on the pull-based read.
     ///
     /// # Errors
-    /// Returns a message if the broker cannot be reached or its response is malformed.
+    /// Returns a message if the broker's inbox stream cannot be opened, or the backlog read
+    /// fails.
+    pub fn subscribe(&mut self) -> Result<(), String> {
+        // Open the stream first, so its live-tail cursor is fixed before the backlog read.
+        // Any event that lands in the overlap is deduplicated by message id below.
+        let reader = open_inbox(&self.agent, &self.base, &self.role, None)
+            .map_err(|err| self.explain(*err))?;
+
+        // Seed the backlog: the messages already addressed to the role, which a fresh
+        // stream (starting at the live tail) does not replay. This is the one-time
+        // catch-up; later reads never refetch history.
+        let mut seen: HashSet<MessageId> = HashSet::new();
+        let mut backlog: VecDeque<Event> = VecDeque::new();
+        for event in self.message_log()? {
+            if let Some(id) = addressed_message_id(&event, &self.role) {
+                seen.insert(id);
+                backlog.push_back(event);
+            }
+        }
+
+        let buffer = Arc::new(Mutex::new(backlog));
+        let stop = Arc::new(AtomicBool::new(false));
+        // The thread is a daemon for the client's life, stopped by the flag when the
+        // subscription is dropped; it owns clones of the shared buffer and stop flag.
+        let thread_buffer = Arc::clone(&buffer);
+        let thread_stop = Arc::clone(&stop);
+        let agent = self.agent.clone();
+        let base = self.base.clone();
+        let role = self.role.clone();
+        thread::spawn(move || {
+            run_inbox_stream(
+                reader,
+                &agent,
+                &base,
+                &role,
+                &thread_buffer,
+                seen,
+                &thread_stop,
+            );
+        });
+        self.inbox_stream = Some(InboxStream { buffer, stop });
+        Ok(())
+    }
+
+    /// Returns the messages addressed to this role that arrived since the last read.
+    ///
+    /// With a live subscription (issue #76) this drains the events the background stream
+    /// has buffered since the last read, advancing the cursor with no full-history
+    /// refetch. Without one it falls back to reading the history and slicing from the
+    /// pull cursor. Either way it keeps the message events on the role's channels
+    /// (direct, a pair it belongs to, or `all-units`), dropping its own so a role never
+    /// sees its own messages.
+    ///
+    /// # Errors
+    /// Returns a message if the pull fallback cannot reach the broker or its response is
+    /// malformed. The push path never fails: it drains an in-memory buffer.
     pub fn inbox(&mut self) -> Result<Vec<InboxItem>, String> {
+        // Push path: drain the buffered batch the background stream has delivered.
+        if let Some(events) = self.inbox_stream.as_ref().map(InboxStream::drain) {
+            return Ok(events
+                .iter()
+                .filter_map(|event| self.addressed(event))
+                .collect());
+        }
+
+        // Pull fallback (a runtime without streaming): read history, slice from the cursor.
         let messages = self.message_log()?;
         let start = self.read_through.min(messages.len());
         let new = messages[start..]
@@ -328,6 +422,81 @@ impl Broker {
         self.get("/gate")
     }
 
+    /// Records a decision, interface, or gotcha on the shared situation board (issue #49).
+    ///
+    /// The board is the crew's durable memory: recording here so the crew stops
+    /// re-deriving a settled `key`. Recording the same key again updates the entry.
+    ///
+    /// # Errors
+    /// Returns a message if the broker rejects the change or cannot be reached.
+    pub fn record(&self, key: &str, section: &str, body: &str) -> Result<String, String> {
+        let payload = json!({
+            "role": self.role.as_str(),
+            "key": key,
+            "section": section,
+            "body": body,
+        });
+        self.post_json("/board", &payload)?;
+        Ok(format!("recorded `{key}` on the board ({section})."))
+    }
+
+    /// Retracts a board entry the crew no longer holds (issue #49).
+    ///
+    /// # Errors
+    /// Returns a message if the entry is not on the board, or the broker cannot be reached.
+    pub fn retract(&self, key: &str) -> Result<String, String> {
+        let payload = json!({
+            "role": self.role.as_str(),
+            "key": key,
+            "retract": true,
+        });
+        self.post_json("/board", &payload)?;
+        Ok(format!("retracted `{key}` from the board."))
+    }
+
+    /// Reads the shared situation board, optionally filtered to one section (issue #49).
+    ///
+    /// # Errors
+    /// Returns a message if the broker cannot be reached or its response is malformed.
+    pub fn board(&self, section: Option<&str>) -> Result<BoardSnapshot, String> {
+        match section {
+            Some(section) => self.get(&format!("/board?section={section}")),
+            None => self.get("/board"),
+        }
+    }
+
+    /// Fetches this role's bounded new-role briefing packet (issue #50).
+    ///
+    /// The packet is the current decision board plus a rolling summary scoped to the
+    /// role's own timeline, capped to a byte budget, so a freshly spawned role catches up
+    /// in seconds without reading the whole log. `task` optionally narrows the summary,
+    /// and `budget` overrides the byte cap.
+    ///
+    /// # Errors
+    /// Returns a message if the broker cannot be reached or its response is malformed.
+    pub fn briefing(
+        &self,
+        task: Option<&str>,
+        budget: Option<usize>,
+    ) -> Result<BriefingPacket, String> {
+        let url = format!("{}/briefing", self.base);
+        let mut request = self.agent.get(&url).query("role", self.role.as_str());
+        if let Some(task) = task {
+            request = request.query("task", task);
+        }
+        let budget = budget.map(|budget| budget.to_string());
+        if let Some(budget) = &budget {
+            request = request.query("budget", budget);
+        }
+        let text = request
+            .call()
+            .map_err(|err| self.explain(err))?
+            .into_string()
+            .map_err(|err| format!("could not read the broker response: {err}"))?;
+        serde_json::from_str(&text)
+            .map_err(|err| format!("could not parse the broker response: {err}"))
+    }
+
     /// Posts a JSON `payload` to `path`, discarding the body on success.
     fn post_json(&self, path: &str, payload: &Value) -> Result<(), String> {
         let url = format!("{}{path}", self.base);
@@ -425,6 +594,145 @@ impl Broker {
     }
 }
 
+/// A live subscription to the role's inbox, buffering events for a drain (issue #76).
+///
+/// A background thread reads the per-role SSE stream into `buffer`; [`inbox`](Broker::inbox)
+/// drains it. Dropping the subscription signals the thread to stop.
+#[derive(Debug)]
+struct InboxStream {
+    /// The events the stream has delivered since the last drain, oldest first.
+    buffer: Arc<Mutex<VecDeque<Event>>>,
+    /// Set to stop the background thread; it exits at its next read boundary.
+    stop: Arc<AtomicBool>,
+}
+
+impl InboxStream {
+    /// Takes every event buffered since the last drain, oldest first.
+    fn drain(&self) -> Vec<Event> {
+        let mut buffer = self.buffer.lock().unwrap_or_else(PoisonError::into_inner);
+        buffer.drain(..).collect()
+    }
+}
+
+impl Drop for InboxStream {
+    fn drop(&mut self) {
+        // Signal the thread to stop. It notices at its next read boundary: the SSE
+        // keep-alive comment unblocks the read within the keep-alive interval, so the
+        // thread exits shortly without the drop blocking on a join.
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Runs the background inbox stream: buffer events, reconnecting with a `Last-Event-ID`
+/// cursor when the connection drops, until `stop` is set (issue #76).
+fn run_inbox_stream(
+    reader: Box<dyn Read + Send + Sync>,
+    agent: &ureq::Agent,
+    base: &str,
+    role: &RoleId,
+    buffer: &Mutex<VecDeque<Event>>,
+    mut seen: HashSet<MessageId>,
+    stop: &AtomicBool,
+) {
+    let mut reader = reader;
+    let mut last_seq = None;
+    loop {
+        last_seq = drain_connection(reader, role, buffer, &mut seen, last_seq, stop);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        // The connection dropped; wait, then resume right after the last event delivered.
+        // A failed reopen (the broker is briefly down) just loops to back off and retry.
+        reader = loop {
+            thread::sleep(RECONNECT_BACKOFF);
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Ok(next) = open_inbox(agent, base, role, last_seq) {
+                break next;
+            }
+        };
+    }
+}
+
+/// Reads one SSE connection to its end, buffering each addressed message, and returns the
+/// highest event sequence seen, so a reconnect resumes right after it.
+fn drain_connection(
+    reader: Box<dyn Read + Send + Sync>,
+    role: &RoleId,
+    buffer: &Mutex<VecDeque<Event>>,
+    seen: &mut HashSet<MessageId>,
+    mut last_seq: Option<u64>,
+    stop: &AtomicBool,
+) -> Option<u64> {
+    let reader = BufReader::new(reader);
+    for line in reader.lines() {
+        if stop.load(Ordering::Relaxed) {
+            return last_seq;
+        }
+        // A read error or EOF ends this connection; the caller reconnects from `last_seq`.
+        let Ok(line) = line else {
+            return last_seq;
+        };
+        if let Some(id) = line.strip_prefix("id:") {
+            if let Ok(seq) = id.trim().parse::<u64>() {
+                last_seq = Some(seq);
+            }
+        } else if let Some(data) = line.strip_prefix("data:") {
+            let Ok(event) = serde_json::from_str::<Event>(data.trim_start()) else {
+                continue;
+            };
+            let Some(id) = addressed_message_id(&event, role) else {
+                continue; // the inbox also carries non-message events; keep only messages
+            };
+            // Skip a message the backlog seed already holds (the connect / read overlap).
+            if seen.contains(&id) {
+                continue;
+            }
+            buffer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_back(event);
+        }
+    }
+    last_seq
+}
+
+/// Opens the role's SSE inbox stream, resuming right after `last_seq` when one is given.
+///
+/// The error is boxed because [`ureq::Error`] carries the whole response, so returning it
+/// unboxed would bloat every `Ok` in the hot read loop.
+fn open_inbox(
+    agent: &ureq::Agent,
+    base: &str,
+    role: &RoleId,
+    last_seq: Option<u64>,
+) -> Result<Box<dyn Read + Send + Sync>, Box<ureq::Error>> {
+    let url = format!("{base}/inbox?role={}", role.as_str());
+    let mut request = agent.get(&url);
+    if let Some(seq) = last_seq {
+        request = request.set("Last-Event-ID", &seq.to_string());
+    }
+    Ok(request.call().map_err(Box::new)?.into_reader())
+}
+
+/// The message id of `event`, if it is a message addressed to `role` and not sent by it.
+///
+/// The per-role inbox stream already filters to the role's channels and drops its own
+/// messages, but re-checking keeps the push and pull paths agreeing, and yields the id the
+/// backlog seed deduplicates against.
+fn addressed_message_id(event: &Event, role: &RoleId) -> Option<MessageId> {
+    let EventKind::Message(message) = &event.kind else {
+        return None;
+    };
+    if event.from == Sender::Role(role.clone()) {
+        return None;
+    }
+    Channel::parse(event.channel.as_str())
+        .is_some_and(|channel| channel.addresses(role))
+        .then_some(message.id)
+}
+
 /// One message addressed to the role, for display.
 #[derive(Debug)]
 pub struct InboxItem {
@@ -511,6 +819,39 @@ pub struct GateTask {
     /// The acceptance being claimed, or the failure on a handback.
     #[serde(default)]
     pub detail: String,
+}
+
+/// The situation board read from `GET /board`: the crew's durable memory (issue #49).
+#[derive(Debug, Deserialize)]
+pub struct BoardSnapshot {
+    /// The board's entries, ordered by section then topic.
+    pub entries: Vec<BoardEntryView>,
+}
+
+/// One entry on the situation board.
+#[derive(Debug, Deserialize)]
+pub struct BoardEntryView {
+    /// The entry's stable key (its topic).
+    pub key: String,
+    /// Which section it belongs to: `decision`, `interface`, or `gotcha`.
+    pub section: String,
+    /// The role that recorded it.
+    pub author: String,
+    /// The entry's content.
+    pub body: String,
+}
+
+/// The bounded new-role briefing packet from `GET /briefing` (issue #50).
+#[derive(Debug, Deserialize)]
+pub struct BriefingPacket {
+    /// The rendered packet text a role reads on boot.
+    pub text: String,
+    /// The packet's size in bytes.
+    pub size: usize,
+    /// The byte budget it was held to.
+    pub budget: usize,
+    /// Whether content was dropped to fit the budget.
+    pub capped: bool,
 }
 
 /// The shape of `GET /roster`.

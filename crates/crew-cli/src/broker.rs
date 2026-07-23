@@ -13,7 +13,8 @@ use std::io::{BufRead, BufReader};
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{
-    Activity, BrokerEndpoint, Event, EventKind, MessageKind, Sender, Verdict, VerificationEvent,
+    Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind, MessageKind,
+    Sender, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -34,9 +35,11 @@ pub fn watch(broker: Option<&str>, role: Option<&str>) -> Result<()> {
 
 /// The broker base URL: the `--broker` value if given, else the broker's environment.
 ///
+/// Shared by every stream reader (`crew watch`, `crew notify`).
+///
 /// # Errors
 /// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but invalid.
-fn resolve_base(flag: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
     if let Some(url) = flag {
         return Ok(normalize_base(url));
     }
@@ -67,22 +70,34 @@ fn watch_path(role: Option<&str>) -> String {
 /// # Errors
 /// Returns an error if the broker cannot be reached or refuses the stream.
 fn tail(base: &str, path: &str) -> Result<()> {
+    tail_events(base, path, |event| println!("{}", render_event(event)))
+}
+
+/// Tails `path` (an SSE endpoint) on `base`, invoking `on_event` for each event.
+///
+/// This is the shared read half behind `crew watch` and `crew notify`: it opens the
+/// stream, parses each SSE `data:` line into an [`Event`], and hands it to `on_event`.
+/// The tail runs until the connection ends or the caller interrupts.
+///
+/// # Errors
+/// Returns an error if the broker cannot be reached or refuses the stream.
+pub(crate) fn tail_events(base: &str, path: &str, mut on_event: impl FnMut(&Event)) -> Result<()> {
     let url = format!("{base}{path}");
     let response = ureq::get(&url).call().map_err(|err| match err {
-        ureq::Error::Status(code, _) => eyre!("the broker refused the watch: HTTP {code}"),
+        ureq::Error::Status(code, _) => eyre!("the broker refused the stream: HTTP {code}"),
         ureq::Error::Transport(transport) => {
             eyre!("could not reach the broker at {base}; is `crewd` running? ({transport})")
         }
     })?;
-    event!(name: "cli.watch.connected", Level::DEBUG, url = %url, "watching {{url}}");
+    event!(name: "cli.stream.connected", Level::DEBUG, url = %url, "streaming {{url}}");
 
     // Read the SSE body line by line as events arrive; the tail runs until the
-    // connection ends or the user interrupts.
+    // connection ends or the caller interrupts.
     let reader = BufReader::new(response.into_reader());
     for line in reader.lines() {
-        let line = line.wrap_err("the watch stream ended unexpectedly")?;
+        let line = line.wrap_err("the event stream ended unexpectedly")?;
         if let Some(event) = parse_data_line(&line) {
-            println!("{}", render_event(&event));
+            on_event(&event);
         }
     }
     Ok(())
@@ -137,6 +152,76 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
             ),
         ),
         EventKind::Verification(verification) => ("verification", verification_body(verification)),
+        EventKind::Board(board) => ("board", board_body(board)),
+        EventKind::Budget(budget) => ("budget", budget_body(budget)),
+        EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
+        EventKind::Usage(usage) => ("usage", usage_body(usage)),
+    }
+}
+
+/// A short description of a shared-subscription usage reading (issue #56).
+fn usage_body(usage: &UsageEvent) -> String {
+    if usage.paused {
+        match usage.window_reset {
+            Some(reset) => format!(
+                "subscription at {}%; new work paused until {}",
+                usage.percent,
+                reset.to_datetime().format("%H:%M:%S")
+            ),
+            None => format!("subscription at {}%; new work paused", usage.percent),
+        }
+    } else {
+        format!("subscription at {}%; work resumed", usage.percent)
+    }
+}
+
+/// A short description of a per-turn token-and-cost usage report (issue #55).
+fn telemetry_body(telemetry: &TelemetryEvent) -> String {
+    // Cost rides the wire in micro-USD; render whole dollars and cents.
+    let dollars = telemetry.cost_micro_usd / 1_000_000;
+    let cents = (telemetry.cost_micro_usd % 1_000_000) / 10_000;
+    format!(
+        "{} spent {} tokens (${dollars}.{cents:02})",
+        telemetry.role, telemetry.tokens
+    )
+}
+
+/// A short description of a token-spend report against the crew budget (issue #54).
+fn budget_body(budget: &BudgetEvent) -> String {
+    let spend = |spent: u64, cap: Option<u64>| match cap {
+        Some(cap) => format!("{spent}/{cap}"),
+        None => format!("{spent}"),
+    };
+    let role = format!(
+        "{} spent {} tokens",
+        budget.role,
+        spend(budget.role_spent, budget.role_cap)
+    );
+    let crew = format!("crew {}", spend(budget.crew_spent, budget.crew_budget));
+    match budget.breach {
+        Some(BudgetScope::Role) => format!("{role} (cap reached, idle-stopped); {crew}"),
+        Some(BudgetScope::Crew) => format!("{role}; {crew} (budget reached, crew idle-stopped)"),
+        None => format!("{role}; {crew}"),
+    }
+}
+
+/// A short description of a situation-board change (issue #49).
+fn board_body(board: &BoardEvent) -> String {
+    if board.retracted {
+        format!(
+            "{} retracted `{}` ({})",
+            board.author,
+            board.key,
+            board.section.label()
+        )
+    } else {
+        format!(
+            "{} recorded `{}` ({}): {}",
+            board.author,
+            board.key,
+            board.section.label(),
+            board.body
+        )
     }
 }
 

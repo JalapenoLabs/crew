@@ -30,6 +30,7 @@ fn a_crashed_agent_is_recorded_revived_then_handed_off() {
         heartbeat_timeout: NEVER,
         watchdog_timeout: NEVER,
         max_recoveries: 1,
+        ..LifecyclePolicy::default()
     };
     // The stub exits immediately, so every start is an unexpected exit.
     let fleet = Fleet::launch(&roster, vec![stub("qa", "exit 1")], policy);
@@ -77,6 +78,7 @@ fn a_hung_agent_is_detected_by_the_heartbeat_and_recovered() {
         heartbeat_timeout: Duration::from_millis(300),
         watchdog_timeout: NEVER,
         max_recoveries: 1,
+        ..LifecyclePolicy::default()
     };
     // The stub is alive but silent: a turn hung mid-flight.
     let fleet = Fleet::launch(&roster, vec![stub("backend", "sleep 300")], policy);
@@ -119,6 +121,7 @@ fn the_watchdog_reaps_an_agent_the_in_turn_path_missed() {
         heartbeat_timeout: NEVER,
         watchdog_timeout: Duration::from_millis(300),
         max_recoveries: 3,
+        ..LifecyclePolicy::default()
     };
     let fleet = Fleet::launch(&roster, vec![stub("docs", "sleep 300")], policy);
 

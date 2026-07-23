@@ -219,6 +219,14 @@ impl RoleCard {
             self.broker.base_url(),
         );
 
+        out.push('\n');
+        out.push_str(
+            "First thing, catch up: call crew_briefing. It returns a small, bounded packet, the \
+             decision board and a rolling summary scoped to your lane, so you start productive in \
+             seconds without reading the whole log. Do not read the raw history; the briefing is \
+             the deliberate catch-up path.\n",
+        );
+
         if !self.owned_paths.is_empty() && self.lane_enforcement != LaneEnforcement::Off {
             out.push('\n');
             out.push_str(
@@ -246,6 +254,15 @@ impl RoleCard {
              resubmit. When a teammate asks you to verify their work, be the skeptic: try to \
              break it against the acceptance and crew_verdict pass only if you cannot; on a fail, \
              give the specific, actionable reason. You cannot verify your own work.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
+            "The crew keeps a shared situation board, its durable memory: agreed interfaces, \
+             decisions and their rationale, and known gotchas. Read it with crew_board before you \
+             re-derive a settled decision or re-open a resolved one, and record a new decision, \
+             interface, or gotcha with crew_record so no one relitigates it. The board outlives \
+             the message stream and survives a restart; the commander curates it.\n",
         );
 
         out.push('\n');
@@ -478,12 +495,20 @@ mod tests {
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
         assert!(
+            briefing.contains("crew_briefing"),
+            "tells the role to catch up with the bounded briefing packet on boot"
+        );
+        assert!(
             briefing.contains("Stay in your lane") && briefing.contains("crew_lane"),
             "tells a role with a lane and enforcement on to stay in it"
         );
         assert!(
             briefing.contains("Done means verified") && briefing.contains("crew_submit"),
             "tells the role to verify before done and to be a skeptic"
+        );
+        assert!(
+            briefing.contains("situation board") && briefing.contains("crew_board"),
+            "points the role at the shared situation board"
         );
         assert!(
             briefing.contains("redirect") && briefing.contains("belay"),

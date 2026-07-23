@@ -11,7 +11,10 @@ use std::io::{BufRead, Write};
 use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
-use crate::broker::{Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing};
+use crate::broker::{
+    BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot,
+    Standing,
+};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -174,6 +177,29 @@ impl Server {
                 )
             }
             "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
+            "crew_board" => Ok(render_board(
+                &self.broker.board(str_arg(arguments, "section"))?,
+            )),
+            "crew_record" => {
+                let key = str_arg(arguments, "key")
+                    .ok_or("crew_record requires a `key` (the entry's topic)")?;
+                if bool_arg(arguments, "retract").unwrap_or(false) {
+                    self.broker.retract(key)
+                } else {
+                    let section = str_arg(arguments, "section").ok_or(
+                        "crew_record requires a `section` (decision, interface, or gotcha) \
+                         unless retracting",
+                    )?;
+                    let body = str_arg(arguments, "body")
+                        .ok_or("crew_record requires a `body` (the content) unless retracting")?;
+                    self.broker.record(key, section, body)
+                }
+            }
+            "crew_briefing" => Ok(render_briefing(
+                &self
+                    .broker
+                    .briefing(str_arg(arguments, "task"), usize_arg(arguments, "budget"))?,
+            )),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -193,11 +219,13 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: coordination, then work-ledger, then done-gate.
+/// The tool catalog for `tools/list`: coordination, work-ledger, done-gate, board, briefing.
 fn tool_catalog() -> Value {
     let mut tools = coordination_tools();
     tools.extend(ledger_tools());
     tools.extend(done_gate_tools());
+    tools.extend(board_tools());
+    tools.extend(briefing_tools());
     Value::Array(tools)
 }
 
@@ -366,6 +394,64 @@ fn done_gate_tools() -> Vec<Value> {
     ]
 }
 
+/// The situation-board tools: read the crew's durable memory, and record or retract an entry.
+fn board_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "crew_board",
+            "description": "Read the shared situation board: the crew's durable memory of agreed \
+                interfaces, decisions and their rationale, and known gotchas. Check it before you \
+                re-derive a settled decision or re-litigate a choice; it outlives the message \
+                stream and survives a restart. Pass `section` to read just `decision`, \
+                `interface`, or `gotcha`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "section": { "type": "string", "enum": ["decision", "interface", "gotcha"], "description": "Read just this section; omit for the whole board." }
+                }
+            }
+        }),
+        json!({
+            "name": "crew_record",
+            "description": "Record a decision, an agreed interface, or a known gotcha on the shared \
+                situation board, so the crew stops re-deriving it. `key` is a stable topic (for \
+                example `auth-strategy`); recording the same key again updates the entry. \
+                `section` is `decision`, `interface`, or `gotcha`, and `body` is the content (for a \
+                decision, include the rationale). Set `retract: true` with just the `key` to remove \
+                an entry the crew no longer holds. The commander curates the board.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "The entry's stable topic key." },
+                    "section": { "type": "string", "enum": ["decision", "interface", "gotcha"], "description": "The section; required unless retracting." },
+                    "body": { "type": "string", "description": "The entry's content; required unless retracting." },
+                    "retract": { "type": "boolean", "description": "Remove the entry named by `key` instead of recording one." }
+                },
+                "required": ["key"]
+            }
+        }),
+    ]
+}
+
+/// The briefing tool: catch up with a bounded packet instead of the whole log.
+fn briefing_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "crew_briefing",
+        "description": "Get your bounded briefing packet: the current decision board and a \
+            rolling summary scoped to your lane (what has been said to you and about your \
+            work), instead of reading the whole log. Call this first thing when you boot to \
+            catch up in seconds. `budget` optionally caps the packet size in bytes; `task` \
+            optionally narrows the summary to one task's id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget": { "type": "integer", "description": "Cap the packet size in bytes (defaults to a few KB)." },
+                "task": { "type": "string", "description": "Narrow the summary to this task id, if you have one." }
+            }
+        }
+    })]
+}
+
 /// A JSON-RPC success response, moving `result` into the envelope.
 fn rpc_result(id: &Value, result: Value) -> Value {
     Value::Object(serde_json::Map::from_iter([
@@ -397,6 +483,14 @@ fn str_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
 /// A boolean argument, if present and a JSON boolean.
 fn bool_arg(arguments: &Value, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Value::as_bool)
+}
+
+/// A non-negative integer argument as a `usize`, if present and in range.
+fn usize_arg(arguments: &Value, key: &str) -> Option<usize> {
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 /// A string-array argument as owned strings, dropping blanks; empty if absent.
@@ -527,6 +621,46 @@ fn render_gate(snapshot: &GateSnapshot) -> String {
     )
 }
 
+/// Renders the situation board an agent reads: each entry, its section, author, and content.
+fn render_board(snapshot: &BoardSnapshot) -> String {
+    if snapshot.entries.is_empty() {
+        return "The situation board is empty.".to_owned();
+    }
+    let lines: Vec<String> = snapshot
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "- [{}] {} (by {}): {}",
+                entry.section, entry.key, entry.author, entry.body
+            )
+        })
+        .collect();
+    format!(
+        "{} board entr{}:\n{}",
+        snapshot.entries.len(),
+        if snapshot.entries.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        lines.join("\n")
+    )
+}
+
+/// Renders the briefing packet an agent reads on boot: the bounded text plus its size.
+fn render_briefing(packet: &BriefingPacket) -> String {
+    let note = if packet.capped {
+        format!(
+            "\n\n[briefing capped to {} of {} bytes; call crew_board or crew_inbox for more]",
+            packet.size, packet.budget
+        )
+    } else {
+        format!("\n\n[briefing: {} of {} bytes]", packet.size, packet.budget)
+    };
+    format!("{}{note}", packet.text)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -621,7 +755,10 @@ mod tests {
                 "crew_ledger",
                 "crew_submit",
                 "crew_verdict",
-                "crew_gate"
+                "crew_gate",
+                "crew_board",
+                "crew_record",
+                "crew_briefing"
             ]
         );
         // Each tool documents itself and its arguments.
@@ -725,6 +862,21 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("task"));
+    }
+
+    #[test]
+    fn crew_record_without_a_key_is_a_tool_error_not_a_broker_call() {
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                    "params": { "name": "crew_record", "arguments": { "section": "decision", "body": "x" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("key"));
     }
 
     #[test]

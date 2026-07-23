@@ -99,12 +99,29 @@ event on the stream, and `crew_gate` (or `GET /gate`) reads the live gate: each 
 verification, its owner, its verifier, and whether it is submitted, passed, or failed (see
 `docs/observability.md`).
 
+### The situation board
+
+The crew keeps a shared situation board (issue #49): its durable memory, distinct from the
+transient message stream. It holds agreed interfaces, decisions and their rationale, and
+known gotchas, so the crew stops re-deriving and re-litigating what is settled. The whole
+crew reads and writes it, and the commander curates it.
+
+A role reads the board with `crew_board` before it re-derives a settled decision, and
+records a new decision, interface, or gotcha with `crew_record` (keyed by a stable topic,
+so recording the same key updates the entry; `retract` removes one). Every change is a
+`board` event, so the board is auditable, and because the board is a projection of those
+durable events it survives an idle-stop or a broker restart: the broker rebuilds it from
+the log. See `docs/communication.md` (context management) and `docs/observability.md` (the
+situation board).
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface
   decisions, arbitration, and the interface to the General. It issues orders and
-  reports back; it does not write feature code. This is the agent the General
-  briefs.
+  reports back; it does not write feature code. It also curates the shared situation
+  board (issue #49), the crew's durable memory of decisions, interfaces, and gotchas that
+  the whole crew reads and writes (see the situation board below). This is the agent the
+  General briefs.
 - **backend** owns server code, the database, and migrations (for example
   `api/`).
 - **frontend** owns the UI (for example `frontend/`).
@@ -175,6 +192,18 @@ One loader serves both boot paths, so a card means the same thing everywhere:
 `RoleCard::briefing()` renders the thin bootstrap prompt: it names the role,
 states its lane and acceptance bar, and points at the broker and the MCP tools,
 and stops there. That prompt is the shape the `coworker` skill shrinks to.
+
+### The briefing packet
+
+The card is static; a role joining mid-mission also needs the current situation. The
+new-role briefing packet delivers it bounded (issue #50): on boot a role calls
+`crew_briefing` (or `crew briefing`), which returns the current decision board plus a
+rolling summary scoped to the role's own lane (what it sent and what is addressed to it),
+never the raw transcript. The broker renders it to text and caps it to a byte budget,
+reporting the measured size, so joining a long mission costs bounded context, not the
+100k-token whole-log read. The role card's briefing tells a role to catch up this way as
+its first action, so it starts productive in seconds and acts in its lane. See
+`docs/communication.md` (context management).
 
 ## Sizing guidance
 

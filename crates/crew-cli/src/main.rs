@@ -7,8 +7,9 @@
 //!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
 //!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew lane`, `crew claim`,
-//!   `crew ledger`, and the done-gate trio `crew submit` / `crew verdict` / `crew gate`
-//!   act as the role the
+//!   `crew ledger` (issue #45), the done-gate trio `crew submit` / `crew verdict` /
+//!   `crew gate` (issue #47), the situation-board pair `crew board` / `crew record`
+//!   (issue #49), and `crew briefing` (issue #50) act as the role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
 //!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
 //!   stream live, so a peer sees a teammate's messages without polling and never its
@@ -31,10 +32,12 @@ use mimalloc::MiMalloc;
 mod broker;
 mod control;
 mod down;
+mod notify;
 mod paths;
 mod pause;
 mod shim;
 mod up;
+mod usage;
 
 /// mimalloc as the global allocator (M-MIMALLOC-APPS).
 #[global_allocator]
@@ -82,6 +85,18 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Push a native notification on each actionable moment: a question, a death, a stand-down.
+    Notify {
+        /// Mute one or more moments (comma-separated): `question`, `died`, `stood-down`.
+        #[arg(long, value_delimiter = ',', value_name = "MOMENT")]
+        mute: Vec<notify::Moment>,
+        /// Skip the terminal bell; still show the desktop notification and the log line.
+        #[arg(long)]
+        no_sound: bool,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// Redirect a role mid-task: inject a steering message it honors immediately.
     Redirect {
         /// The role to steer (its `@role` channel).
@@ -120,6 +135,12 @@ enum Command {
     },
     /// Stand the crew down: halt every role now, preserving state for recovery.
     Standdown {
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Show the shared-subscription usage gauge: the reading, threshold, and any auto-pause.
+    Usage {
         /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
@@ -168,6 +189,35 @@ enum Command {
     },
     /// Read the done-gate: tasks under verification and their standing.
     Gate,
+    /// Record or retract a shared situation board entry: a decision, interface, or gotcha.
+    Record {
+        /// The entry's stable key (its topic), for example `auth-strategy`.
+        key: String,
+        /// The section: `decision`, `interface`, or `gotcha` (required unless retracting).
+        #[arg(long, value_name = "SECTION")]
+        section: Option<String>,
+        /// The entry's content (required unless retracting).
+        #[arg(long, value_name = "TEXT")]
+        body: Option<String>,
+        /// Retract the entry named by `key` instead of recording one.
+        #[arg(long)]
+        retract: bool,
+    },
+    /// Read the shared situation board: the crew's durable memory.
+    Board {
+        /// Read just one section: `decision`, `interface`, or `gotcha`.
+        #[arg(long, value_name = "SECTION")]
+        section: Option<String>,
+    },
+    /// Get this role's bounded briefing packet: catch up without reading the whole log.
+    Briefing {
+        /// Narrow the summary to this task id, if you have one.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// Cap the packet size in bytes (defaults to a few KB).
+        #[arg(long, value_name = "BYTES")]
+        budget: Option<usize>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -180,6 +230,14 @@ fn main() -> Result<()> {
         Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
+        Command::Notify {
+            mute,
+            no_sound,
+            broker,
+        } => notify::notify(
+            broker.as_deref(),
+            &notify::NotifyPolicy::new(mute, !no_sound),
+        ),
         Command::Redirect {
             role,
             message,
@@ -193,6 +251,7 @@ fn main() -> Result<()> {
         Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
+        Command::Usage { broker } => usage::usage(broker.as_deref()),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
         Command::Claim { task, state, title } => {
@@ -210,5 +269,13 @@ fn main() -> Result<()> {
             failure,
         } => shim::verdict(&task, pass, failure.as_deref()),
         Command::Gate => shim::gate(),
+        Command::Record {
+            key,
+            section,
+            body,
+            retract,
+        } => shim::record(&key, section.as_deref(), body.as_deref(), retract),
+        Command::Board { section } => shim::board(section.as_deref()),
+        Command::Briefing { task, budget } => shim::briefing(task.as_deref(), budget),
     }
 }

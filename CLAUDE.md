@@ -96,14 +96,28 @@ not a reimplementation of the agent.
   for verification instead of asserting it done, an independent role tries to break it
   against the acceptance and passes or hands it back, and the broker refuses a self-verdict
   so "done" means an independent role could not break it); the defibrillator also catches
-  coordination stalls, not just dead agents.
-- **Team memory.** A shared decision board (agreed interfaces, decisions,
-  gotchas) the crew reads and writes, distinct from the transient message stream;
-  a new role boots from a briefing packet (role card + board + rolling summary),
-  never the raw log.
+  coordination stalls, not just dead agents (issue #48: a fleet-wide stall monitor reads
+  the event stream for a deadlock, an unanswered question, or a ledger with no forward
+  motion, and escalates the specific cause to the General, telling a true deadlock from a
+  legitimate wait for input).
+- **Team memory.** A shared situation board (`crew_board` / `crew_record`, issue #49):
+  agreed interfaces, decisions and their rationale, and known gotchas the crew reads and
+  writes, distinct from the transient message stream, curated by the commander. It is a
+  projection of `board` events, so it is auditable and rebuilt from the durable log across
+  an idle-stop or a restart. A new role boots from a bounded briefing packet
+  (`crew_briefing`, issue #50: role card plus the board plus a lane-scoped rolling summary,
+  size-capped), never the raw log, so it joins mid-mission and acts in its lane in seconds.
 - **Economy.** Model per role (strong for the commander and architect, cheap for
-  mechanical roles), a shared token budget with per-role caps, auto-idle with cost
-  telemetry, and subscription usage awareness.
+  mechanical roles); a shared token budget with per-role caps (issue #54, done: a crew-wide
+  `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the crew at a
+  cap and surfaced as a `budget` event, never a silent overrun); auto-idle on quiet with
+  cost and token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role,
+  and per-turn `telemetry` events plus the roles' `lifecycle` events feed a `GET /stats`
+  rollup of tokens, cost, and working time per role and in aggregate); and subscription
+  usage awareness (issue #56, done: one shared usage gauge across the crew auto-pauses new
+  work when a reading crosses `CREW_BROKER_USAGE_THRESHOLD`, lifts lazily at the window
+  reset, and lets the operator resume early with `crew resume`, distinct from the manual
+  pause).
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -133,8 +147,11 @@ The full design is in `docs/architecture.md`. In short:
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
-  `crew verdict` / `crew gate`) for a runtime without MCP, and `crew watch` to tail a
-  role's self-filtered inbox stream live.
+  `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
+  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
+  `crew notify` to push a native notification on each actionable moment (a question, a
+  death, a stand-down) over that same stream, and `crew usage` to read the shared-subscription
+  usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -210,7 +227,7 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Ledger`, `Boundary`,
-`Verification`) stream
+`Verification`, `Board`, `Budget`, `Telemetry`, `Usage`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -285,7 +302,7 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes ten
+API; it never touches the store. It exposes thirteen
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
@@ -297,13 +314,23 @@ before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `b
 event and, under a blocking policy, refuses, routing the change through the commander;
 issue #46), the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
 touching shared work, moving the claim through `in_progress` / `blocked` / `done`, and
-read the ledger; the broker refuses a claim another role holds, issue #45), and the
+read the ledger; the broker refuses a claim another role holds, issue #45), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
 work for verification instead of asserting it done, judge a teammate's work as an
-independent skeptic, and read the gate; issue #47). A tool failure returns as an
-`isError` result, not a protocol error. The
-roadmap step is `crew_inbox` push over the per-role SSE stream instead of the current
-history read.
+independent skeptic, and read the gate; issue #47), the situation-board pair `crew_board`
+/ `crew_record` (read the crew's durable memory, and record or retract a decision,
+interface, or gotcha; issue #49), and `crew_briefing` (the bounded new-role briefing
+packet: the board plus a lane-scoped rolling summary, size-capped; issue #50). A tool
+failure returns as an `isError` result, not a protocol error.
+
+`crew_inbox` has a push path (issue #76): `Broker::subscribe` opens the broker's per-role
+SSE inbox (`GET /inbox?role=<role>`) at boot, seeds the backlog from history once (a fresh
+stream starts at the live tail), and a background thread buffers events as they arrive,
+resuming from a `Last-Event-ID` cursor across reconnects and deduplicating the seed overlap
+by message id. A read drains the buffered batch (`InboxStream`) instead of refetching the
+whole message history, so it is O(new) not O(total) per call. The pull-based history read
+stays the fallback when the stream cannot be opened (a runtime without streaming); surfacing
+native MCP notifications as events arrive is the remaining refinement.
 
 `crew-core` also carries the role card (issue #18): `RoleCard` is the thin bootstrap
 an agent boots from, a TOML document naming the role, its owned lane, its acceptance
@@ -365,6 +392,36 @@ task, owner, verifier, verdict, and detail) published to `all-units` and filtera
 to verify before done and to be the skeptic on a teammate's work. See `docs/roles.md` (the
 done-gate) and `docs/observability.md`.
 
+The shared situation board is the crew's durable memory (issue #49), distinct from the
+transient message stream: agreed interfaces, decisions and their rationale, and known
+gotchas, so the crew stops re-deriving and re-litigating what is settled. `POST /board`
+records or (with `retract`) removes an entry keyed by a stable topic, and `GET /board`
+reads it (filterable by section: decision / interface / gotcha); `crew_board` and
+`crew_record` are the tools, `crew board` / `crew record` the shim commands. Every change
+is a first-class `board` event (a new `EventKind::Board` carrying the key, section, author,
+body, and a retracted flag) published to `all-units` and filterable with
+`GET /history?kind=board`. Crucially, the board is a **projection of those durable events**:
+the broker rebuilds it in `AppState::with_storage` by folding the log the store just
+replayed, so a decision recorded before an idle-stop or a broker restart is still on the
+board after it (this is what satisfies the acceptance, and why the board survives a restart
+where the in-memory pause control and done-gate do not). The whole crew reads and writes
+it; the commander curates it, and each role card's briefing points a role at it. Added a
+`Board` history-kind tag. See `docs/communication.md` (context management), `docs/roles.md`
+(the situation board), and `docs/observability.md`.
+
+The new-role briefing packet solves the 100k-token join problem (issue #50): a freshly
+spawned role catches up from a bounded packet, not the raw transcript. `GET
+/briefing?role=<role>` assembles the current decision board plus a rolling summary scoped
+to the role's own timeline (via the `agent` filter, so its lane and the work addressed to
+it), renders it to text, and caps it to a byte budget (`DEFAULT_BUDGET`, ~4KB, overridable
+with `?budget=`), reporting the measured `size` and a `capped` flag so the packet stays
+small no matter how long the mission ran. `crew_briefing` is the tool (and `crew briefing`
+the shim); each role card's briefing now tells a role to call it first thing on boot as the
+deliberate catch-up path, so it joins mid-mission with bounded context and acts in its lane
+in seconds. The endpoint reuses the existing rolling summary (issue #19) and board (issue
+#49) rather than adding an event kind or projection. See `docs/roles.md` (the briefing
+packet) and `docs/communication.md` (context management).
+
 `crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
 crew tools with no per-task approval (issue #20), the way Seraphim registers the
 Playwright MCP. `locate_server` finds the `crew-mcp` binary (a build/boot check that
@@ -413,6 +470,64 @@ discrimination awaits the activity parser's turn boundaries (issue #24), so by d
 a quiet agent parks rather than being force-recovered. (Unifying the eager `Crew` from
 #21 into the lifecycle-managed `Fleet` is a later cleanup.)
 
+The defibrillator also catches a crew stuck waiting on itself, not just a dead agent
+(issue #48, `crew_supervisor::stall`). A fleet-wide **stall monitor** thread reads a
+recent window of the event stream (`RosterClient::history_since`, over the stable stream
+contract rather than `crew_core::EventKind`, so a kind it does not model passes through)
+on the `stall_scan_interval` and runs `detect_stalls`, a pure function that finds three
+shapes past the `stall_timeout` (ten minutes by default, below the process heartbeat): a
+**deadlock** (a cycle of unanswered questions), an **unanswered question** (a one-sided
+wait with no cycle), and a **stalled ledger** (a task with no forward motion, a `ledger`
+claim not yet `done` from issue #45 or a `verification` submission with no verdict from
+issue #47). A question broadcast to `all-units`, or to anyone who is not a live agent, is
+a legitimate wait for the General, not a deadlock, so it is never escalated. A new stall
+is escalated as a specific `supervisor.stall.detected` warning (who is waiting on what)
+and recorded (read with `Fleet::stalls`), once per stall until it resolves. It reads the
+stream over HTTP rather than adding an event kind, keeping it out of the in-flight ledger
+PR's path; surfacing a stall on the stream for the cockpit is a later refinement.
+
+The fleet also keeps a crew from quietly burning a fortune (issue #54, `crew_core::budget`).
+A crew sets a crew-wide `token_budget` and optional per-role `token_cap` in its config;
+`CrewConfig::budget()` builds the pure `Budget` accountant (a crew ceiling, per-role caps,
+running totals, modeled on the Workflow budget pattern), which the `Fleet` holds.
+`Fleet::record_spend(role, tokens)` charges the spend, publishes a `budget` event (spend
+against budget, to `all-units`, so a cap hit is never silent), and on a breach idle-stops
+the role (its own cap) or the whole crew (the crew budget) rather than overrun; a ceiling
+fires once, and an unbounded crew records nothing. The token feed is the one deferred piece:
+`record_spend` is the seam the stream-json activity parser (issue #24) drives with each
+turn's usage; until then the accounting, enforcement, and `budget` events are exercised
+against spend fed to the seam directly (proven end to end in `tests/budget.rs`). The broker
+accepts a report at `POST /budget` and streams it as `EventKind::Budget`, filterable with
+`GET /history?kind=budget`. See `docs/observability.md` (token budget) and `docs/config.md`.
+
+Auto-idle on quiet with cost and token telemetry makes spend legible per role and overall
+(issue #55). Idle-stop is the lifecycle machine from issue #22: a role quiet past its
+`idle_stop` timeout is stopped, keeping its roster entry, so an idle role costs nothing.
+Telemetry is always-on: `Fleet::record_usage(role, tokens, cost_micro_usd)` reports each
+turn's usage as a `telemetry` event (`POST /telemetry`), whether or not a budget is set, and
+also charges the tokens against the budget (it wraps `record_spend`). The broker folds a
+`Stats` projection from the `telemetry` events (tokens, cost) and the roles' `lifecycle`
+events (working time, entering vs leaving the working state), rebuilt from the durable log on
+a restart like the board, and serves it at `GET /stats`: per role and in aggregate, the
+cumulative tokens, cost (micro-USD), and working seconds, with a live role's open working
+interval counted through the read instant. Cost and tokens ride the same stream-json feed as
+the budget (issue #24); working time needs no feed. This is the data the `crew top` cockpit
+(issue #51) and the Seraphim per-role stats render. See `docs/observability.md` (cost,
+tokens, and time telemetry).
+
+Subscription usage awareness keeps a crew from exhausting the shared window (issue #56). The
+crew shares one subscription, so the broker keeps one `Usage` gauge across the crew (in
+`AppState`, distinct from the manual pause `Control`). `POST /usage` records a reading (the
+window percent plus its reset); at or above `CREW_BROKER_USAGE_THRESHOLD` (default 90) it
+auto-pauses new work, publishing a `usage` event with the reset time so the pause is never
+silent. `is_role_paused` folds in the usage auto-pause, so every role is gated (one shared
+subscription). The gate lifts lazily at the reset instant, so work auto-resumes; `crew
+resume` (which now also clears a usage pause) is the escape hatch to resume early. `GET
+/usage` and `crew usage` read the gauge. The usage signal is the supervisor's to detect from
+the agents' rate-limit output (the stream-json parser, issue #24) and report via
+`RosterClient::report_usage`; the auto-pause mechanism is exercised through `POST /usage`
+directly until then. See `docs/observability.md` (subscription usage auto-pause).
+
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config
 (`--config`, else `./crew.toml`, else the default crew), resolves the broker address,
@@ -433,9 +548,11 @@ exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` driv
 in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
-`crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger`, and the done-gate
-trio `crew submit` / `crew verdict` / `crew gate` let an agent on a runtime without MCP,
-such as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
+`crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue #45), the
+done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), the
+situation-board pair `crew board` / `crew record` (issue #49), and `crew briefing`
+(issue #50) let an agent on a runtime without MCP, such
+as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
 shim's `crew_lane`, issue #46). Each boots from the same role context
 the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`
 config) and reuses the same `crew_mcp::Broker` client, so a shim agent's I/O maps onto
@@ -446,12 +563,28 @@ role, not only those since a previous call; that and the other parity gaps (no p
 operator-launched rather than supervisor-spawned) are in `docs/codex.md`. The General's
 own `crew send` / `crew watch` front-end follows.
 
+`crew notify` lets the General walk away and be pulled back only when it matters (issue
+#52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
+sharing the `broker::tail_events` read half, so there is no separate signal path) and
+pushes a native notification on each **actionable moment**: a question asked
+(`message`/`question`), a role dead (`lifecycle`/`died`), or the crew stood down
+(`lifecycle`/`stood_down`). Routine chatter (status, notes, orders, answers, artifacts,
+ordinary lifecycle, activity, board, boundary, verification) stays quiet by default. A
+pure classifier, `notification_for`, decides per event, so the policy is fully unit-tested;
+`--mute <moments>` narrows the set and `--no-sound` drops the terminal bell. Each push
+prints a log line (the durable record), sounds the bell (mirroring Seraphim's notification
+sound), and calls the platform desktop notifier (`notify-send` on Linux, `osascript` on
+macOS), degrading quietly when no notifier is present. An approval pending (issue #40) and
+a role stalled (once the stall monitor surfaces on the stream) plug into the same
+classifier when their events land. See `docs/observability.md` (push notifications).
+
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
-`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`), and
+`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`),
 `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
-out of every message before storing or streaming it).
+out of every message before storing or streaming it), and `CREW_BROKER_USAGE_THRESHOLD`
+(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56).
 Binding a non-loopback address is refused unless the non-local flag is set, so the
 broker never exposes itself to the network by accident.
 

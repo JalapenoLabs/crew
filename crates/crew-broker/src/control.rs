@@ -68,8 +68,13 @@ async fn resume(State(state): State<AppState>, body: Bytes) -> Result<Json<Roste
         state.resume_role(&role);
         state.publish(control_event(Sender::Role(role), Lifecycle::Resumed));
     } else {
-        state.resume_crew();
+        // `crew resume` is the one escape hatch: it lifts a manual pause and any usage
+        // auto-pause (issue #56). Surface the usage lift so an early resume is not silent.
+        let lifted_usage = state.resume_crew();
         state.publish(control_event(Sender::General, Lifecycle::Resumed));
+        if lifted_usage {
+            state.publish(crate::usage::usage_event(&state.usage_snapshot()));
+        }
     }
     Ok(Json(RosterView::from_state(&state)))
 }

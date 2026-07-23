@@ -156,12 +156,29 @@ it:
   (`channel`, `role`, `kind`, `task`, `since`), so a joiner can summarize one task
   or channel. A fresh SSE connection with no cursor starts at the live tail, so the
   summary is the deliberate catch-up path.
-- **Scoped reads.** A role fetches its own channels, not the whole board.
+- **Scoped reads.** A role fetches its own channels, not the whole stream.
 - **Pruning.** Old raw events age out behind the summary in the joiner's view: the
   summary stands in for them so a joiner never reads them. Physically dropping the
   aged-out events from storage (bounding the broker's own footprint over a very long
   run) is a later optimization; the durable log stays the append-only source of
   truth in the meantime.
+- **Situation board.** The rolling summary bounds the *transient* stream; the shared
+  situation board bounds re-derivation (issue #49). It is the crew's durable memory,
+  distinct from the message stream: agreed interfaces, decisions and their rationale, and
+  known gotchas. A role reads it with `crew_board` before re-deriving a settled decision,
+  and records one with `crew_record` so no one relitigates it; the commander curates it. It
+  is a projection of `board` events, so it is auditable and rebuilt from the durable log
+  across an idle-stop or a restart (see `docs/observability.md`, the situation board).
+- **New-role briefing packet.** The three bounded pieces come together at boot (issue
+  #50): a freshly spawned role catches up from its role card, the current decision board,
+  and a rolling summary scoped to its own lane, never the raw transcript. `GET
+  /briefing?role=<role>` (the `crew_briefing` tool) assembles the board plus a summary of
+  the role's timeline (what it sent and what is addressed to it, so its lane and the work
+  at hand), renders it to text, and caps it to a byte budget, reporting the measured size
+  so the packet stays small no matter how long the mission has run. A role calls
+  `crew_briefing` first thing on boot, so it joins mid-mission with bounded context and
+  acts in its lane in seconds rather than reading the whole log. See `docs/roles.md` (the
+  briefing packet).
 
 ## Relationship to the coworker skill
 

@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::Budget;
 use crate::card::{BrokerEndpoint, RoleCard};
 use crate::id::RoleId;
 
@@ -67,6 +68,11 @@ pub struct CrewConfig {
     pub commander: RoleId,
     /// The default model every role runs, unless it overrides it.
     pub model: String,
+    /// The crew-wide token budget: the ceiling on total spend across every role (issue
+    /// #54). `None` (the default) leaves the crew unbounded. When the crew reaches it,
+    /// the supervisor idle-stops the whole crew rather than overrun (see
+    /// [`Budget`](crate::Budget) and `docs/observability.md`).
+    pub token_budget: Option<u64>,
     /// How long a role may be quiet before the supervisor idle-stops it.
     pub idle_stop: Duration,
     /// The repos in scope for the crew (paths or names the operator supplies).
@@ -91,6 +97,10 @@ pub struct RoleSpec {
     pub acceptance: String,
     /// The model this role runs, overriding the crew default when set.
     pub model: Option<String>,
+    /// The role's token cap: the ceiling on its own spend (issue #54). `None` leaves the
+    /// role bounded only by the crew-wide [`token_budget`](CrewConfig::token_budget). When
+    /// the role reaches its cap, the supervisor idle-stops it rather than overrun.
+    pub token_cap: Option<u64>,
 }
 
 impl Default for CrewConfig {
@@ -103,6 +113,7 @@ impl Default for CrewConfig {
             roles: default_roles(),
             commander: RoleId::new(DEFAULT_COMMANDER),
             model: DEFAULT_MODEL.to_owned(),
+            token_budget: None,
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
             worktrees: false,
@@ -161,6 +172,21 @@ impl CrewConfig {
             .find(|spec| &spec.role == role)
             .and_then(|spec| spec.model.as_deref())
             .unwrap_or(&self.model)
+    }
+
+    /// The crew's token [`Budget`]: the crew-wide ceiling and each role's cap (issue #54).
+    ///
+    /// The supervisor holds one and records spend against it, idle-stopping a role or the
+    /// crew when it reaches a cap. A crew with no `token_budget` and no per-role
+    /// `token_cap` is unbounded, so the budget never breaches.
+    #[must_use]
+    pub fn budget(&self) -> Budget {
+        let caps = self
+            .roles
+            .iter()
+            .filter_map(|spec| spec.token_cap.map(|cap| (spec.role.clone(), cap)))
+            .collect();
+        Budget::new(self.token_budget, caps)
     }
 
     /// Validates the resolved config, returning the first problem it finds.
@@ -240,6 +266,7 @@ fn default_roles() -> Vec<RoleSpec> {
         owned_paths: paths.iter().map(|path| (*path).to_owned()).collect(),
         acceptance: String::new(),
         model: None,
+        token_cap: None,
     };
     vec![
         role("commander", &[]),
@@ -300,6 +327,7 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     model: Option<String>,
+    token_budget: Option<u64>,
     commander: Option<String>,
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
@@ -316,6 +344,7 @@ struct RawRole {
     owned_paths: Option<Vec<String>>,
     acceptance: Option<String>,
     model: Option<String>,
+    token_cap: Option<u64>,
 }
 
 impl RawConfig {
@@ -338,6 +367,7 @@ impl RawConfig {
                 |name| name.trim().to_owned(),
             )),
             model: self.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            token_budget: self.token_budget,
             idle_stop,
             repos: self.repos.unwrap_or_default(),
             worktrees: self.worktrees.unwrap_or(false),
@@ -354,6 +384,7 @@ impl RawRole {
             owned_paths: self.owned_paths.unwrap_or_default(),
             acceptance: self.acceptance.unwrap_or_default(),
             model: self.model,
+            token_cap: self.token_cap,
         }
     }
 }
