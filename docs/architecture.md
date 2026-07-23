@@ -65,6 +65,18 @@ the `CREW_ROLE_CARD` environment plus the briefing the agent starts from. The
 standalone flow reads the very same card, so one loader (`crew_core::RoleCard`)
 serves both.
 
+An agent only has the crew tools if its Claude Code process loads the `crew-mcp`
+server, and it must load with no per-task approval, the way Seraphim registers the
+Playwright MCP. `crew_supervisor::register_server` does this once at startup (issue
+#20): it locates the `crew-mcp` binary (a build/boot check that fails loudly if it
+is missing) and registers it at **user** scope in the agent config
+(`claude mcp add -s user crew -- <path>`, idempotent via remove-then-add). A
+`claude -p --permission-mode bypassPermissions` turn then loads it silently; a
+project-scoped `.mcp.json` would sit unapproved. Registration records only the
+command, so it is a one-time, unit-wide step, not per-agent: each agent's broker
+address, role, and lane ride the `CREW_ROLE_CARD` environment its `claude` process
+is launched with, which the `crew-mcp` child inherits.
+
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.
 

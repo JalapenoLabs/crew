@@ -7,16 +7,25 @@
 //!
 //! Process spawning and lifecycle land in a later phase (see `docs/architecture.md`
 //! and `docs/observability.md`). What exists today is the boot half of "spawn one
-//! agent per role with its role card": [`provision`] writes a role's card where the
-//! agent can read it and returns the [`Launch`] the child process starts from. The
-//! standalone flow (the `crew-mcp` binary) reads the very same card, so both paths
-//! share one loader in [`crew_core`].
+//! agent per role with its role card":
+//!
+//! - [`provision`] writes a role's card where the agent can read it and returns the
+//!   [`Launch`] the child process starts from. The standalone flow (the `crew-mcp`
+//!   binary) reads the very same card, so both paths share one loader in
+//!   [`crew_core`].
+//! - [`register_server`] auto-registers the crew MCP server at user scope so a
+//!   spawned agent gets the crew tools with no per-task approval (issue #20), and
+//!   [`agent_turn_argv`] builds the `bypassPermissions` turn that loads it silently.
+
+mod mcp;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
+
+pub use mcp::{agent_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
 
 /// The file name a provisioned role card is written under, in the agent's directory.
 const CARD_FILE_NAME: &str = "role-card.toml";
