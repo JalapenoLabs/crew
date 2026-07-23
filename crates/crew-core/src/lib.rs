@@ -19,6 +19,6 @@ mod event;
 mod id;
 mod time;
 
-pub use event::{Activity, Event, EventKind, Lifecycle, Message, MessageKind};
+pub use event::{Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind};
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use time::Timestamp;

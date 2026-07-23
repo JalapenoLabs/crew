@@ -36,6 +36,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # the library crates never pull a subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The broker service: async runtime and HTTP + SSE framework (JSON via the serde
+# above).
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
 # Internal crates. The domain graph flows toward crew-core; crew-cli is a consumer
 # only, never a dependency. crew-telemetry is a standalone infrastructure crate the
 # binaries call to initialize logging.
