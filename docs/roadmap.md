@@ -94,8 +94,11 @@ it.
   issue #50, done: the board plus a lane-scoped rolling summary, size-capped, so a fresh
   role catches up in seconds without the whole log), the `crew top` terminal cockpit, and
   push notifications on the actionable moments.
-- **Economy.** Model per role, a shared token budget with per-role caps,
-  auto-idle with cost telemetry, and subscription usage awareness.
+- **Economy.** Model per role (`ModelTier` plus a per-crew tier map and a sensible
+  default mapping by role, issue #53, done: strong for the lead and architect, cheap for
+  docs / ci / lint / test, standard for the builders, retunable in config with no code
+  change), a shared token budget with per-role caps, auto-idle with cost telemetry, and
+  subscription usage awareness.
 
 ## Parallel track: coworker skill transport upgrade (done)
 

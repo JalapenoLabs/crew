@@ -160,7 +160,7 @@ impl Supervisor {
     /// (issue #26): it registers the MCP server, provisions a card per role, and hands
     /// the resolved agents to a [`Fleet`], which manages lazy start, idle-stop, and the
     /// defibrillator (issues #22, #23). Each agent runs the config's model for its role
-    /// (its override or the crew default), and the fleet idle-stops on the config's
+    /// (its tier, resolved through the crew's tier map, issue #53), and the fleet idle-stops on the config's
     /// timeout. The fleet launches with every agent stopped; bring the unit online with
     /// [`Fleet::start_all`], which registers each role on the roster.
     ///
@@ -187,8 +187,8 @@ impl Supervisor {
     /// Provisions each card and builds its spawn command into a [`PreparedAgent`],
     /// isolating each role in its own worktree when the config opts in (issue #43).
     ///
-    /// When `config` is given, each command runs the role's configured model (its
-    /// override or the crew default), so the same provisioning serves the eager
+    /// When `config` is given, each command runs the role's configured model
+    /// ([`model_for`](CrewConfig::model_for), its tier resolved to an alias), so the same provisioning serves the eager
     /// [`up`](Supervisor::up) and the lifecycle-managed [`launch`](Supervisor::launch).
     /// With `worktrees` on and repos configured, each role works in its own git
     /// worktree of those repos; the returned worktrees are the ones to clean up on

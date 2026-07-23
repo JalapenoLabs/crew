@@ -234,7 +234,7 @@ subcommand tree.
   a long-lived `crewd` and bring crews up against it). It then launches a
   lifecycle-managed `Fleet` from the config (`Supervisor::launch`) and starts every
   role, so the unit is live and connected: each role registers on the roster and runs
-  the model the config assigns it. It surfaces the live roster and the commander entry
+  the model its tier resolves to (issue #53). It surfaces the live roster and the commander entry
   point, then holds the unit online in the foreground until a shutdown signal. Idle
   roles cost nothing: the fleet idle-stops them on the config's timeout, keeping their
   roster entry, so the unit stays visible while quiet roles park.

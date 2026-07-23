@@ -36,10 +36,11 @@ Two rules keep a unit healthy:
    the push is over.
 
 A crew is described by a declarative config (`crew_core::CrewConfig`, issue #25): the
-roles and the lane each owns, the model they run, the repos in scope, the idle-stop
-timeout, and the commander. `crew up` reads it, and it validates itself (an unknown
-commander or an overlapping ownership boundary fails with a precise message). Omit it
-and the default crew below applies. See `docs/config.md`.
+roles and the lane each owns, the model tier each runs (issue #53), the repos in scope,
+the idle-stop timeout, and the commander. `crew up` reads it, and it validates itself (an
+unknown commander or an overlapping ownership boundary fails with a precise message). Omit
+it and the default crew below applies, with the lead on the strong model and the
+mechanical roles on a cheap one. See `docs/config.md`.
 
 ### Lane enforcement
 

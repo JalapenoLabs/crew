@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::card::{BrokerEndpoint, RoleCard};
 use crate::id::RoleId;
+use crate::model::{default_tier_for, ModelTier, ModelTiers};
 
 /// How the crew enforces lane ownership when a role edits outside its owned paths
 /// (issue #46).
@@ -35,9 +36,6 @@ pub enum LaneEnforcement {
     /// Block: an out-of-lane edit is refused; the role routes through the commander.
     Block,
 }
-
-/// The default model a role runs, an alias Claude Code resolves to the current build.
-const DEFAULT_MODEL: &str = "opus";
 
 /// The default commander: the lead and router the General briefs.
 const DEFAULT_COMMANDER: &str = "commander";
@@ -65,8 +63,16 @@ pub struct CrewConfig {
     pub roles: Vec<RoleSpec>,
     /// The role that leads and routes: the one the General briefs.
     pub commander: RoleId,
-    /// The default model every role runs, unless it overrides it.
-    pub model: String,
+    /// A crew-wide model alias that runs every un-tiered role, overriding the default
+    /// per-role tier mapping (issue #53). `None` (the default) lets each role run its
+    /// tier: its own, or the sensible default for its name (see [`model_for`] and
+    /// [`default_tier_for`]).
+    ///
+    /// [`model_for`]: CrewConfig::model_for
+    pub model: Option<String>,
+    /// The concrete model alias each tier resolves to, so retuning spend is a config
+    /// change, not a code change (issue #53). Defaults to `opus` / `sonnet` / `haiku`.
+    pub models: ModelTiers,
     /// How long a role may be quiet before the supervisor idle-stops it.
     pub idle_stop: Duration,
     /// The repos in scope for the crew (paths or names the operator supplies).
@@ -89,7 +95,13 @@ pub struct RoleSpec {
     pub owned_paths: Vec<String>,
     /// The bar the role holds its work to; empty falls back to the crew's standard bar.
     pub acceptance: String,
-    /// The model this role runs, overriding the crew default when set.
+    /// The tier this role runs, overriding the default tier for its name (issue #53).
+    /// `None` uses the sensible default (see [`default_tier_for`]).
+    pub tier: Option<ModelTier>,
+    /// An exact model alias for this role, the escape hatch that pins the build precisely
+    /// and wins over any tier. `None` (the usual case) lets the role's [`tier`] decide.
+    ///
+    /// [`tier`]: RoleSpec::tier
     pub model: Option<String>,
 }
 
@@ -102,7 +114,8 @@ impl Default for CrewConfig {
         Self {
             roles: default_roles(),
             commander: RoleId::new(DEFAULT_COMMANDER),
-            model: DEFAULT_MODEL.to_owned(),
+            model: None,
+            models: ModelTiers::default(),
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
             worktrees: false,
@@ -153,14 +166,31 @@ impl CrewConfig {
             .collect()
     }
 
-    /// The model `role` runs: its own override, or the crew default.
+    /// The model alias `role` runs, resolved by the tier precedence (issue #53).
+    ///
+    /// Most specific wins:
+    ///
+    /// 1. the role's exact `model` override, if it pins one;
+    /// 2. else the role's explicit `tier`, resolved through the crew's tier map;
+    /// 3. else a crew-wide `model`, if the operator set one for the whole crew;
+    /// 4. else the sensible default tier for the role's name (see [`default_tier_for`]),
+    ///    resolved through the crew's tier map.
+    ///
+    /// A `role` not declared in the crew still resolves, through steps 3 and 4, so the
+    /// caller always gets a concrete alias.
     #[must_use]
     pub fn model_for(&self, role: &RoleId) -> &str {
-        self.roles
-            .iter()
-            .find(|spec| &spec.role == role)
-            .and_then(|spec| spec.model.as_deref())
-            .unwrap_or(&self.model)
+        let spec = self.roles.iter().find(|spec| &spec.role == role);
+        if let Some(model) = spec.and_then(|spec| spec.model.as_deref()) {
+            return model;
+        }
+        if let Some(tier) = spec.and_then(|spec| spec.tier) {
+            return self.models.resolve(tier);
+        }
+        if let Some(model) = self.model.as_deref() {
+            return model;
+        }
+        self.models.resolve(default_tier_for(role))
     }
 
     /// Validates the resolved config, returning the first problem it finds.
@@ -239,6 +269,7 @@ fn default_roles() -> Vec<RoleSpec> {
         role: RoleId::new(name),
         owned_paths: paths.iter().map(|path| (*path).to_owned()).collect(),
         acceptance: String::new(),
+        tier: None,
         model: None,
     };
     vec![
@@ -300,12 +331,22 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     model: Option<String>,
+    models: Option<RawModels>,
     commander: Option<String>,
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
     worktrees: Option<bool>,
     lane_enforcement: Option<LaneEnforcement>,
     roles: Option<Vec<RawRole>>,
+}
+
+/// The TOML wire form of the tier map: the alias each tier resolves to (issue #53).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawModels {
+    strong: Option<String>,
+    standard: Option<String>,
+    cheap: Option<String>,
 }
 
 /// The TOML wire form of one role.
@@ -315,6 +356,7 @@ struct RawRole {
     role: String,
     owned_paths: Option<Vec<String>>,
     acceptance: Option<String>,
+    tier: Option<ModelTier>,
     model: Option<String>,
 }
 
@@ -337,12 +379,20 @@ impl RawConfig {
                 || DEFAULT_COMMANDER.to_owned(),
                 |name| name.trim().to_owned(),
             )),
-            model: self.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            model: normalize_alias(self.model),
+            models: self.models.map(RawModels::resolve).unwrap_or_default(),
             idle_stop,
             repos: self.repos.unwrap_or_default(),
             worktrees: self.worktrees.unwrap_or(false),
             lane_enforcement: self.lane_enforcement.unwrap_or_default(),
         })
+    }
+}
+
+impl RawModels {
+    /// Resolves the tier map, each tier falling back to its default alias.
+    fn resolve(self) -> ModelTiers {
+        ModelTiers::from_overrides(self.strong, self.standard, self.cheap)
     }
 }
 
@@ -353,9 +403,17 @@ impl RawRole {
             role: RoleId::new(self.role.trim()),
             owned_paths: self.owned_paths.unwrap_or_default(),
             acceptance: self.acceptance.unwrap_or_default(),
-            model: self.model,
+            tier: self.tier,
+            model: normalize_alias(self.model),
         }
     }
+}
+
+/// Trims a model alias, treating a blank or whitespace-only value as absent.
+fn normalize_alias(alias: Option<String>) -> Option<String> {
+    alias
+        .map(|alias| alias.trim().to_owned())
+        .filter(|alias| !alias.is_empty())
 }
 
 /// The error returned when a crew config cannot be parsed or is invalid.
@@ -437,12 +495,16 @@ mod tests {
 
     /// A fully specified config exercising every field, mirrored in `docs/config.md`.
     const DOCUMENTED: &str = r#"
-        model = "sonnet"
         commander = "commander"
         idle_stop = "10m"
         repos = ["api", "web"]
         worktrees = true
         lane_enforcement = "block"
+
+        [models]
+        strong = "opus"
+        standard = "sonnet"
+        cheap = "haiku"
 
         [[roles]]
         role = "commander"
@@ -461,6 +523,7 @@ mod tests {
         [[roles]]
         role = "qa"
         owned_paths = ["tests/"]
+        tier = "cheap"
     "#;
 
     #[test]
@@ -468,15 +531,34 @@ mod tests {
         let config = CrewConfig::from_toml(DOCUMENTED).expect("the documented config is valid");
         assert_eq!(config.roles.len(), 4);
         assert_eq!(config.commander, RoleId::new("commander"));
-        assert_eq!(config.model, "sonnet");
+        assert_eq!(config.model, None, "no crew-wide model override");
         assert_eq!(config.idle_stop.as_secs(), 10 * 60);
         assert_eq!(config.repos, ["api", "web"]);
         assert!(config.worktrees, "worktree isolation is opted in");
         assert_eq!(config.lane_enforcement, super::LaneEnforcement::Block);
 
-        // A per-role model overrides the crew default; others fall back to it.
-        assert_eq!(config.model_for(&RoleId::new("backend")), "haiku");
-        assert_eq!(config.model_for(&RoleId::new("frontend")), "sonnet");
+        // Each precedence level resolves as expected: an exact model pins the build, an
+        // explicit tier and the default-by-name tier both resolve through the tier map.
+        assert_eq!(
+            config.model_for(&RoleId::new("backend")),
+            "haiku",
+            "exact model"
+        );
+        assert_eq!(
+            config.model_for(&RoleId::new("qa")),
+            "haiku",
+            "explicit cheap tier"
+        );
+        assert_eq!(
+            config.model_for(&RoleId::new("commander")),
+            "opus",
+            "default strong tier"
+        );
+        assert_eq!(
+            config.model_for(&RoleId::new("frontend")),
+            "sonnet",
+            "default standard tier"
+        );
 
         // It produces one role card per role, reaching the given broker.
         let cards = config.to_cards(&BrokerEndpoint::new("127.0.0.1", 2739));
@@ -518,7 +600,13 @@ mod tests {
             ["commander", "backend", "frontend", "qa"],
         );
         assert_eq!(config.commander, RoleId::new("commander"));
-        assert_eq!(config.model, "opus");
+        assert_eq!(config.model, None, "no crew-wide model override by default");
+        // The sensible default mapping: the lead runs strong, the builders run standard
+        // (issue #53), with no per-role config.
+        assert_eq!(config.model_for(&RoleId::new("commander")), "opus");
+        assert_eq!(config.model_for(&RoleId::new("backend")), "sonnet");
+        assert_eq!(config.model_for(&RoleId::new("frontend")), "sonnet");
+        assert_eq!(config.model_for(&RoleId::new("qa")), "sonnet");
         assert_eq!(config.idle_stop.as_secs(), 5 * 60);
         assert!(config.repos.is_empty());
         assert!(!config.worktrees, "worktree isolation is off by default");
@@ -535,8 +623,43 @@ mod tests {
     fn omitted_roles_yield_the_default_crew_with_overrides_applied() {
         let config = CrewConfig::from_toml("model = \"haiku\"\nidle_stop = \"90s\"").unwrap();
         assert_eq!(config.roles.len(), 4, "roles default to the standard crew");
-        assert_eq!(config.model, "haiku");
+        assert_eq!(config.model.as_deref(), Some("haiku"));
         assert_eq!(config.idle_stop.as_secs(), 90);
+        // A crew-wide model runs every un-tiered role, overriding the default mapping.
+        assert_eq!(config.model_for(&RoleId::new("commander")), "haiku");
+        assert_eq!(config.model_for(&RoleId::new("backend")), "haiku");
+    }
+
+    #[test]
+    fn the_tier_map_retunes_spend_without_touching_roles() {
+        // Remapping a tier alias changes what every role on that tier runs (issue #53):
+        // bumping the cheap tier to sonnet moves the docs role up with no per-role edit.
+        let config = CrewConfig::from_toml(
+            "[models]\ncheap = \"sonnet\"\n\
+             [[roles]]\nrole = \"commander\"\n[[roles]]\nrole = \"docs\"",
+        )
+        .unwrap();
+        assert_eq!(
+            config.model_for(&RoleId::new("docs")),
+            "sonnet",
+            "the remapped cheap tier"
+        );
+        assert_eq!(
+            config.model_for(&RoleId::new("commander")),
+            "opus",
+            "the strong tier keeps its default alias"
+        );
+    }
+
+    #[test]
+    fn a_per_role_tier_overrides_the_default_mapping() {
+        // The commander defaults to strong; an explicit cheap tier overrides that.
+        let config = CrewConfig::from_toml(
+            "[[roles]]\nrole = \"commander\"\ntier = \"cheap\"\n[[roles]]\nrole = \"backend\"",
+        )
+        .unwrap();
+        assert_eq!(config.model_for(&RoleId::new("commander")), "haiku");
+        assert_eq!(config.model_for(&RoleId::new("backend")), "sonnet");
     }
 
     #[test]
