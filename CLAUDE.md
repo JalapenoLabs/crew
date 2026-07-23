@@ -590,8 +590,9 @@ running totals, modeled on the Workflow budget pattern), which the `Fleet` holds
 against budget, to `all-units`, so a cap hit is never silent), and on a breach idle-stops
 the role (its own cap) or the whole crew (the crew budget) rather than overrun; a ceiling
 fires once, and an unbounded crew records nothing. The token feed is the one deferred piece:
-`record_spend` is the seam the stream-json activity parser (issue #24) drives with each
-turn's usage; until then the accounting, enforcement, and `budget` events are exercised
+`record_spend` (wrapped by `record_usage`) is the seam the stream-json activity parser (issue
+#24) drives with each turn's usage, and wiring that per-turn call is issue #114, paused until
+#24 lands; until then the accounting, enforcement, and `budget` events are exercised
 against spend fed to the seam directly (proven end to end in `tests/budget.rs`). The broker
 accepts a report at `POST /budget` and streams it as `EventKind::Budget`, filterable with
 `GET /history?kind=budget`. See `docs/observability.md` (token budget) and `docs/config.md`.
@@ -607,9 +608,11 @@ events (working time, entering vs leaving the working state), rebuilt from the d
 a restart like the board, and serves it at `GET /stats`: per role and in aggregate, the
 cumulative tokens, cost (micro-USD), and working seconds, with a live role's open working
 interval counted through the read instant. Cost and tokens ride the same stream-json feed as
-the budget (issue #24); working time needs no feed. This is the data the `crew top` cockpit
-(issue #51) and the Seraphim per-role stats render. See `docs/observability.md` (cost,
-tokens, and time telemetry).
+the budget: `record_usage` awaits the activity parser (issue #24), which will read the
+stream-json `result` event's `usage` tokens and `total_cost_usd` and call `record_usage` per
+turn (issue #114, paused until #24 lands); working time needs no feed. This is the data the
+`crew top` cockpit (issue #51) and the Seraphim per-role stats render. See
+`docs/observability.md` (cost, tokens, and time telemetry).
 
 Subscription usage awareness keeps a crew from exhausting the shared window (issue #56). The
 crew shares one subscription, so the broker keeps one `Usage` gauge across the crew (in
