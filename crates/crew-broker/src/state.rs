@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::router::ChannelRouter;
+use crate::secrets::Scrubber;
 use crate::store::{MemoryStore, Storage};
 
 /// How many events a subscriber may fall behind before the broker drops the oldest
@@ -31,8 +32,9 @@ pub struct Sequenced {
 ///
 /// Cheap to clone (each field is an [`Arc`] or a broadcast [`Sender`], which shares
 /// its channel on clone), which axum requires since it clones the state per request.
-/// It wires the [`Config`], the [`Storage`] backend, the [`ChannelRouter`], and the
-/// live fan-out channel together so handlers read them without global state.
+/// It wires the [`Config`], the [`Storage`] backend, the [`ChannelRouter`], the
+/// secret [`Scrubber`], and the live fan-out channel together so handlers read them
+/// without global state.
 ///
 /// [`Sender`]: broadcast::Sender
 #[derive(Debug, Clone)]
@@ -43,7 +45,9 @@ pub struct AppState {
     pub storage: Arc<dyn Storage>,
     /// The channel router.
     pub router: Arc<ChannelRouter>,
-    /// The fan-out channel a publish sends to and every inbox subscriber reads.
+    /// Masks configured secret values out of every event before it is stored or streamed.
+    pub scrubber: Arc<Scrubber>,
+    /// The fan-out channel a publish sends to and every subscriber stream reads.
     pub broadcast: broadcast::Sender<Sequenced>,
     /// Serializes [`publish`](AppState::publish) so a sequence number is broadcast in
     /// the same order it is assigned, keeping every subscriber's `id` cursor monotonic.
@@ -52,26 +56,35 @@ pub struct AppState {
 
 impl AppState {
     /// Builds the application state with the default in-memory storage backend.
+    ///
+    /// Builds the secret [`Scrubber`] once from [`Config::secrets`] and opens the
+    /// fan-out channel; both are shared across every request.
     #[must_use]
     pub fn new(config: Config) -> Self {
+        let scrubber = Scrubber::new(config.secrets.iter().cloned());
         let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             config: Arc::new(config),
             storage: Arc::new(MemoryStore::default()),
             router: Arc::new(ChannelRouter),
+            scrubber: Arc::new(scrubber),
             broadcast,
             publish_order: Arc::new(Mutex::new(())),
         }
     }
 
-    /// Appends an event to the log and fans it out to live subscribers.
+    /// Scrubs an event of secrets, appends it to the log, and fans it to subscribers.
     ///
-    /// Returns the stored event with the sequence number it was assigned. Appends
-    /// and broadcasts under one lock, so events reach subscribers in the same order
-    /// they are stored and every `Last-Event-ID` cursor stays monotonic. A send with
-    /// no live subscribers is not an error: the event is stored, so a later
-    /// subscriber replays it from the log.
-    pub fn publish(&self, event: Event) -> Sequenced {
+    /// Returns the stored event with the sequence number it was assigned. Masks any
+    /// configured secret first, so a leaked value reaches neither the log nor a
+    /// subscriber, then appends and broadcasts under one lock, so events reach
+    /// subscribers in the same order they are stored and every `Last-Event-ID` cursor
+    /// stays monotonic. A send with no live subscribers is not an error: the event is
+    /// stored, so a later subscriber replays it from the log.
+    pub fn publish(&self, mut event: Event) -> Sequenced {
+        // Mask before either sink, so the persisted log and every live stream carry
+        // the same scrubbed event.
+        self.scrubber.scrub_event(&mut event);
         // Held across the append and the send (both non-blocking, no `.await`), so a
         // concurrent publish cannot interleave and deliver sequences out of order.
         let _order = self

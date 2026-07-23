@@ -43,10 +43,13 @@ channel directly when they want.
 ## Message schema
 
 Messages are typed so a front-end can render them and the broker can route them.
-This schema is modeled in `crew-core` and wired through the broker's `/events`
-endpoints (`MessageKind`, issues #6 and #8):
+This schema is modeled in `crew-core` and wired through the broker's message
+endpoints (`MessageKind`, issues #6, #8 and #9): a `POST /channels/{channel}/messages`
+posts to the channel named in the path, and `GET /events` reads the log.
 
-- `id`, `from` (role or `general`), `channel`, `ts`.
+- `id`, `from` (role or `general`), `channel`, `ts`. The broker owns `id`, `ts`,
+  and the path `channel`: it stamps the id and timestamp on receipt and rejects a
+  client that tries to supply any of them, so a timestamp is always the broker's.
 - `kind`, one of:
   - `order` gives a task to a role (title, scope, owned paths, acceptance).
   - `question` asks for a decision, with optional suggested options.
@@ -68,16 +71,27 @@ messages, so it spends no context polling. Because the stream is self-filtered,
 there is no "ignore your own writes" rule to remember. The broker, not a
 convention in a skill, guarantees it.
 
-A role subscribes over `GET /inbox?role=<role>`, a Server-Sent-Events stream of
-the events addressed to it: its direct `@role` channel, any pair channel it
-belongs to, and `all-units` (issue #10). The broker drops an event whose sender is
-the subscribing role at the source, so self-echo is impossible by construction.
-Each event carries its log sequence as the SSE `id`; on reconnect the client's
-`Last-Event-ID` resumes the stream right after the last event it received,
-replaying anything missed from the log before rejoining the live tail, so a
-dropped connection loses nothing. A fresh connection with no cursor starts at the
-live tail rather than replaying the whole history (that catch-up is the rolling
-summary's job, below). The canonical channel model and membership are issue #11.
+Two SSE feeds serve subscribers. `GET /stream` is the whole firehose: every event,
+live. `GET /inbox?role=<role>` is a role's own view, the events addressed to it
+(its direct `@role` channel, any pair channel it belongs to, and `all-units`), with
+an event whose sender is the subscribing role dropped at the source, so self-echo is
+impossible by construction (issue #10). Each event carries its log sequence as the
+SSE `id`; on reconnect the client's `Last-Event-ID` resumes right after the last
+event it received, replaying anything missed from the log before rejoining the live
+tail, so a dropped connection loses nothing. A fresh connection with no cursor
+starts at the live tail rather than replaying the whole history (that catch-up is
+the rolling summary's job, below). The canonical channel model and membership are
+issue #11.
+
+## Secret scrubbing
+
+A crew agent may echo a token it was handed into a message. The broker masks a
+configured set of secret values out of every event before it persists or streams
+it, so a leaked secret reaches neither the stored log nor a subscriber. Masking
+runs once through a scrubber built from `CREW_BROKER_SECRETS`, longest secret
+first, and keeps a recognized token's prefix and last four characters so an
+operator can still tell two tokens apart without either being revealed. The
+persisted log and the live stream always carry the same scrubbed event.
 
 ## Context management
 

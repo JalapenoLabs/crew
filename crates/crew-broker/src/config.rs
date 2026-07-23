@@ -37,6 +37,9 @@ pub struct Config {
     /// Whether to allow binding a non-loopback (network-reachable) address.
     /// Defaults to `false`, so a non-local bind is refused unless opted in.
     pub allow_non_local: bool,
+    /// Secret values masked out of every message before it is stored or streamed.
+    /// Empty by default; a leaked token never reaches the log or a subscriber.
+    pub secrets: Vec<String>,
 }
 
 impl Default for Config {
@@ -46,6 +49,7 @@ impl Default for Config {
             port: DEFAULT_PORT,
             state_dir: PathBuf::from(DEFAULT_STATE_DIR),
             allow_non_local: false,
+            secrets: Vec::new(),
         }
     }
 }
@@ -53,8 +57,9 @@ impl Default for Config {
 impl Config {
     /// Builds a [`Config`] from the environment, falling back to the defaults.
     ///
-    /// Reads `CREW_BROKER_HOST`, `CREW_BROKER_PORT`, `CREW_BROKER_STATE_DIR`, and
-    /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it).
+    /// Reads `CREW_BROKER_HOST`, `CREW_BROKER_PORT`, `CREW_BROKER_STATE_DIR`,
+    /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it), and
+    /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to mask).
     ///
     /// # Errors
     /// Returns an error if `CREW_BROKER_HOST` is not a valid IP address or
@@ -76,6 +81,11 @@ impl Config {
         }
         if let Ok(flag) = env::var("CREW_BROKER_ALLOW_NON_LOCAL") {
             config.allow_non_local = matches!(flag.as_str(), "1" | "true" | "yes");
+        }
+        // Tokens carry no internal whitespace, so splitting on it lets one env var
+        // hold several secrets without a delimiter that a secret might contain.
+        if let Ok(secrets) = env::var("CREW_BROKER_SECRETS") {
+            config.secrets = secrets.split_whitespace().map(str::to_owned).collect();
         }
         Ok(config)
     }

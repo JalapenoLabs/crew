@@ -239,17 +239,17 @@ mod tests {
         assert!(event_reaches_role(&from_general, &role("backend")));
     }
 
-    /// Posts a note from `from` to `channel`, asserting it is accepted.
+    /// Posts a note from `from` to `channel`, asserting it is accepted. The channel
+    /// travels in the path, so it is not a body field.
     async fn post(state: &AppState, from: &str, channel: &str, body: &str) {
         let message = json!({
             "from": { "kind": "role", "id": from },
-            "channel": channel,
             "kind": "note",
             "body": body,
         });
         let request = Request::builder()
             .method("POST")
-            .uri("/events")
+            .uri(format!("/channels/{channel}/messages"))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&message).unwrap()))
             .unwrap();
