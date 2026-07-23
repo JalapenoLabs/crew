@@ -43,7 +43,8 @@ channel directly when they want.
 ## Message schema
 
 Messages are typed so a front-end can render them and the broker can route them.
-Fields are illustrative, not final:
+This schema is modeled in `crew-core` and wired through the broker's `/events`
+endpoints (`MessageKind`, issues #6 and #8):
 
 - `id`, `from` (role or `general`), `channel`, `ts`.
 - `kind`, one of:
@@ -51,9 +52,11 @@ Fields are illustrative, not final:
   - `question` asks for a decision, with optional suggested options.
   - `answer` responds to a question.
   - `status` reports progress without asking anything.
-  - `artifact` references a produced thing (a branch, a PR, a file, a route).
+  - `artifact` references a produced thing (a reference plus its kind: a branch, a
+    PR, a file, or a route).
   - `note` is freeform prose for anything the above do not cover.
-- `body` (markdown), plus per-kind structured fields.
+- `body` (markdown), plus the per-kind structured fields above, flattened onto the
+  message on the wire.
 
 Typed intents are what let the commander arbitrate and let a UI show an order
 differently from a status ping.

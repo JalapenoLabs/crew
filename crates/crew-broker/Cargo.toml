@@ -24,7 +24,12 @@ eyre.workspace = true
 tracing.workspace = true
 crew-telemetry.workspace = true
 mimalloc.workspace = true
-# The service: async runtime, HTTP framework, serde for JSON responses.
+# The service: async runtime, HTTP framework, and serde for the event wire types.
 tokio.workspace = true
 axum.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Drive the router directly in tests (ServiceExt::oneshot) without binding a socket.
+tower = { version = "0.5", features = ["util"] }
