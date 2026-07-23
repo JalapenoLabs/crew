@@ -1,32 +1,37 @@
-//! The message endpoints: posting to a channel, reading the log, and subscribing.
+//! The message endpoints: posting to a channel, reading the log, and
+//! subscribing.
 //!
-//! A `POST /channels/{channel}/messages` stamps the event server-side, masks any
-//! configured secret out of it, persists it, and fans it to every subscriber. A
-//! `GET /events` reads the stored log, and `GET /stream` subscribes to the live
-//! aggregate feed over Server-Sent Events, optionally narrowed by the shared
-//! [`FilterQuery`](crate::filter::FilterQuery) so the live view matches the filtered
-//! `GET /history` (issue #31). The per-role, self-filtered stream is `GET /inbox`.
+//! A `POST /channels/{channel}/messages` stamps the event server-side, masks
+//! any configured secret out of it, persists it, and fans it to every
+//! subscriber. A `GET /events` reads the stored log, and `GET /stream`
+//! subscribes to the live aggregate feed over Server-Sent Events, optionally
+//! narrowed by the shared [`FilterQuery`](crate::filter::FilterQuery) so the
+//! live view matches the filtered `GET /history` (issue #31). The per-role,
+//! self-filtered stream is `GET /inbox`.
 
 use std::convert::Infallible;
 
-use axum::body::Bytes;
-use axum::extract::{FromRequest, Path, Query, Request, State};
-use axum::http::StatusCode;
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{
+    body::Bytes,
+    extract::{FromRequest, Path, Query, Request, State},
+    http::StatusCode,
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
+    routing::{get, post},
+    Json, Router,
+};
 use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, Sender, TaskId};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
-use crate::error::ApiError;
-use crate::filter::FilterQuery;
-use crate::state::{AppState, Sequenced};
+use crate::{
+    error::ApiError,
+    filter::FilterQuery,
+    state::{AppState, Sequenced},
+};
 
-/// The message routes: post to a channel, read the log, and subscribe to the feed.
+/// The message routes: post to a channel, read the log, and subscribe to the
+/// feed.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/channels/{channel}/messages", post(post_message))
@@ -34,11 +39,13 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/stream", get(stream))
 }
 
-/// A JSON body extractor that fails with a typed [`ApiError`] on malformed input.
+/// A JSON body extractor that fails with a typed [`ApiError`] on malformed
+/// input.
 ///
 /// Unlike axum's built-in `Json`, a bad body (invalid JSON, wrong types, an
 /// unknown message kind, a missing per-kind field) yields a 400 with a
-/// `{ "error": ... }` body instead of a plain-text rejection, and never a panic.
+/// `{ "error": ... }` body instead of a plain-text rejection, and never a
+/// panic.
 pub(crate) struct JsonBody<T>(pub T);
 
 impl<S, T> FromRequest<S> for JsonBody<T>
@@ -58,13 +65,14 @@ where
     }
 }
 
-/// The body of `POST /channels/{channel}/messages`: a message to post to a channel.
+/// The body of `POST /channels/{channel}/messages`: a message to post to a
+/// channel.
 ///
-/// The channel comes from the path, and the broker stamps the id and timestamp; the
-/// client supplies who it is from, an optional task, the typed kind with its
-/// per-kind fields (flattened), and a body. For example an order posts as
-/// `{"from":{"kind":"role","id":"backend"},"kind":"order","title":"..","scope":"..",
-/// "owned_paths":[],"acceptance":"..","body":".."}`.
+/// The channel comes from the path, and the broker stamps the id and timestamp;
+/// the client supplies who it is from, an optional task, the typed kind with
+/// its per-kind fields (flattened), and a body. For example an order posts as
+/// `{"from":{"kind":"role","id":"backend"},"kind":"order","title":"..","scope":
+/// "..", "owned_paths":[],"acceptance":"..","body":".."}`.
 #[derive(Debug, Deserialize)]
 struct PostMessage {
     /// Who is sending: a role, or the General.
@@ -81,18 +89,21 @@ struct PostMessage {
 }
 
 /// Fields the broker owns: it stamps `ts` and `id`, and routes by the path
-/// `channel`, so a client that sends any of them is rejected rather than trusted.
+/// `channel`, so a client that sends any of them is rejected rather than
+/// trusted.
 const BROKER_OWNED_FIELDS: &[&str] = &["ts", "id", "channel"];
 
 impl PostMessage {
-    /// Parses a request body, rejecting any broker-owned field the client tried to set.
+    /// Parses a request body, rejecting any broker-owned field the client tried
+    /// to set.
     ///
-    /// This is where a spoofed timestamp is refused: `ts` is the broker's to stamp,
-    /// so its presence (like `id` or `channel`) is a client error, not an override.
+    /// This is where a spoofed timestamp is refused: `ts` is the broker's to
+    /// stamp, so its presence (like `id` or `channel`) is a client error,
+    /// not an override.
     ///
     /// # Errors
-    /// Returns a 400 [`ApiError`] if the body carries a broker-owned field or does
-    /// not model a message.
+    /// Returns a 400 [`ApiError`] if the body carries a broker-owned field or
+    /// does not model a message.
     fn from_json(raw: Value) -> Result<Self, ApiError> {
         if let Value::Object(fields) = &raw {
             if let Some(owned) = BROKER_OWNED_FIELDS
@@ -108,10 +119,12 @@ impl PostMessage {
             .map_err(|error| ApiError::bad_request(format!("invalid request body: {error}")))
     }
 
-    /// Validates the fields the broker will not fix up: the path `channel` and `from`.
+    /// Validates the fields the broker will not fix up: the path `channel` and
+    /// `from`.
     ///
-    /// The `kind` is validated structurally by deserialization; this catches the
-    /// semantic gaps serde cannot: an empty channel or an empty role sender.
+    /// The `kind` is validated structurally by deserialization; this catches
+    /// the semantic gaps serde cannot: an empty channel or an empty role
+    /// sender.
     ///
     /// # Errors
     /// Returns a 400 [`ApiError`] on an empty channel or an empty role sender.
@@ -130,9 +143,9 @@ impl PostMessage {
 
 /// `POST /channels/{channel}/messages`: post a message to a channel.
 ///
-/// The broker stamps the id and timestamp (rejecting a client-supplied one), masks
-/// any configured secret out of the event, stores it, fans it to every subscriber,
-/// and returns the scrubbed [`Event`] with `201 Created`.
+/// The broker stamps the id and timestamp (rejecting a client-supplied one),
+/// masks any configured secret out of the event, stores it, fans it to every
+/// subscriber, and returns the scrubbed [`Event`] with `201 Created`.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if the body is malformed, carries a broker-owned
@@ -156,8 +169,9 @@ async fn post_message(
             body: request.body,
         }),
     };
-    // `publish` masks any secret, stores the event, and fans out the scrubbed result
-    // to every subscriber, so the response, the log, and every stream agree.
+    // `publish` masks any secret, stores the event, and fans out the scrubbed
+    // result to every subscriber, so the response, the log, and every stream
+    // agree.
     let sequenced = state.publish(event);
     Ok((StatusCode::CREATED, Json(sequenced.event)))
 }
@@ -178,17 +192,18 @@ async fn list_events(State(state): State<AppState>) -> Json<EventLog> {
 /// `GET /stream`: subscribe to the live event feed as Server-Sent Events.
 ///
 /// This is the aggregate activity log's live view (issue #31): the whole unit's
-/// stream, optionally narrowed by the shared [`FilterQuery`] (`channel`, `role`,
-/// `kind`, `task`, `since`). With no filter it is the firehose; with a filter it
-/// delivers only matching events, using the very same filter test
-/// ([`EventFilter::matches`](crate::store::EventFilter::matches)) the history query
-/// applies, so the live and historical views agree. `GET /inbox` is the
+/// stream, optionally narrowed by the shared [`FilterQuery`] (`channel`,
+/// `role`, `kind`, `task`, `since`). With no filter it is the firehose; with a
+/// filter it delivers only matching events, using the very same filter test
+/// ([`EventFilter::matches`](crate::store::EventFilter::matches)) the history
+/// query applies, so the live and historical views agree. `GET /inbox` is the
 /// per-role, self-filtered delivery view instead.
 ///
-/// Each event arrives already scrubbed and carries its log sequence as the SSE `id`.
-/// A subscriber that lags past the channel's buffer skips the dropped events rather
-/// than closing the stream, so a slow reader still receives everything after the gap;
-/// it catches up on the gap through `GET /history` with the same filter.
+/// Each event arrives already scrubbed and carries its log sequence as the SSE
+/// `id`. A subscriber that lags past the channel's buffer skips the dropped
+/// events rather than closing the stream, so a slow reader still receives
+/// everything after the gap; it catches up on the gap through `GET /history`
+/// with the same filter.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if a filter parameter is malformed.
@@ -218,18 +233,18 @@ async fn stream(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{Event, EventKind};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
-    /// Sends a raw body to `POST /channels/{channel}/messages`, returning the status
-    /// and JSON response.
+    /// Sends a raw body to `POST /channels/{channel}/messages`, returning the
+    /// status and JSON response.
     async fn post_raw(
         state: &AppState,
         channel: &str,
@@ -265,8 +280,8 @@ mod tests {
         serde_json::from_value(value["events"].clone()).unwrap()
     }
 
-    /// One valid `(channel, body)` per `MessageKind`, with its per-kind fields and no
-    /// broker-owned field (the channel travels in the path).
+    /// One valid `(channel, body)` per `MessageKind`, with its per-kind fields
+    /// and no broker-owned field (the channel travels in the path).
     fn one_of_each_kind() -> Vec<(&'static str, Value)> {
         let backend = json!({ "kind": "role", "id": "backend" });
         vec![
@@ -463,7 +478,8 @@ mod tests {
             .uri("/stream")
             .body(Body::empty())
             .unwrap();
-        // The SSE body is open-ended, so assert on the response head without reading it.
+        // The SSE body is open-ended, so assert on the response head without reading
+        // it.
         let response = api::build(state).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(

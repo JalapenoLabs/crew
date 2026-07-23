@@ -1,9 +1,10 @@
 //! Budget enforcement, end to end against a real broker (issue #54).
 //!
-//! Proves the acceptance: a crew respects its budget, and hitting a cap is visible on the
-//! stream and bounded (the role or the crew idle-stops), never a silent overrun. The token
-//! feed is driven directly here through [`Fleet::record_spend`]; in production the activity
-//! parser (issue #24) feeds it each turn's usage.
+//! Proves the acceptance: a crew respects its budget, and hitting a cap is
+//! visible on the stream and bounded (the role or the crew idle-stops), never a
+//! silent overrun. The token feed is driven directly here through
+//! [`Fleet::record_spend`]; in production the activity parser (issue #24) feeds
+//! it each turn's usage.
 
 mod common;
 
@@ -13,8 +14,9 @@ use common::{liveness, start_broker, stub, wait_until};
 use crew_core::{Budget, RoleId};
 use crew_supervisor::{Fleet, LifecyclePolicy, RosterClient};
 
-/// The budget events on the broker log, each as `(role, breach)` where `breach` is the
-/// scope a spend hit (`role` / `crew`), or `None` for a within-budget report.
+/// The budget events on the broker log, each as `(role, breach)` where `breach`
+/// is the scope a spend hit (`role` / `crew`), or `None` for a within-budget
+/// report.
 fn budget_events(base: &str) -> Vec<(String, Option<String>)> {
     let text = ureq::get(&format!("{base}/history?kind=budget"))
         .call()
@@ -115,7 +117,8 @@ fn the_crew_budget_idle_stops_the_whole_crew_and_is_surfaced() {
         "both roles come online"
     );
 
-    // Two roles' spend together reaches the crew budget, though neither alone would.
+    // Two roles' spend together reaches the crew budget, though neither alone
+    // would.
     fleet.record_spend(&backend, 600).unwrap();
     fleet.record_spend(&frontend, 400).unwrap();
 

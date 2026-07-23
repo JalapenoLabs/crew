@@ -1,17 +1,18 @@
 //! The channel model: how a message names its audience, and who it reaches.
 //!
-//! A [`ChannelId`] is a name on the wire; a [`Channel`] is its parsed meaning. The
-//! topology (see `docs/communication.md`) defines three kinds:
+//! A [`ChannelId`] is a name on the wire; a [`Channel`] is its parsed meaning.
+//! The topology (see `docs/communication.md`) defines three kinds:
 //!
 //! - [`all-units`](Channel::AllUnits) reaches every role.
-//! - a [direct](Channel::Direct) `@role` channel reaches one role, point-to-point.
+//! - a [direct](Channel::Direct) `@role` channel reaches one role,
+//!   point-to-point.
 //! - a [pair](Channel::Pair) `a+b` channel reaches its two named members only.
 //!
 //! Naming is canonical: a pair is order-independent, so `frontend+backend` and
 //! `backend+frontend` are the same channel and [`name`](Channel::name) always
-//! renders its members in a stable order. [`addresses`](Channel::addresses) answers
-//! whether a channel reaches a role, the membership test that routing to
-//! subscribers and self-filtered inbox delivery both build on.
+//! renders its members in a stable order. [`addresses`](Channel::addresses)
+//! answers whether a channel reaches a role, the membership test that routing
+//! to subscribers and self-filtered inbox delivery both build on.
 
 use std::fmt;
 
@@ -23,31 +24,37 @@ pub const ALL_UNITS: &str = "all-units";
 /// A parsed channel: the audience a message names (see the module docs).
 ///
 /// Build one with [`Channel::parse`] from a wire name, or from the variants
-/// directly. A [`Pair`](Channel::Pair) must be built with [`Channel::pair`], which
-/// orders its members canonically so that equality and [`name`](Channel::name) do
-/// not depend on the order they were given.
+/// directly. A [`Pair`](Channel::Pair) must be built with [`Channel::pair`],
+/// which orders its members canonically so that equality and
+/// [`name`](Channel::name) do not depend on the order they were given.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Channel {
     /// Reaches every role. Named `all-units`.
     AllUnits,
     /// A direct, point-to-point channel to one role. Named `@role`.
     Direct(RoleId),
-    /// A pair channel between two distinct roles, held in canonical order. Named `a+b`.
+    /// A pair channel between two distinct roles, held in canonical order.
+    /// Named `a+b`.
     Pair(RoleId, RoleId),
 }
 
 impl Channel {
-    /// Parses a channel name into its meaning, or `None` if the name is unrecognized.
+    /// Parses a channel name into its meaning, or `None` if the name is
+    /// unrecognized.
     ///
-    /// Recognizes `all-units`, `@role`, and `a+b`. A malformed name (an empty or
-    /// blank role, a role paired with itself, or a member carrying a reserved `@`
-    /// or `+`) resolves to `None`, so an unroutable name is rejected, not guessed.
+    /// Recognizes `all-units`, `@role`, and `a+b`. A malformed name (an empty
+    /// or blank role, a role paired with itself, or a member carrying a
+    /// reserved `@` or `+`) resolves to `None`, so an unroutable name is
+    /// rejected, not guessed.
     ///
     /// # Examples
     /// ```
     /// use crew_core::{Channel, RoleId};
     /// assert_eq!(Channel::parse("all-units"), Some(Channel::AllUnits));
-    /// assert_eq!(Channel::parse("@qa"), Some(Channel::Direct(RoleId::new("qa"))));
+    /// assert_eq!(
+    ///     Channel::parse("@qa"),
+    ///     Some(Channel::Direct(RoleId::new("qa")))
+    /// );
     /// assert_eq!(Channel::parse("a+b"), Channel::parse("b+a")); // order-independent
     /// assert_eq!(Channel::parse("nope"), None);
     /// ```
@@ -67,9 +74,10 @@ impl Channel {
 
     /// Builds a pair channel between two distinct roles, or `None` if invalid.
     ///
-    /// Returns `None` when the roles are equal, blank, or either carries a reserved
-    /// `@` or `+`. The members are stored in canonical order, so `pair(a, b)` and
-    /// `pair(b, a)` are equal and share one [`name`](Channel::name).
+    /// Returns `None` when the roles are equal, blank, or either carries a
+    /// reserved `@` or `+`. The members are stored in canonical order, so
+    /// `pair(a, b)` and `pair(b, a)` are equal and share one
+    /// [`name`](Channel::name).
     #[must_use]
     pub fn pair(first: RoleId, second: RoleId) -> Option<Self> {
         if first == second || !is_plain_role(first.as_str()) || !is_plain_role(second.as_str()) {
@@ -83,7 +91,8 @@ impl Channel {
         Some(Self::Pair(low, high))
     }
 
-    /// The canonical name of this channel, as it appears on an [`Event`](crate::Event).
+    /// The canonical name of this channel, as it appears on an
+    /// [`Event`](crate::Event).
     #[must_use]
     pub fn name(&self) -> ChannelId {
         ChannelId::new(self.to_string())
@@ -91,8 +100,8 @@ impl Channel {
 
     /// Whether this channel reaches `role`.
     ///
-    /// `all-units` reaches every role, a direct channel reaches only its addressee,
-    /// and a pair reaches either of its two members.
+    /// `all-units` reaches every role, a direct channel reaches only its
+    /// addressee, and a pair reaches either of its two members.
     #[must_use]
     pub fn addresses(&self, role: &RoleId) -> bool {
         match self {
@@ -102,18 +111,22 @@ impl Channel {
         }
     }
 
-    /// Resolves the channel a message addresses under the hub-and-spoke default.
+    /// Resolves the channel a message addresses under the hub-and-spoke
+    /// default.
     ///
     /// This is the one addressing rule the whole crew obeys (see
-    /// `docs/communication.md`), so "brief the commander by default" means the same
-    /// whether the General's front-end or an agent's `crew_send` sends it:
+    /// `docs/communication.md`), so "brief the commander by default" means the
+    /// same whether the General's front-end or an agent's `crew_send` sends
+    /// it:
     ///
     /// - a non-blank `to` names a role for a direct message and wins if given;
-    /// - otherwise a non-blank `channel` is parsed (`all-units`, a `@role`, or a pair);
+    /// - otherwise a non-blank `channel` is parsed (`all-units`, a `@role`, or
+    ///   a pair);
     /// - if neither is given, the message goes to the `commander`.
     ///
-    /// Returns `None` when `to` is not a plain role name, or `channel` is given but is
-    /// not a recognized channel, so an unroutable target is rejected, not guessed.
+    /// Returns `None` when `to` is not a plain role name, or `channel` is given
+    /// but is not a recognized channel, so an unroutable target is
+    /// rejected, not guessed.
     ///
     /// # Examples
     /// ```
@@ -132,7 +145,10 @@ impl Channel {
     ///     Some(Channel::Direct(RoleId::new("backend"))),
     /// );
     /// // A channel name is parsed.
-    /// assert_eq!(Channel::resolve(None, Some("all-units"), &commander), Some(Channel::AllUnits));
+    /// assert_eq!(
+    ///     Channel::resolve(None, Some("all-units"), &commander),
+    ///     Some(Channel::AllUnits)
+    /// );
     /// // An unrecognized channel is rejected.
     /// assert_eq!(Channel::resolve(None, Some("nonsense"), &commander), None);
     /// ```
@@ -158,8 +174,9 @@ impl fmt::Display for Channel {
     }
 }
 
-/// Whether `name` is a plain role name: not blank, and free of the reserved channel
-/// markers `@` and `+`, so it cannot be confused with a channel's own syntax.
+/// Whether `name` is a plain role name: not blank, and free of the reserved
+/// channel markers `@` and `+`, so it cannot be confused with a channel's own
+/// syntax.
 fn is_plain_role(name: &str) -> bool {
     !name.trim().is_empty() && !name.contains('@') && !name.contains('+')
 }

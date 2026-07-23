@@ -1,54 +1,63 @@
-//! The crew config: the declarative description `crew up` reads to bring a crew online.
+//! The crew config: the declarative description `crew up` reads to bring a crew
+//! online.
 //!
-//! A [`CrewConfig`] names the roles and the lane each owns, the model they run, the
-//! repos in scope, the idle-stop timeout, and which role is the commander. It resolves
-//! sensible defaults (the default crew: commander, backend, frontend, qa) and validates
-//! itself, so a documented config produces a valid crew and an invalid one fails with a
-//! precise message (see `docs/config.md`). The config is broker-agnostic; it produces
-//! the per-role [`RoleCard`]s with [`to_cards`](CrewConfig::to_cards), taking the broker
-//! address at that point.
+//! A [`CrewConfig`] names the roles and the lane each owns, the model they run,
+//! the repos in scope, the idle-stop timeout, and which role is the commander.
+//! It resolves sensible defaults (the default crew: commander, backend,
+//! frontend, qa) and validates itself, so a documented config produces a valid
+//! crew and an invalid one fails with a precise message (see `docs/config.md`).
+//! The config is broker-agnostic; it produces the per-role [`RoleCard`]s with
+//! [`to_cards`](CrewConfig::to_cards), taking the broker address at that point.
 //!
-//! Like [`RoleCard`], the config is sans-io: it parses from a string and never touches
-//! the filesystem, so `crew-core` stays free of I/O and the format is trivially
-//! testable (the caller owns the file).
+//! Like [`RoleCard`], the config is sans-io: it parses from a string and never
+//! touches the filesystem, so `crew-core` stays free of I/O and the format is
+//! trivially testable (the caller owns the file).
 
-use std::backtrace::Backtrace;
-use std::collections::BTreeSet;
-use std::fmt::{self, Display, Formatter};
-use std::time::Duration;
+use std::{
+    backtrace::Backtrace,
+    collections::BTreeSet,
+    fmt::{self, Display, Formatter},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::Budget;
-use crate::card::{BrokerEndpoint, RoleCard};
-use crate::id::RoleId;
-use crate::model::{default_tier_for, ModelTier, ModelTiers};
+use crate::{
+    budget::Budget,
+    card::{BrokerEndpoint, RoleCard},
+    id::RoleId,
+    model::{default_tier_for, ModelTier, ModelTiers},
+};
 
-/// How the crew enforces lane ownership when a role edits outside its owned paths
-/// (issue #46).
+/// How the crew enforces lane ownership when a role edits outside its owned
+/// paths (issue #46).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneEnforcement {
     /// Off: out-of-lane edits are not checked.
     Off,
-    /// Warn: an out-of-lane edit is reported on the stream, but the role may proceed.
+    /// Warn: an out-of-lane edit is reported on the stream, but the role may
+    /// proceed.
     #[default]
     Warn,
-    /// Block: an out-of-lane edit is refused; the role routes through the commander.
+    /// Block: an out-of-lane edit is refused; the role routes through the
+    /// commander.
     Block,
 }
 
 /// The default commander: the lead and router the General briefs.
 const DEFAULT_COMMANDER: &str = "commander";
 
-/// The default idle-stop timeout: how long a role may be quiet before it is stopped.
+/// The default idle-stop timeout: how long a role may be quiet before it is
+/// stopped.
 const DEFAULT_IDLE_STOP: Duration = Duration::from_secs(5 * 60);
 
 /// A resolved, validated crew: its roles, its defaults, and its commander.
 ///
-/// Build one from a config file with [`from_toml`](CrewConfig::from_toml), or take the
-/// [`default`](CrewConfig::default) crew. Every field is resolved (defaults applied) and
-/// the whole is validated, so holding a `CrewConfig` means it is well-formed.
+/// Build one from a config file with [`from_toml`](CrewConfig::from_toml), or
+/// take the [`default`](CrewConfig::default) crew. Every field is resolved
+/// (defaults applied) and the whole is validated, so holding a `CrewConfig`
+/// means it is well-formed.
 ///
 /// # Examples
 /// ```
@@ -64,31 +73,33 @@ pub struct CrewConfig {
     pub roles: Vec<RoleSpec>,
     /// The role that leads and routes: the one the General briefs.
     pub commander: RoleId,
-    /// A crew-wide model alias that runs every un-tiered role, overriding the default
-    /// per-role tier mapping (issue #53). `None` (the default) lets each role run its
-    /// tier: its own, or the sensible default for its name (see [`model_for`] and
-    /// [`default_tier_for`]).
+    /// A crew-wide model alias that runs every un-tiered role, overriding the
+    /// default per-role tier mapping (issue #53). `None` (the default) lets
+    /// each role run its tier: its own, or the sensible default for its
+    /// name (see [`model_for`] and [`default_tier_for`]).
     ///
     /// [`model_for`]: CrewConfig::model_for
     pub model: Option<String>,
-    /// The concrete model alias each tier resolves to, so retuning spend is a config
-    /// change, not a code change (issue #53). Defaults to `opus` / `sonnet` / `haiku`.
+    /// The concrete model alias each tier resolves to, so retuning spend is a
+    /// config change, not a code change (issue #53). Defaults to `opus` /
+    /// `sonnet` / `haiku`.
     pub models: ModelTiers,
-    /// The crew-wide token budget: the ceiling on total spend across every role (issue
-    /// #54). `None` (the default) leaves the crew unbounded. When the crew reaches it,
-    /// the supervisor idle-stops the whole crew rather than overrun (see
-    /// [`Budget`](crate::Budget) and `docs/observability.md`).
+    /// The crew-wide token budget: the ceiling on total spend across every role
+    /// (issue #54). `None` (the default) leaves the crew unbounded. When the
+    /// crew reaches it, the supervisor idle-stops the whole crew rather
+    /// than overrun (see [`Budget`](crate::Budget) and
+    /// `docs/observability.md`).
     pub token_budget: Option<u64>,
     /// How long a role may be quiet before the supervisor idle-stops it.
     pub idle_stop: Duration,
     /// The repos in scope for the crew (paths or names the operator supplies).
     pub repos: Vec<String>,
     /// Whether each role works in its own git worktree of the crew's repos, so
-    /// parallel roles never clobber each other's edits (issue #43). Off by default;
-    /// opt a crew in with `worktrees = true`.
+    /// parallel roles never clobber each other's edits (issue #43). Off by
+    /// default; opt a crew in with `worktrees = true`.
     pub worktrees: bool,
-    /// How the crew enforces lane ownership when a role edits outside its lane (issue
-    /// #46). Defaults to `warn`.
+    /// How the crew enforces lane ownership when a role edits outside its lane
+    /// (issue #46). Defaults to `warn`.
     pub lane_enforcement: LaneEnforcement,
 }
 
@@ -99,27 +110,32 @@ pub struct RoleSpec {
     pub role: RoleId,
     /// The directory boundaries the role owns, its lane in the tree.
     pub owned_paths: Vec<String>,
-    /// The bar the role holds its work to; empty falls back to the crew's standard bar.
+    /// The bar the role holds its work to; empty falls back to the crew's
+    /// standard bar.
     pub acceptance: String,
-    /// The tier this role runs, overriding the default tier for its name (issue #53).
-    /// `None` uses the sensible default (see [`default_tier_for`]).
+    /// The tier this role runs, overriding the default tier for its name (issue
+    /// #53). `None` uses the sensible default (see [`default_tier_for`]).
     pub tier: Option<ModelTier>,
-    /// An exact model alias for this role, the escape hatch that pins the build precisely
-    /// and wins over any tier. `None` (the usual case) lets the role's [`tier`] decide.
+    /// An exact model alias for this role, the escape hatch that pins the build
+    /// precisely and wins over any tier. `None` (the usual case) lets the
+    /// role's [`tier`] decide.
     ///
     /// [`tier`]: RoleSpec::tier
     pub model: Option<String>,
-    /// The role's token cap: the ceiling on its own spend (issue #54). `None` leaves the
-    /// role bounded only by the crew-wide [`token_budget`](CrewConfig::token_budget). When
-    /// the role reaches its cap, the supervisor idle-stops it rather than overrun.
+    /// The role's token cap: the ceiling on its own spend (issue #54). `None`
+    /// leaves the role bounded only by the crew-wide
+    /// [`token_budget`](CrewConfig::token_budget). When the role reaches
+    /// its cap, the supervisor idle-stops it rather than overrun.
     pub token_cap: Option<u64>,
 }
 
 impl Default for CrewConfig {
-    /// The default crew: commander, backend, frontend, and qa (see `docs/roles.md`).
+    /// The default crew: commander, backend, frontend, and qa (see
+    /// `docs/roles.md`).
     ///
-    /// A starting point the operator customizes: the commander routes and owns no lane,
-    /// and the specialists own the clean boundaries most repos hand you.
+    /// A starting point the operator customizes: the commander routes and owns
+    /// no lane, and the specialists own the clean boundaries most repos
+    /// hand you.
     fn default() -> Self {
         Self {
             roles: default_roles(),
@@ -138,14 +154,15 @@ impl Default for CrewConfig {
 impl CrewConfig {
     /// Parses a config from its TOML form, applying defaults and validating it.
     ///
-    /// Omitted fields take their defaults: no `roles` yields the default crew, and no
-    /// `commander` / `model` / `idle_stop` take the crew defaults.
+    /// Omitted fields take their defaults: no `roles` yields the default crew,
+    /// and no `commander` / `model` / `idle_stop` take the crew defaults.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the TOML is malformed, an unknown field is present,
-    /// the idle-stop duration is unparseable, or validation fails (an empty or duplicate
-    /// role, a commander that is not a declared role, or two roles owning overlapping
-    /// paths). The message names the offending value.
+    /// Returns a [`ConfigError`] if the TOML is malformed, an unknown field is
+    /// present, the idle-stop duration is unparseable, or validation fails
+    /// (an empty or duplicate role, a commander that is not a declared
+    /// role, or two roles owning overlapping paths). The message names the
+    /// offending value.
     pub fn from_toml(toml: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig =
             toml::from_str(toml).map_err(|source| ConfigError::parse(Box::new(source)))?;
@@ -156,10 +173,11 @@ impl CrewConfig {
 
     /// Produces one [`RoleCard`] per role, reaching the broker at `broker`.
     ///
-    /// Each card names the crew's [`commander`](CrewConfig::commander), so every agent
-    /// boots knowing where an unaddressed message goes and whether it is the commander
-    /// itself. The config is broker-agnostic; the broker address (where `crewd`
-    /// listens) is supplied here, so the same config drives any broker.
+    /// Each card names the crew's [`commander`](CrewConfig::commander), so
+    /// every agent boots knowing where an unaddressed message goes and
+    /// whether it is the commander itself. The config is broker-agnostic;
+    /// the broker address (where `crewd` listens) is supplied here, so the
+    /// same config drives any broker.
     #[must_use]
     pub fn to_cards(&self, broker: &BrokerEndpoint) -> Vec<RoleCard> {
         self.roles
@@ -177,18 +195,20 @@ impl CrewConfig {
             .collect()
     }
 
-    /// The model alias `role` runs, resolved by the tier precedence (issue #53).
+    /// The model alias `role` runs, resolved by the tier precedence (issue
+    /// #53).
     ///
     /// Most specific wins:
     ///
     /// 1. the role's exact `model` override, if it pins one;
-    /// 2. else the role's explicit `tier`, resolved through the crew's tier map;
+    /// 2. else the role's explicit `tier`, resolved through the crew's tier
+    ///    map;
     /// 3. else a crew-wide `model`, if the operator set one for the whole crew;
-    /// 4. else the sensible default tier for the role's name (see [`default_tier_for`]),
-    ///    resolved through the crew's tier map.
+    /// 4. else the sensible default tier for the role's name (see
+    ///    [`default_tier_for`]), resolved through the crew's tier map.
     ///
-    /// A `role` not declared in the crew still resolves, through steps 3 and 4, so the
-    /// caller always gets a concrete alias.
+    /// A `role` not declared in the crew still resolves, through steps 3 and 4,
+    /// so the caller always gets a concrete alias.
     #[must_use]
     pub fn model_for(&self, role: &RoleId) -> &str {
         let spec = self.roles.iter().find(|spec| &spec.role == role);
@@ -204,11 +224,13 @@ impl CrewConfig {
         self.models.resolve(default_tier_for(role))
     }
 
-    /// The crew's token [`Budget`]: the crew-wide ceiling and each role's cap (issue #54).
+    /// The crew's token [`Budget`]: the crew-wide ceiling and each role's cap
+    /// (issue #54).
     ///
-    /// The supervisor holds one and records spend against it, idle-stopping a role or the
-    /// crew when it reaches a cap. A crew with no `token_budget` and no per-role
-    /// `token_cap` is unbounded, so the budget never breaches.
+    /// The supervisor holds one and records spend against it, idle-stopping a
+    /// role or the crew when it reaches a cap. A crew with no
+    /// `token_budget` and no per-role `token_cap` is unbounded, so the
+    /// budget never breaches.
     #[must_use]
     pub fn budget(&self) -> Budget {
         let caps = self
@@ -253,8 +275,9 @@ impl CrewConfig {
 
     /// Rejects two roles owning overlapping directory boundaries.
     ///
-    /// Two lanes overlap when one path is a prefix of the other (or they are equal), so
-    /// `api/` and `api/routes/` collide but `api/` and `apiv2/` do not.
+    /// Two lanes overlap when one path is a prefix of the other (or they are
+    /// equal), so `api/` and `api/routes/` collide but `api/` and `apiv2/`
+    /// do not.
     fn check_ownership_overlaps(&self) -> Result<(), ConfigError> {
         // Each owned lane, with the role and the path as written for the message.
         let mut lanes: Vec<(&RoleId, &str, String)> = Vec::new();
@@ -289,7 +312,8 @@ impl CrewConfig {
     }
 }
 
-/// The default crew's roles: the commander routes, the specialists own their lanes.
+/// The default crew's roles: the commander routes, the specialists own their
+/// lanes.
 fn default_roles() -> Vec<RoleSpec> {
     let role = |name: &str, paths: &[&str]| RoleSpec {
         role: RoleId::new(name),
@@ -307,9 +331,11 @@ fn default_roles() -> Vec<RoleSpec> {
     ]
 }
 
-/// Normalizes a path to a directory boundary: trimmed, with exactly one trailing slash.
+/// Normalizes a path to a directory boundary: trimmed, with exactly one
+/// trailing slash.
 ///
-/// So `api`, `api/`, and `api//` all become `api/`, and a blank path becomes empty.
+/// So `api`, `api/`, and `api//` all become `api/`, and a blank path becomes
+/// empty.
 fn directory_boundary(path: &str) -> String {
     let trimmed = path.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -318,16 +344,17 @@ fn directory_boundary(path: &str) -> String {
     format!("{trimmed}/")
 }
 
-/// Whether two directory boundaries overlap: equal, or one nested under the other.
+/// Whether two directory boundaries overlap: equal, or one nested under the
+/// other.
 ///
-/// Both end with `/`, so a prefix test is exactly the nesting test: `api/` is a prefix
-/// of `api/routes/`, but not of `apiv2/`.
+/// Both end with `/`, so a prefix test is exactly the nesting test: `api/` is a
+/// prefix of `api/routes/`, but not of `apiv2/`.
 fn boundaries_overlap(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// Parses a human duration: a plain number of seconds, or a number with an `s`/`m`/`h`
-/// suffix (`30s`, `5m`, `2h`).
+/// Parses a human duration: a plain number of seconds, or a number with an
+/// `s`/`m`/`h` suffix (`30s`, `5m`, `2h`).
 fn parse_duration(text: &str) -> Result<Duration, String> {
     let text = text.trim();
     let expected = "expected a duration like `5m`, `30s`, `2h`, or a number of seconds";
@@ -353,7 +380,8 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(seconds))
 }
 
-/// The TOML wire form of a crew config: every field optional, so a default applies.
+/// The TOML wire form of a crew config: every field optional, so a default
+/// applies.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -368,7 +396,8 @@ struct RawConfig {
     roles: Option<Vec<RawRole>>,
 }
 
-/// The TOML wire form of the tier map: the alias each tier resolves to (issue #53).
+/// The TOML wire form of the tier map: the alias each tier resolves to (issue
+/// #53).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawModels {
@@ -450,7 +479,8 @@ fn normalize_alias(alias: Option<String>) -> Option<String> {
 /// The error returned when a crew config cannot be parsed or is invalid.
 ///
 /// Inspect it with [`is_parse`](ConfigError::is_parse) and
-/// [`is_invalid`](ConfigError::is_invalid); its [`Display`] carries the precise reason.
+/// [`is_invalid`](ConfigError::is_invalid); its [`Display`] carries the precise
+/// reason.
 #[derive(Debug)]
 pub struct ConfigError {
     kind: ErrorKind,
@@ -458,7 +488,8 @@ pub struct ConfigError {
 }
 
 impl ConfigError {
-    /// Wraps a kind, capturing a backtrace (empty unless `RUST_BACKTRACE` is set).
+    /// Wraps a kind, capturing a backtrace (empty unless `RUST_BACKTRACE` is
+    /// set).
     fn new(kind: ErrorKind) -> Self {
         Self {
             kind,
@@ -511,8 +542,8 @@ impl std::error::Error for ConfigError {
     }
 }
 
-/// What went wrong with a config. Kept private so new failure modes never break the
-/// public API (callers match on the `is_*` methods and read the `Display`).
+/// What went wrong with a config. Kept private so new failure modes never break
+/// the public API (callers match on the `is_*` methods and read the `Display`).
 #[derive(Debug)]
 enum ErrorKind {
     Parse(Box<toml::de::Error>),
@@ -524,7 +555,8 @@ mod tests {
     use super::{parse_duration, CrewConfig};
     use crate::{BrokerEndpoint, RoleId};
 
-    /// A fully specified config exercising every field, mirrored in `docs/config.md`.
+    /// A fully specified config exercising every field, mirrored in
+    /// `docs/config.md`.
     const DOCUMENTED: &str = r#"
         commander = "commander"
         idle_stop = "10m"
@@ -664,7 +696,8 @@ mod tests {
     #[test]
     fn the_tier_map_retunes_spend_without_touching_roles() {
         // Remapping a tier alias changes what every role on that tier runs (issue #53):
-        // bumping the cheap tier to sonnet moves the docs role up with no per-role edit.
+        // bumping the cheap tier to sonnet moves the docs role up with no per-role
+        // edit.
         let config = CrewConfig::from_toml(
             "[models]\ncheap = \"sonnet\"\n\
              [[roles]]\nrole = \"commander\"\n[[roles]]\nrole = \"docs\"",

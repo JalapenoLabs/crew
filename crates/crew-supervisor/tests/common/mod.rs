@@ -1,22 +1,26 @@
-//! Shared helpers for the lifecycle, defibrillator, and worktree integration tests.
+//! Shared helpers for the lifecycle, defibrillator, and worktree integration
+//! tests.
 //!
 //! Each test starts a real `crewd` in-process and manages a fleet of stub agent
-//! processes (shells that stand in for a real `claude` turn, which needs no external
-//! services in CI), observing the roster and the stream over HTTP.
+//! processes (shells that stand in for a real `claude` turn, which needs no
+//! external services in CI), observing the roster and the stream over HTTP.
 #![allow(
     dead_code,
     reason = "each test binary that includes this module uses only a subset of the helpers"
 )]
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    net::{Ipv4Addr, SocketAddr, TcpListener},
+    thread,
+    time::{Duration, Instant},
+};
 
 use crew_broker::{AppState, Config};
 use crew_core::RoleId;
 use crew_supervisor::{AgentCommand, PreparedAgent};
 
-/// Starts a broker over a fresh in-memory store, returning the base URL it serves on.
+/// Starts a broker over a fresh in-memory store, returning the base URL it
+/// serves on.
 pub fn start_broker() -> String {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -49,7 +53,8 @@ pub fn stub(role: &str, script: &str) -> PreparedAgent {
     }
 }
 
-/// The lifecycle events on the broker log, oldest first (`started`, `died`, ...).
+/// The lifecycle events on the broker log, oldest first (`started`, `died`,
+/// ...).
 pub fn lifecycle_events(base: &str) -> Vec<String> {
     let text = ureq::get(&format!("{base}/history?kind=lifecycle"))
         .call()

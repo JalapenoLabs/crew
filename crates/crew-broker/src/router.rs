@@ -2,24 +2,26 @@
 
 use crew_core::{Channel, ChannelId, RoleId};
 
-/// Routes a message to the roles its channel reaches (see `docs/communication.md`).
+/// Routes a message to the roles its channel reaches (see
+/// `docs/communication.md`).
 ///
-/// Resolves the canonical [`Channel`] model against a roster of candidate roles, so
-/// `all-units` wakes every role, a direct `@role` wakes only its addressee, and a
-/// pair wakes only its two members. Stateless today: the roster is supplied by the
-/// caller. It becomes the owner of the live roster when the roster/liveness ticket
-/// lands, which is why it stays in [`AppState`](crate::AppState).
+/// Resolves the canonical [`Channel`] model against a roster of candidate
+/// roles, so `all-units` wakes every role, a direct `@role` wakes only its
+/// addressee, and a pair wakes only its two members. Stateless today: the
+/// roster is supplied by the caller. It becomes the owner of the live roster
+/// when the roster/liveness ticket lands, which is why it stays in
+/// [`AppState`](crate::AppState).
 #[derive(Debug, Default)]
 pub struct ChannelRouter;
 
 impl ChannelRouter {
     /// The roles from `roster` that a message on `channel` should reach.
     ///
-    /// Returns the roster members the channel addresses, in the roster's order. An
-    /// unrecognized channel name reaches no one, so a misaddressed message wakes
-    /// nobody rather than everybody. Self-echo (a sender receiving its own message)
-    /// is filtered at delivery, not here: routing answers only who a channel
-    /// addresses.
+    /// Returns the roster members the channel addresses, in the roster's order.
+    /// An unrecognized channel name reaches no one, so a misaddressed
+    /// message wakes nobody rather than everybody. Self-echo (a sender
+    /// receiving its own message) is filtered at delivery, not here:
+    /// routing answers only who a channel addresses.
     #[must_use]
     pub fn recipients<'a, I>(&self, channel: &ChannelId, roster: I) -> Vec<RoleId>
     where

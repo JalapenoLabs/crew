@@ -1,25 +1,21 @@
 //! The crew control endpoints: pause, resume, and stand down (issue #41).
 //!
-//! The General's brake and kill switch. `POST /pause` and `POST /resume` gate work per
-//! role (a `role` in the body) or crew-wide (no body, or an empty one); `POST
-//! /standdown` halts the whole crew at once and preserves the durable state, so the
-//! crew is recoverable. Each records the change as a `lifecycle` event on the stream
-//! and returns the roster, so pause state is visible on both the roster and the stream
-//! (see `docs/observability.md`).
+//! The General's brake and kill switch. `POST /pause` and `POST /resume` gate
+//! work per role (a `role` in the body) or crew-wide (no body, or an empty
+//! one); `POST /standdown` halts the whole crew at once and preserves the
+//! durable state, so the crew is recoverable. Each records the change as a
+//! `lifecycle` event on the stream and returns the roster, so pause state is
+//! visible on both the roster and the stream (see `docs/observability.md`).
 //!
-//! The control state lives in the broker ([`AppState`]); a role honors it by pulling no
-//! new work while it, or the crew, is paused (its role card says so).
+//! The control state lives in the broker ([`AppState`]); a role honors it by
+//! pulling no new work while it, or the crew, is paused (its role card says
+//! so).
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::{body::Bytes, extract::State, routing::post, Json, Router};
 use crew_core::{ChannelId, Event, EventKind, Lifecycle, RoleId, Sender, Timestamp, ALL_UNITS};
 use serde::Deserialize;
 
-use crate::error::ApiError;
-use crate::roster::RosterView;
-use crate::state::AppState;
+use crate::{error::ApiError, roster::RosterView, state::AppState};
 
 /// The control routes: pause, resume, and stand down.
 pub(crate) fn routes() -> Router<AppState> {
@@ -29,8 +25,8 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/standdown", post(standdown))
 }
 
-/// The body of `POST /pause` and `POST /resume`: an optional role. None (an empty body
-/// or `{}`) means the whole crew.
+/// The body of `POST /pause` and `POST /resume`: an optional role. None (an
+/// empty body or `{}`) means the whole crew.
 #[derive(Debug, Default, Deserialize)]
 struct Target {
     /// The role to pause or resume; omit to act on the whole crew.
@@ -38,12 +34,12 @@ struct Target {
     role: Option<String>,
 }
 
-/// `POST /pause`: pause one role (with a `role`) or the whole crew (without), gating it
-/// from new work until resumed.
+/// `POST /pause`: pause one role (with a `role`) or the whole crew (without),
+/// gating it from new work until resumed.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] on a malformed body, or a 404 if a named role is not
-/// registered.
+/// Returns a 400 [`ApiError`] on a malformed body, or a 404 if a named role is
+/// not registered.
 async fn pause(State(state): State<AppState>, body: Bytes) -> Result<Json<RosterView>, ApiError> {
     if let Some(role) = target_role(&body, &state)? {
         state.pause_role(role.clone());
@@ -57,19 +53,20 @@ async fn pause(State(state): State<AppState>, body: Bytes) -> Result<Json<Roster
 
 /// `POST /resume`: resume one role (with a `role`) or the whole crew (without).
 ///
-/// Resuming the crew clears a crew-wide pause or stand-down; a role paused on its own
-/// stays paused until resumed by name.
+/// Resuming the crew clears a crew-wide pause or stand-down; a role paused on
+/// its own stays paused until resumed by name.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] on a malformed body, or a 404 if a named role is not
-/// registered.
+/// Returns a 400 [`ApiError`] on a malformed body, or a 404 if a named role is
+/// not registered.
 async fn resume(State(state): State<AppState>, body: Bytes) -> Result<Json<RosterView>, ApiError> {
     if let Some(role) = target_role(&body, &state)? {
         state.resume_role(&role);
         state.publish(control_event(Sender::Role(role), Lifecycle::Resumed));
     } else {
         // `crew resume` is the one escape hatch: it lifts a manual pause and any usage
-        // auto-pause (issue #56). Surface the usage lift so an early resume is not silent.
+        // auto-pause (issue #56). Surface the usage lift so an early resume is not
+        // silent.
         let lifted_usage = state.resume_crew();
         state.publish(control_event(Sender::General, Lifecycle::Resumed));
         if lifted_usage {
@@ -79,17 +76,17 @@ async fn resume(State(state): State<AppState>, body: Bytes) -> Result<Json<Roste
     Ok(Json(RosterView::from_state(&state)))
 }
 
-/// `POST /standdown`: the emergency halt. Stands the whole crew down at once, records
-/// it on the stream, and preserves the durable log and roster so the crew is
-/// recoverable (resume, or a fresh `crew up`).
+/// `POST /standdown`: the emergency halt. Stands the whole crew down at once,
+/// records it on the stream, and preserves the durable log and roster so the
+/// crew is recoverable (resume, or a fresh `crew up`).
 async fn standdown(State(state): State<AppState>) -> Json<RosterView> {
     state.stand_down();
     state.publish(control_event(Sender::General, Lifecycle::StoodDown));
     Json(RosterView::from_state(&state))
 }
 
-/// Parses the optional target role from a pause/resume body, validating that a named
-/// role is registered.
+/// Parses the optional target role from a pause/resume body, validating that a
+/// named role is registered.
 ///
 /// An empty body or `{}` targets the whole crew (`None`).
 fn target_role(body: &[u8], state: &AppState) -> Result<Option<RoleId>, ApiError> {
@@ -116,8 +113,9 @@ fn target_role(body: &[u8], state: &AppState) -> Result<Option<RoleId>, ApiError
     Ok(Some(role))
 }
 
-/// A crew control change as a first-class stream event, addressed to `all-units`: a
-/// per-role change is `from` the role, a crew-wide one `from` the General.
+/// A crew control change as a first-class stream event, addressed to
+/// `all-units`: a per-role change is `from` the role, a crew-wide one `from`
+/// the General.
 fn control_event(from: Sender, lifecycle: Lifecycle) -> Event {
     Event {
         ts: Timestamp::now(),
@@ -130,16 +128,20 @@ fn control_event(from: Sender, lifecycle: Lifecycle) -> Event {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{EventKind, Lifecycle, RoleId};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
-    use crate::store::{Liveness, RoleStatus};
+    use crate::{
+        api,
+        config::Config,
+        state::AppState,
+        store::{Liveness, RoleStatus},
+    };
 
     /// A broker state with `backend` and `frontend` registered and working.
     fn state_with_two_roles() -> AppState {

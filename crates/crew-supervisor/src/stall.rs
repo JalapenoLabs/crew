@@ -1,32 +1,38 @@
-//! Coordination-stall and deadlock detection: catch a crew stuck waiting on itself.
+//! Coordination-stall and deadlock detection: catch a crew stuck waiting on
+//! itself.
 //!
-//! The defibrillator (issue #23, [`crate::lifecycle`]) recovers a single agent whose
-//! turn died. A crew can also be fully alive yet stuck: every agent idle, each waiting on
-//! another, so silence reads as progress when it is really a deadlock. This module is the
-//! coordination-defibrillator (issue #48): it reads the broker's event stream and finds
-//! the three shapes of a stall, then escalates the specific cause to the operator rather
-//! than a generic timeout.
+//! The defibrillator (issue #23, [`crate::lifecycle`]) recovers a single agent
+//! whose turn died. A crew can also be fully alive yet stuck: every agent idle,
+//! each waiting on another, so silence reads as progress when it is really a
+//! deadlock. This module is the coordination-defibrillator (issue #48): it
+//! reads the broker's event stream and finds the three shapes of a stall, then
+//! escalates the specific cause to the operator rather than a generic timeout.
 //!
-//! - **Deadlock.** A cycle of unanswered questions: `backend` waits on `frontend` and
-//!   `frontend` waits on `backend`, so neither can proceed.
-//! - **An unanswered question.** One agent has waited past the threshold for another to
-//!   answer, with no cycle: the blocker is simply not responding.
-//! - **A stalled ledger.** A task sits in a held state (a work-ledger claim that is not
-//!   `done`, or a done-gate submission with no verdict) past the threshold: no forward
-//!   motion.
+//! - **Deadlock.** A cycle of unanswered questions: `backend` waits on
+//!   `frontend` and `frontend` waits on `backend`, so neither can proceed.
+//! - **An unanswered question.** One agent has waited past the threshold for
+//!   another to answer, with no cycle: the blocker is simply not responding.
+//! - **A stalled ledger.** A task sits in a held state (a work-ledger claim
+//!   that is not `done`, or a done-gate submission with no verdict) past the
+//!   threshold: no forward motion.
 //!
-//! A legitimate wait for the human (a question broadcast to `all-units`, or addressed to
-//! anyone who is not a live agent) is **not** a deadlock: the crew is waiting on input,
-//! not on itself, so it is never escalated as a stall (see the scope of issue #48).
+//! A legitimate wait for the human (a question broadcast to `all-units`, or
+//! addressed to anyone who is not a live agent) is **not** a deadlock: the crew
+//! is waiting on input, not on itself, so it is never escalated as a stall (see
+//! the scope of issue #48).
 //!
-//! Detection ([`detect_stalls`]) is a pure function over the parsed stream, so every
-//! shape is unit-testable without a running broker; the `StallMonitor` loop feeds it the
-//! recent history on a timer and escalates each new stall.
+//! Detection ([`detect_stalls`]) is a pure function over the parsed stream, so
+//! every shape is unit-testable without a running broker; the `StallMonitor`
+//! loop feeds it the recent history on a timer and escalates each new stall.
 
-use std::collections::BTreeSet;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::{
+    collections::BTreeSet,
+    sync::{
+        mpsc::{Receiver, RecvTimeoutError},
+        Arc, Mutex, PoisonError,
+    },
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use crew_core::{Channel, RoleId, Timestamp};
@@ -40,7 +46,8 @@ use crate::roster::RosterClient;
 pub enum StallKind {
     /// A cycle of unanswered questions: the crew is waiting on itself.
     Deadlock,
-    /// One agent has waited past the threshold for another to answer a question.
+    /// One agent has waited past the threshold for another to answer a
+    /// question.
     UnansweredQuestion,
     /// A task sits in a held state past the threshold, with no forward motion.
     LedgerStall,
@@ -58,27 +65,30 @@ impl StallKind {
     }
 }
 
-/// A detected coordination stall: the crew stuck waiting on itself, not one dead agent.
+/// A detected coordination stall: the crew stuck waiting on itself, not one
+/// dead agent.
 ///
-/// The detector escalates this to the operator with a precise [`detail`](Self::detail)
-/// (who is waiting on what), rather than a generic timeout, so the General can unstick
-/// the specific cause.
+/// The detector escalates this to the operator with a precise
+/// [`detail`](Self::detail) (who is waiting on what), rather than a generic
+/// timeout, so the General can unstick the specific cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stall {
     /// Which shape of stall this is.
     pub kind: StallKind,
-    /// The roles caught in the stall, sorted, for a stable identity across scans.
+    /// The roles caught in the stall, sorted, for a stable identity across
+    /// scans.
     pub roles: Vec<RoleId>,
     /// A one-line, specific description of the stall: who is waiting on what.
     pub detail: String,
 }
 
 impl Stall {
-    /// A stable key identifying this stall, so a persistent one is escalated once.
+    /// A stable key identifying this stall, so a persistent one is escalated
+    /// once.
     ///
-    /// Keyed on the kind and the roles involved (not the free-text detail), so a stall
-    /// that persists across scans keeps the same key and a resolved-then-recurring one
-    /// is escalated afresh.
+    /// Keyed on the kind and the roles involved (not the free-text detail), so
+    /// a stall that persists across scans keeps the same key and a
+    /// resolved-then-recurring one is escalated afresh.
     #[must_use]
     pub fn key(&self) -> String {
         let roles: Vec<&str> = self.roles.iter().map(RoleId::as_str).collect();
@@ -86,7 +96,8 @@ impl Stall {
     }
 }
 
-/// One agent waiting on another: an unanswered question, the edge of the wait graph.
+/// One agent waiting on another: an unanswered question, the edge of the wait
+/// graph.
 #[derive(Debug, Clone)]
 struct WaitEdge {
     /// The agent that asked and is waiting.
@@ -99,11 +110,13 @@ struct WaitEdge {
     since: Timestamp,
 }
 
-/// A parsed stream event, lenient enough to survive kinds this crate does not model.
+/// A parsed stream event, lenient enough to survive kinds this crate does not
+/// model.
 ///
-/// The supervisor reads the broker's public stream contract (`docs/stream-contract.md`),
-/// not `crew_core::EventKind`, so an event kind added later (a work-ledger `ledger` event
-/// before that crate ships it here) parses rather than breaking the scan.
+/// The supervisor reads the broker's public stream contract
+/// (`docs/stream-contract.md`), not `crew_core::EventKind`, so an event kind
+/// added later (a work-ledger `ledger` event before that crate ships it here)
+/// parses rather than breaking the scan.
 #[derive(Debug, Clone)]
 struct StreamEvent {
     /// When the event happened.
@@ -112,23 +125,27 @@ struct StreamEvent {
     from: Option<RoleId>,
     /// The channel it was addressed to.
     channel: String,
-    /// The tagged payload kind: `message`, `lifecycle`, `ledger`, `verification`, ...
+    /// The tagged payload kind: `message`, `lifecycle`, `ledger`,
+    /// `verification`, ...
     kind: String,
     /// For a `message`, its typed intent (`question`, `answer`, `note`, ...).
     message_kind: Option<String>,
-    /// A message's body, or a ledger/verification task's detail; empty when absent.
+    /// A message's body, or a ledger/verification task's detail; empty when
+    /// absent.
     text: String,
     /// For a `ledger` or `verification` event, the task key it concerns.
     task: Option<String>,
     /// For a `ledger` or `verification` event, the role that owns the task.
     owner: Option<RoleId>,
-    /// For a `ledger` event, its state (`claimed` / `in_progress` / `blocked` / `done`);
-    /// for a `verification` event, its verdict (`submitted` / `passed` / `failed`).
+    /// For a `ledger` event, its state (`claimed` / `in_progress` / `blocked` /
+    /// `done`); for a `verification` event, its verdict (`submitted` /
+    /// `passed` / `failed`).
     state: Option<String>,
 }
 
 impl StreamEvent {
-    /// Parses one `/history` event object, or `None` if it is missing required fields.
+    /// Parses one `/history` event object, or `None` if it is missing required
+    /// fields.
     fn parse(value: &Value) -> Option<Self> {
         let ts: Timestamp = serde_json::from_value(value.get("ts")?.clone()).ok()?;
         let from = match value
@@ -207,9 +224,10 @@ fn string_field(data: Option<&Value>, field: &str) -> String {
 
 /// Detects every coordination stall in `events`, given the live agent `roster`.
 ///
-/// `events` is the recent history, oldest first; `roster` is the set of agent roles (so
-/// a wait on anyone else is a wait for the human, not a deadlock); `now` and `timeout`
-/// set how long a wait must persist to count. Pure: the [`monitor`] supplies the inputs.
+/// `events` is the recent history, oldest first; `roster` is the set of agent
+/// roles (so a wait on anyone else is a wait for the human, not a deadlock);
+/// `now` and `timeout` set how long a wait must persist to count. Pure: the
+/// [`monitor`] supplies the inputs.
 ///
 /// # Examples
 /// ```
@@ -260,7 +278,8 @@ fn waiting_stalls(
 
     let mut stalls = Vec::new();
 
-    // Deadlocks: the cyclic edges, grouped into connected components (one stall each).
+    // Deadlocks: the cyclic edges, grouped into connected components (one stall
+    // each).
     let deadlock_edges: Vec<&WaitEdge> = edges
         .iter()
         .zip(&cyclic)
@@ -310,12 +329,14 @@ fn waiting_stalls(
     stalls
 }
 
-/// Builds one wait edge per agent-to-agent question left unanswered past `cutoff`.
+/// Builds one wait edge per agent-to-agent question left unanswered past
+/// `cutoff`.
 ///
-/// A question is a wait only when its asker and its single addressee are both live
-/// agents; a broadcast, or a question to the human, is a legitimate wait for input and
-/// is skipped. The edge uses the latest unanswered question for the pair, so a re-ask
-/// does not age a wait the blocker has since engaged with.
+/// A question is a wait only when its asker and its single addressee are both
+/// live agents; a broadcast, or a question to the human, is a legitimate wait
+/// for input and is skipped. The edge uses the latest unanswered question for
+/// the pair, so a re-ask does not age a wait the blocker has since engaged
+/// with.
 fn wait_edges(events: &[StreamEvent], roster: &[RoleId], cutoff: DateTime<Utc>) -> Vec<WaitEdge> {
     let mut edges: Vec<WaitEdge> = Vec::new();
     for event in events {
@@ -326,10 +347,12 @@ fn wait_edges(events: &[StreamEvent], roster: &[RoleId], cutoff: DateTime<Utc>) 
             continue; // from the General: the human is not waiting on the crew.
         };
         let Some(blocker) = addressee(&event.channel, &waiter) else {
-            continue; // a broadcast or an unaddressed question: a wait for input.
+            continue; // a broadcast or an unaddressed question: a wait for
+                      // input.
         };
         if waiter == blocker || !is_agent(roster, &waiter) || !is_agent(roster, &blocker) {
-            continue; // a wait on the human or on a role no longer live: not a deadlock.
+            continue; // a wait on the human or on a role no longer live: not a
+                      // deadlock.
         }
         if answered_after(events, &blocker, &waiter, event.ts) {
             continue; // the blocker engaged since the question: not waiting.
@@ -342,7 +365,8 @@ fn wait_edges(events: &[StreamEvent], roster: &[RoleId], cutoff: DateTime<Utc>) 
     edges
 }
 
-/// Records the wait edge, keeping only the latest unanswered question for a pair.
+/// Records the wait edge, keeping only the latest unanswered question for a
+/// pair.
 fn upsert_edge(edges: &mut Vec<WaitEdge>, waiter: RoleId, blocker: RoleId, question: &StreamEvent) {
     if let Some(existing) = edges
         .iter_mut()
@@ -362,11 +386,12 @@ fn upsert_edge(edges: &mut Vec<WaitEdge>, waiter: RoleId, blocker: RoleId, quest
     });
 }
 
-/// Whether `blocker` sent `waiter` a non-question message after `since` (so it engaged).
+/// Whether `blocker` sent `waiter` a non-question message after `since` (so it
+/// engaged).
 ///
-/// A counter-question does not count: two agents asking each other and never answering
-/// is the deadlock, so only a substantive reply (an answer, status, note, ...) clears
-/// the wait.
+/// A counter-question does not count: two agents asking each other and never
+/// answering is the deadlock, so only a substantive reply (an answer, status,
+/// note, ...) clears the wait.
 fn answered_after(
     events: &[StreamEvent],
     blocker: &RoleId,
@@ -382,10 +407,11 @@ fn answered_after(
     })
 }
 
-/// The single agent a question is addressed to, if any: a direct target or a pair peer.
+/// The single agent a question is addressed to, if any: a direct target or a
+/// pair peer.
 ///
-/// A broadcast (`all-units`) has no single addressee and returns `None`, so it is treated
-/// as a wait for input rather than a directed wait on one agent.
+/// A broadcast (`all-units`) has no single addressee and returns `None`, so it
+/// is treated as a wait for input rather than a directed wait on one agent.
 fn addressee(channel: &str, asker: &RoleId) -> Option<RoleId> {
     match Channel::parse(channel)? {
         Channel::Direct(role) => Some(role),
@@ -398,10 +424,11 @@ fn addressee(channel: &str, asker: &RoleId) -> Option<RoleId> {
 
 /// The stalled-ledger stalls: a held task with no forward motion past `cutoff`.
 ///
-/// Covers a work-ledger claim (`kind: "ledger"`) left in `claimed` / `in_progress` /
-/// `blocked`, and a done-gate submission (`kind: "verification"`) left `submitted` with
-/// no verdict. A task's latest event decides its state; `done` / `passed` / `failed` free
-/// it, so a finished task never reads as stalled.
+/// Covers a work-ledger claim (`kind: "ledger"`) left in `claimed` /
+/// `in_progress` / `blocked`, and a done-gate submission (`kind:
+/// "verification"`) left `submitted` with no verdict. A task's latest event
+/// decides its state; `done` / `passed` / `failed` free it, so a finished task
+/// never reads as stalled.
 fn ledger_stalls(events: &[StreamEvent], cutoff: DateTime<Utc>, now: Timestamp) -> Vec<Stall> {
     let mut tasks: Vec<&StreamEvent> = Vec::new();
     for event in events {
@@ -435,7 +462,8 @@ fn is_held(event: &StreamEvent) -> bool {
     }
 }
 
-/// The specific description of a stalled task, naming the owner, state, and age.
+/// The specific description of a stalled task, naming the owner, state, and
+/// age.
 fn ledger_detail(event: &StreamEvent, now: Timestamp) -> String {
     let task = event.task.as_deref().unwrap_or("(unknown)");
     let age = humanize(now, event.ts);
@@ -455,7 +483,8 @@ fn ledger_detail(event: &StreamEvent, now: Timestamp) -> String {
     }
 }
 
-/// Whether `target` is reachable from `start` by following wait edges (a cycle test).
+/// Whether `target` is reachable from `start` by following wait edges (a cycle
+/// test).
 fn reaches(start: &RoleId, target: &RoleId, edges: &[WaitEdge]) -> bool {
     let mut frontier = vec![start.clone()];
     let mut seen: BTreeSet<RoleId> = BTreeSet::new();
@@ -473,7 +502,8 @@ fn reaches(start: &RoleId, target: &RoleId, edges: &[WaitEdge]) -> bool {
     false
 }
 
-/// Groups edges that share any role into connected components (one deadlock each).
+/// Groups edges that share any role into connected components (one deadlock
+/// each).
 fn components<'a>(edges: &[&'a WaitEdge]) -> Vec<Vec<&'a WaitEdge>> {
     let mut groups: Vec<Vec<&WaitEdge>> = Vec::new();
     for edge in edges {
@@ -509,14 +539,16 @@ fn is_agent(roster: &[RoleId], role: &RoleId) -> bool {
     roster.contains(role)
 }
 
-/// A sorted two-role vector, so a stall's identity does not depend on edge direction.
+/// A sorted two-role vector, so a stall's identity does not depend on edge
+/// direction.
 fn sorted_pair(a: &RoleId, b: &RoleId) -> Vec<RoleId> {
     let mut pair = vec![a.clone(), b.clone()];
     pair.sort();
     pair
 }
 
-/// A short, quoted rendering of a question's subject, defaulting when it is empty.
+/// A short, quoted rendering of a question's subject, defaulting when it is
+/// empty.
 fn describe_subject(subject: &str) -> String {
     let trimmed = subject.trim();
     if trimmed.is_empty() {
@@ -527,7 +559,8 @@ fn describe_subject(subject: &str) -> String {
     }
 }
 
-/// A rough human duration since `ts`, in minutes (or hours), for the escalation text.
+/// A rough human duration since `ts`, in minutes (or hours), for the escalation
+/// text.
 fn humanize(now: Timestamp, ts: Timestamp) -> String {
     let minutes = now
         .to_datetime()
@@ -541,17 +574,20 @@ fn humanize(now: Timestamp, ts: Timestamp) -> String {
     }
 }
 
-/// Converts a stall timeout into a `chrono` duration, saturating an absurd value.
+/// Converts a stall timeout into a `chrono` duration, saturating an absurd
+/// value.
 fn chrono_timeout(timeout: Duration) -> chrono::Duration {
     chrono::Duration::from_std(timeout).unwrap_or_else(|_| chrono::Duration::days(365))
 }
 
-/// The coordination-stall monitor: the fleet-wide half of the defibrillator (issue #48).
+/// The coordination-stall monitor: the fleet-wide half of the defibrillator
+/// (issue #48).
 ///
-/// A background thread scans the broker's recent history on a timer and escalates each
-/// new stall it finds, so a crew stuck waiting on itself is caught the way a dead agent
-/// is. It records the stalls (read with [`Fleet::stalls`](crate::Fleet::stalls)) and logs
-/// a specific warning the operator sees, and re-escalates a stall only after it resolves.
+/// A background thread scans the broker's recent history on a timer and
+/// escalates each new stall it finds, so a crew stuck waiting on itself is
+/// caught the way a dead agent is. It records the stalls (read with
+/// [`Fleet::stalls`](crate::Fleet::stalls)) and logs a specific warning the
+/// operator sees, and re-escalates a stall only after it resolves.
 pub(crate) struct StallMonitor {
     /// A broker client, for reading the recent event history.
     roster: RosterClient,
@@ -566,7 +602,8 @@ pub(crate) struct StallMonitor {
 }
 
 impl StallMonitor {
-    /// Builds a monitor over `roster`, watching `roles` against the policy's thresholds.
+    /// Builds a monitor over `roster`, watching `roles` against the policy's
+    /// thresholds.
     pub(crate) fn new(
         roster: RosterClient,
         roles: Vec<RoleId>,
@@ -583,7 +620,8 @@ impl StallMonitor {
         }
     }
 
-    /// Runs the scan loop until `stop` fires (or the fleet drops, disconnecting it).
+    /// Runs the scan loop until `stop` fires (or the fleet drops, disconnecting
+    /// it).
     pub(crate) fn run(self, stop: &Receiver<()>) {
         // Stalls already escalated, so a persistent one is reported once; a stall that
         // clears is forgotten, so a recurrence is escalated afresh.
@@ -593,7 +631,8 @@ impl StallMonitor {
         }
     }
 
-    /// One scan: read the recent history, detect stalls, and escalate the new ones.
+    /// One scan: read the recent history, detect stalls, and escalate the new
+    /// ones.
     fn scan(&self, reported: &mut BTreeSet<String>) {
         let events = match self.roster.history_since(self.lookback_start()) {
             Ok(events) => events,
@@ -621,16 +660,18 @@ impl StallMonitor {
         *self.stalls.lock().unwrap_or_else(PoisonError::into_inner) = stalls;
     }
 
-    /// The start of the history window to scan: far enough back to see a wait that first
-    /// crossed the threshold, bounded so a scan reads a bounded slice of the log.
+    /// The start of the history window to scan: far enough back to see a wait
+    /// that first crossed the threshold, bounded so a scan reads a bounded
+    /// slice of the log.
     fn lookback_start(&self) -> Timestamp {
         let lookback = self.timeout.checked_mul(3).unwrap_or(self.timeout);
         (Timestamp::now().to_datetime() - chrono_timeout(lookback)).into()
     }
 }
 
-/// Escalates one newly detected stall to the operator: a specific warning the General
-/// sees in the `crew up` foreground, naming the exact cause rather than a generic timeout.
+/// Escalates one newly detected stall to the operator: a specific warning the
+/// General sees in the `crew up` foreground, naming the exact cause rather than
+/// a generic timeout.
 fn escalate(stall: &Stall) {
     event!(
         name: "supervisor.stall.detected",
@@ -644,10 +685,12 @@ fn escalate(stall: &Stall) {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_stalls, StallKind};
+    use std::time::Duration;
+
     use crew_core::{RoleId, Timestamp};
     use serde_json::{json, Value};
-    use std::time::Duration;
+
+    use super::{detect_stalls, StallKind};
 
     /// A fixed "now", with helpers to build events at a chosen age.
     fn now() -> Timestamp {

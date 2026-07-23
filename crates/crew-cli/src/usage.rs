@@ -1,21 +1,23 @@
 //! `crew usage`: the shared-subscription usage gauge (issue #56).
 //!
-//! Reads the broker's one shared gauge (`GET /usage`) and prints it: the latest reading,
-//! the auto-pause threshold, and whether new work is paused (and until when). The crew
-//! shares one subscription, so the gauge is crew-wide. When usage crosses the threshold the
-//! broker pauses new work until the window resets; `crew resume` lifts the pause early. The
-//! broker address comes from `--broker`, else the `CREW_BROKER_*` environment.
+//! Reads the broker's one shared gauge (`GET /usage`) and prints it: the latest
+//! reading, the auto-pause threshold, and whether new work is paused (and until
+//! when). The crew shares one subscription, so the gauge is crew-wide. When
+//! usage crosses the threshold the broker pauses new work until the window
+//! resets; `crew resume` lifts the pause early. The broker address comes from
+//! `--broker`, else the `CREW_BROKER_*` environment.
 
 use eyre::{eyre, Result, WrapErr};
 use serde_json::Value;
 
 use crate::broker::resolve_base;
 
-/// Prints the shared-subscription usage gauge: the reading, the threshold, and any pause.
+/// Prints the shared-subscription usage gauge: the reading, the threshold, and
+/// any pause.
 ///
 /// # Errors
-/// Returns an error if the broker configuration is invalid, or the broker cannot be reached
-/// or returns a malformed gauge.
+/// Returns an error if the broker configuration is invalid, or the broker
+/// cannot be reached or returns a malformed gauge.
 pub fn usage(broker: Option<&str>) -> Result<()> {
     let base = resolve_base(broker)?;
     let url = format!("{base}/usage");

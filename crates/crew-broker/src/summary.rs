@@ -1,15 +1,16 @@
 //! The rolling-summary compaction behind `GET /history?summary=true`.
 //!
-//! A late joiner should not read the whole transcript to catch up, the failure mode
-//! of the old file transport (see `docs/communication.md`). This module folds a slice
-//! of older events into a [`HistorySummary`]: bounded aggregates (who spoke, of what
-//! kind, on which lifecycle transitions) plus a capped digest of the most recent
-//! orders and artifacts. The history handler pairs it with the raw recent tail, so the
-//! cost of joining is bounded no matter how long the conversation has run.
+//! A late joiner should not read the whole transcript to catch up, the failure
+//! mode of the old file transport (see `docs/communication.md`). This module
+//! folds a slice of older events into a [`HistorySummary`]: bounded aggregates
+//! (who spoke, of what kind, on which lifecycle transitions) plus a capped
+//! digest of the most recent orders and artifacts. The history handler pairs it
+//! with the raw recent tail, so the cost of joining is bounded no matter how
+//! long the conversation has run.
 //!
-//! The summary is a deterministic projection of the typed event stream, not an LLM
-//! rendering: the broker has no model, and typed events compact cleanly on their own.
-//! A front-end or agent can render or expand the structured result.
+//! The summary is a deterministic projection of the typed event stream, not an
+//! LLM rendering: the broker has no model, and typed events compact cleanly on
+//! their own. A front-end or agent can render or expand the structured result.
 
 use std::collections::BTreeMap;
 
@@ -18,20 +19,23 @@ use serde::Serialize;
 
 /// The most recent orders and artifacts named individually in a summary.
 ///
-/// Older ones fold into the counts, so the summary stays bounded no matter how long
-/// the log grows: raising this trades a larger response for more named recent detail.
+/// Older ones fold into the counts, so the summary stays bounded no matter how
+/// long the log grows: raising this trades a larger response for more named
+/// recent detail.
 const MAX_DIGEST_ITEMS: usize = 10;
 
 /// A bounded compaction of older events: what a late joiner missed, in brief.
 ///
-/// Every field is bounded independently of the event count: the tallies by the small
-/// cardinality of senders, message kinds, and lifecycle states; the digests by
-/// [`MAX_DIGEST_ITEMS`]. This is what keeps joining a long conversation cheap.
+/// Every field is bounded independently of the event count: the tallies by the
+/// small cardinality of senders, message kinds, and lifecycle states; the
+/// digests by [`MAX_DIGEST_ITEMS`]. This is what keeps joining a long
+/// conversation cheap.
 #[derive(Debug, Serialize)]
 pub(crate) struct HistorySummary {
     /// How many older events this summary stands in for.
     pub event_count: usize,
-    /// The earliest event timestamp covered, absent when nothing was summarized.
+    /// The earliest event timestamp covered, absent when nothing was
+    /// summarized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<Timestamp>,
     /// The latest event timestamp covered (the boundary before the tail).
@@ -41,12 +45,15 @@ pub(crate) struct HistorySummary {
     pub headline: String,
     /// Message and event counts per sender, most active first.
     pub senders: Vec<Tally>,
-    /// Message counts per kind (order, question, status, ...), most frequent first.
+    /// Message counts per kind (order, question, status, ...), most frequent
+    /// first.
     pub message_kinds: Vec<Tally>,
-    /// Lifecycle transition counts (started, idle, ...), omitted when there were none.
+    /// Lifecycle transition counts (started, idle, ...), omitted when there
+    /// were none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lifecycle: Vec<Tally>,
-    /// The most recent orders (handoffs), oldest first, capped at [`MAX_DIGEST_ITEMS`].
+    /// The most recent orders (handoffs), oldest first, capped at
+    /// [`MAX_DIGEST_ITEMS`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_orders: Vec<OrderDigest>,
     /// The most recent artifacts, oldest first, capped at [`MAX_DIGEST_ITEMS`].
@@ -54,7 +61,8 @@ pub(crate) struct HistorySummary {
     pub recent_artifacts: Vec<ArtifactDigest>,
 }
 
-/// A name and how many events carried it (a sender, a message kind, a lifecycle state).
+/// A name and how many events carried it (a sender, a message kind, a lifecycle
+/// state).
 #[derive(Debug, Serialize)]
 pub(crate) struct Tally {
     /// The name being counted.
@@ -85,8 +93,9 @@ pub(crate) struct ArtifactDigest {
 
 /// Folds `events` (oldest first) into a bounded [`HistorySummary`].
 ///
-/// Expects the events already ordered by time, as the history query returns them, so
-/// `since` and `through` are the first and last, and the digests keep the most recent.
+/// Expects the events already ordered by time, as the history query returns
+/// them, so `since` and `through` are the first and last, and the digests keep
+/// the most recent.
 pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
     let mut senders: BTreeMap<String, usize> = BTreeMap::new();
     let mut message_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -163,8 +172,8 @@ pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
 
 /// Ranks a count map into tallies, most frequent first, ties broken by name.
 ///
-/// The name tiebreak makes the order deterministic, so the response is stable across
-/// requests over the same events.
+/// The name tiebreak makes the order deterministic, so the response is stable
+/// across requests over the same events.
 fn ranked<K: Into<String>>(counts: impl IntoIterator<Item = (K, usize)>) -> Vec<Tally> {
     let mut tallies: Vec<Tally> = counts
         .into_iter()
@@ -177,7 +186,8 @@ fn ranked<K: Into<String>>(counts: impl IntoIterator<Item = (K, usize)>) -> Vec<
     tallies
 }
 
-/// Keeps the most recent [`MAX_DIGEST_ITEMS`], dropping older ones from the front.
+/// Keeps the most recent [`MAX_DIGEST_ITEMS`], dropping older ones from the
+/// front.
 ///
 /// Events arrive oldest first, so the most recent items sit at the tail.
 fn keep_recent<T>(mut items: Vec<T>) -> Vec<T> {
@@ -263,11 +273,12 @@ fn lifecycle_label(state: Lifecycle) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{summarize, MAX_DIGEST_ITEMS};
     use crew_core::{
         ArtifactKind, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind,
         RoleId, Sender, Timestamp,
     };
+
+    use super::{summarize, MAX_DIGEST_ITEMS};
 
     fn ts(seconds: u32) -> Timestamp {
         serde_json::from_str(&format!("\"2020-01-01T00:00:{seconds:02}Z\"")).unwrap()

@@ -1,17 +1,19 @@
-//! The crew token budget: a crew-wide ceiling and per-role caps, so a crew cannot quietly
-//! burn a fortune (issue #54).
+//! The crew token budget: a crew-wide ceiling and per-role caps, so a crew
+//! cannot quietly burn a fortune (issue #54).
 //!
 //! A [`Budget`] is the crew's spend accountant. Built from the crew config
-//! ([`CrewConfig::budget`](crate::CrewConfig::budget)), it tracks cumulative token spend
-//! per role and crew-wide, and each [`record`](Budget::record) reports the running totals
-//! and whether the spend just crossed a cap. The supervisor holds one, feeds it each
-//! turn's token usage, and on a breach idle-stops the role (a per-role cap) or the whole
-//! crew (the crew-wide budget) rather than overrun, surfacing the moment on the event
-//! stream so a cap is never hit silently (see `docs/observability.md`).
+//! ([`CrewConfig::budget`](crate::CrewConfig::budget)), it tracks cumulative
+//! token spend per role and crew-wide, and each [`record`](Budget::record)
+//! reports the running totals and whether the spend just crossed a cap. The
+//! supervisor holds one, feeds it each turn's token usage, and on a breach
+//! idle-stops the role (a per-role cap) or the whole crew (the crew-wide
+//! budget) rather than overrun, surfacing the moment on the event stream so a
+//! cap is never hit silently (see `docs/observability.md`).
 //!
-//! The shape follows the Workflow budget pattern: a total, the spend so far, and the
-//! remaining headroom, with the cap a hard bound. The accountant is pure and free of I/O,
-//! so enforcement is decided here and applied by the supervisor.
+//! The shape follows the Workflow budget pattern: a total, the spend so far,
+//! and the remaining headroom, with the cap a hard bound. The accountant is
+//! pure and free of I/O, so enforcement is decided here and applied by the
+//! supervisor.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,11 +31,12 @@ pub enum BudgetScope {
     Crew,
 }
 
-/// The result of recording a role's token spend: the running totals and any cap it hit.
+/// The result of recording a role's token spend: the running totals and any cap
+/// it hit.
 ///
 /// The supervisor turns this into a `budget` event on the stream and, when
-/// [`breach`](Spend::breach) is set, idle-stops the role or the crew. A `None` breach is a
-/// spend report still within budget.
+/// [`breach`](Spend::breach) is set, idle-stops the role or the crew. A `None`
+/// breach is a spend report still within budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spend {
     /// The role whose turn this spend belongs to.
@@ -46,22 +49,27 @@ pub struct Spend {
     pub crew_spent: u64,
     /// The crew-wide budget, if the crew has one.
     pub crew_budget: Option<u64>,
-    /// The ceiling this spend newly crossed, if any: the trigger to idle-stop and surface.
-    /// `None` when still within budget or already over (so a cap acts once, not on every
-    /// later record). The crew budget takes precedence over a role cap crossed at once.
+    /// The ceiling this spend newly crossed, if any: the trigger to idle-stop
+    /// and surface. `None` when still within budget or already over (so a
+    /// cap acts once, not on every later record). The crew budget takes
+    /// precedence over a role cap crossed at once.
     pub breach: Option<BudgetScope>,
 }
 
-/// A crew's token budget: a crew-wide ceiling and optional per-role caps (issue #54).
+/// A crew's token budget: a crew-wide ceiling and optional per-role caps (issue
+/// #54).
 ///
-/// Build one from the crew config with [`CrewConfig::budget`](crate::CrewConfig::budget),
-/// or directly with [`new`](Budget::new). Feed it each turn's spend with
-/// [`record`](Budget::record); read the standing with the query methods. A crew with no
-/// crew-wide budget and no per-role cap is unbounded and never breaches.
+/// Build one from the crew config with
+/// [`CrewConfig::budget`](crate::CrewConfig::budget), or directly with
+/// [`new`](Budget::new). Feed it each turn's spend with
+/// [`record`](Budget::record); read the standing with the query methods. A crew
+/// with no crew-wide budget and no per-role cap is unbounded and never
+/// breaches.
 ///
 /// # Examples
 /// ```
 /// use std::collections::BTreeMap;
+///
 /// use crew_core::{Budget, BudgetScope, RoleId};
 ///
 /// let backend = RoleId::new("backend");
@@ -70,7 +78,10 @@ pub struct Spend {
 /// assert!(budget.record(&backend, 600).breach.is_none());
 /// // The next spend reaches the cap: the role is over and the breach is surfaced once.
 /// assert_eq!(budget.record(&backend, 500).breach, Some(BudgetScope::Role));
-/// assert!(budget.record(&backend, 100).breach.is_none(), "a cap acts once");
+/// assert!(
+///     budget.record(&backend, 100).breach.is_none(),
+///     "a cap acts once"
+/// );
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Budget {
@@ -99,11 +110,13 @@ impl Budget {
         }
     }
 
-    /// Records `tokens` of spend for `role`, returning the running totals and any breach.
+    /// Records `tokens` of spend for `role`, returning the running totals and
+    /// any breach.
     ///
-    /// The returned [`Spend`] carries a [`breach`](Spend::breach) only the first time a
-    /// ceiling is crossed, so the caller idle-stops and surfaces the moment once. The crew
-    /// budget takes precedence over a role cap crossed by the same spend.
+    /// The returned [`Spend`] carries a [`breach`](Spend::breach) only the
+    /// first time a ceiling is crossed, so the caller idle-stops and
+    /// surfaces the moment once. The crew budget takes precedence over a
+    /// role cap crossed by the same spend.
     pub fn record(&mut self, role: &RoleId, tokens: u64) -> Spend {
         let role_spent = {
             let entry = self.spent.entry(role.clone()).or_default();
@@ -129,17 +142,19 @@ impl Budget {
         }
     }
 
-    /// The scope a spend newly drove over its ceiling, flagging it so it fires once.
+    /// The scope a spend newly drove over its ceiling, flagging it so it fires
+    /// once.
     ///
-    /// The crew budget wins when both are crossed at once, since idle-stopping the crew
-    /// subsumes idle-stopping the role.
+    /// The crew budget wins when both are crossed at once, since idle-stopping
+    /// the crew subsumes idle-stopping the role.
     fn newly_breached(
         &mut self,
         role: &RoleId,
         crew_over: bool,
         role_over: bool,
     ) -> Option<BudgetScope> {
-        // Flag the role either way once it is over, so a later spend does not re-fire it.
+        // Flag the role either way once it is over, so a later spend does not re-fire
+        // it.
         let role_newly = role_over && self.flagged.insert(role.clone());
         if crew_over && !self.crew_flagged {
             self.crew_flagged = true;
@@ -148,10 +163,11 @@ impl Budget {
         role_newly.then_some(BudgetScope::Role)
     }
 
-    /// Whether the crew has any ceiling at all: a crew-wide budget or a per-role cap.
+    /// Whether the crew has any ceiling at all: a crew-wide budget or a
+    /// per-role cap.
     ///
-    /// An unbounded crew never breaches, so the supervisor skips recording and reporting
-    /// its spend rather than emit a report against no budget.
+    /// An unbounded crew never breaches, so the supervisor skips recording and
+    /// reporting its spend rather than emit a report against no budget.
     #[must_use]
     pub fn is_bounded(&self) -> bool {
         self.crew_ceiling.is_some() || !self.caps.is_empty()
@@ -182,7 +198,8 @@ impl Budget {
         self.spent.get(role).copied().unwrap_or(0)
     }
 
-    /// A role's remaining headroom under its own cap, or `None` when it is uncapped.
+    /// A role's remaining headroom under its own cap, or `None` when it is
+    /// uncapped.
     #[must_use]
     pub fn role_remaining(&self, role: &RoleId) -> Option<u64> {
         self.caps
@@ -251,7 +268,8 @@ mod tests {
         let mut budget = Budget::new(Some(1_000), BTreeMap::new());
 
         assert_eq!(budget.record(&backend, 600).breach, None);
-        // The crew total (600 + 400) reaches the crew budget, though no single role did.
+        // The crew total (600 + 400) reaches the crew budget, though no single role
+        // did.
         assert_eq!(
             budget.record(&frontend, 400).breach,
             Some(BudgetScope::Crew)
@@ -269,7 +287,8 @@ mod tests {
         let backend = role("backend");
         let mut budget = Budget::new(Some(1_000), BTreeMap::from([(backend.clone(), 1_000)]));
 
-        // A single spend crosses both ceilings; the crew scope wins (it stops the crew).
+        // A single spend crosses both ceilings; the crew scope wins (it stops the
+        // crew).
         assert_eq!(
             budget.record(&backend, 1_000).breach,
             Some(BudgetScope::Crew)

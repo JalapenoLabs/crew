@@ -1,24 +1,27 @@
 //! The broker's event storage: a swappable [`Storage`] trait and its backends.
 //!
-//! [`Storage`] is the one surface the broker depends on; it never names a concrete
-//! backend, so a durable log today can become `SQLite` or Postgres later without
-//! touching a handler. Two backends ship now:
+//! [`Storage`] is the one surface the broker depends on; it never names a
+//! concrete backend, so a durable log today can become `SQLite` or Postgres
+//! later without touching a handler. Two backends ship now:
 //!
 //! - [`MemoryStore`] keeps everything in memory, for tests and ephemeral use.
-//! - [`LogStore`] persists to an on-disk append-only log (JSON per line) with an
-//!   in-memory index, so a restart replays the log and no event is lost.
+//! - [`LogStore`] persists to an on-disk append-only log (JSON per line) with
+//!   an in-memory index, so a restart replays the log and no event is lost.
 //!
 //! The trait covers the whole persisted surface: [`append`](Storage::append) an
-//! event, [`query`](Storage::query) the log with filters and a stable page cursor,
-//! read every event, and read or write the [`Roster`]. `query` has a default that
-//! scans the in-memory index; a backend with a real index (a database) overrides it
-//! to push the filter down, which is why the query types here stay backend-neutral.
+//! event, [`query`](Storage::query) the log with filters and a stable page
+//! cursor, read every event, and read or write the [`Roster`]. `query` has a
+//! default that scans the in-memory index; a backend with a real index (a
+//! database) overrides it to push the filter down, which is why the query types
+//! here stay backend-neutral.
 
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::{
+    collections::BTreeMap,
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{Mutex, PoisonError},
+};
 
 use crew_core::{Channel, ChannelId, Event, EventKind, RoleId, Sender, TaskId, Timestamp};
 use eyre::{Result, WrapErr};
@@ -33,20 +36,23 @@ const ROSTER_FILE: &str = "roster.json";
 
 /// The pluggable backend the broker keeps its event log and roster in.
 ///
-/// Kept behind a trait so the backend is swappable (see `docs/architecture.md`): the
-/// broker holds a `dyn Storage` and never a concrete type, so a database backend can
-/// drop in later. The query types ([`EventQuery`], [`EventPage`]) are backend-neutral
-/// for the same reason. The rolling-summary read (issue #19) is a projection over
-/// [`query`](Storage::query); physically pruning aged-out events is a later ticket.
+/// Kept behind a trait so the backend is swappable (see
+/// `docs/architecture.md`): the broker holds a `dyn Storage` and never a
+/// concrete type, so a database backend can drop in later. The query types
+/// ([`EventQuery`], [`EventPage`]) are backend-neutral for the same reason. The
+/// rolling-summary read (issue #19) is a projection over
+/// [`query`](Storage::query); physically pruning aged-out events is a later
+/// ticket.
 pub trait Storage: std::fmt::Debug + Send + Sync {
     /// A short, stable name for the backend, such as `memory` or `log`.
     fn backend(&self) -> &'static str;
 
     /// The sequence number the next appended event will receive.
     ///
-    /// Equal to the current event count, so an event's sequence is its position in
-    /// the log. It is the cursor the inbox stream hands out as a `Last-Event-ID`,
-    /// letting a reconnecting subscriber resume exactly after the last event it saw.
+    /// Equal to the current event count, so an event's sequence is its position
+    /// in the log. It is the cursor the inbox stream hands out as a
+    /// `Last-Event-ID`, letting a reconnecting subscriber resume exactly
+    /// after the last event it saw.
     fn next_seq(&self) -> u64;
 
     /// Appends an event to the log.
@@ -58,13 +64,16 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Returns the current roster.
     fn roster(&self) -> Roster;
 
-    /// Registers or updates a role in the roster, returning whether it was present.
+    /// Registers or updates a role in the roster, returning whether it was
+    /// present.
     ///
-    /// Atomic: the read, update, and (for a durable backend) persist happen under one
-    /// lock, so concurrent registrations of different roles never lose each other.
+    /// Atomic: the read, update, and (for a durable backend) persist happen
+    /// under one lock, so concurrent registrations of different roles never
+    /// lose each other.
     fn register_role(&self, role: RoleId, status: RoleStatus) -> bool;
 
-    /// Removes a role from the roster, returning its prior status if it was present.
+    /// Removes a role from the roster, returning its prior status if it was
+    /// present.
     ///
     /// Atomic, like [`register_role`](Storage::register_role).
     fn deregister_role(&self, role: &RoleId) -> Option<RoleStatus>;
@@ -72,11 +81,12 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Returns one filtered, ordered page of events (see [`EventQuery`]).
     ///
     /// The default scans the in-memory index via [`events`](Storage::events). A
-    /// backend with its own index should override this to push the filter and paging
-    /// down to the store.
+    /// backend with its own index should override this to push the filter and
+    /// paging down to the store.
     ///
     /// # Errors
-    /// Returns [`InvalidCursor`] if the query's `after` cursor is not a stored position.
+    /// Returns [`InvalidCursor`] if the query's `after` cursor is not a stored
+    /// position.
     fn query(&self, query: &EventQuery) -> Result<EventPage, InvalidCursor> {
         query_events(&self.events(), query)
     }
@@ -85,8 +95,8 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
 /// A role's liveness: the current-state projection of its lifecycle events.
 ///
 /// Maps onto the [`Lifecycle`](crew_core::Lifecycle) transitions on the stream:
-/// `working` is up and active, `idle` has no work in flight, `stopped` left cleanly,
-/// and `dead` died unexpectedly (a defibrillator recovery point).
+/// `working` is up and active, `idle` has no work in flight, `stopped` left
+/// cleanly, and `dead` died unexpectedly (a defibrillator recovery point).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Liveness {
@@ -112,8 +122,8 @@ pub struct RoleStatus {
 /// The roles the crew knows about, each with its owned paths and liveness.
 ///
 /// The substrate for the live agent count (issue #14): register a role on join,
-/// deregister on leave, and read the current membership. A durable backend persists
-/// it across a restart.
+/// deregister on leave, and read the current membership. A durable backend
+/// persists it across a restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roster {
     /// The known roles, keyed and sorted by id for a stable on-disk form.
@@ -236,8 +246,9 @@ pub struct EventFilter {
     pub channel: Option<ChannelId>,
     /// Keep only events sent by this role.
     pub role: Option<RoleId>,
-    /// Keep only events on this role's activity timeline: the ones it sent (messages,
-    /// its lifecycle, its activity) plus the messages addressed to it (issue #30).
+    /// Keep only events on this role's activity timeline: the ones it sent
+    /// (messages, its lifecycle, its activity) plus the messages addressed
+    /// to it (issue #30).
     pub agent: Option<RoleId>,
     /// Keep only events of this kind.
     pub kind: Option<EventKindTag>,
@@ -250,9 +261,10 @@ pub struct EventFilter {
 impl EventFilter {
     /// Whether `event` satisfies every set filter.
     ///
-    /// The store applies it to the log for `GET /history`; the live `GET /stream`
-    /// applies the same test to each fanned-out event, so a filtered live
-    /// subscription and a filtered history read agree on the view (issue #31).
+    /// The store applies it to the log for `GET /history`; the live `GET
+    /// /stream` applies the same test to each fanned-out event, so a
+    /// filtered live subscription and a filtered history read agree on the
+    /// view (issue #31).
     pub(crate) fn matches(&self, event: &Event) -> bool {
         if let Some(since) = self.since {
             if event.ts < since {
@@ -293,7 +305,8 @@ impl EventFilter {
 pub struct EventQuery {
     /// Which events to keep.
     pub filter: EventFilter,
-    /// Resume after this log position (from a previous page's [`EventPage::next`]).
+    /// Resume after this log position (from a previous page's
+    /// [`EventPage::next`]).
     pub after: Option<u64>,
     /// The maximum number of events to return.
     pub limit: usize,
@@ -314,9 +327,10 @@ pub struct InvalidCursor;
 
 /// Runs a query over an in-memory event slice, the scan both backends share.
 ///
-/// Orders matches by `(ts, position)`, a total order the cursor resumes from: since
-/// the log is append-only, a position never moves, so paging stays stable under
-/// concurrent writes. Returns the page and the position to resume after, if any.
+/// Orders matches by `(ts, position)`, a total order the cursor resumes from:
+/// since the log is append-only, a position never moves, so paging stays stable
+/// under concurrent writes. Returns the page and the position to resume after,
+/// if any.
 fn query_events(events: &[Event], query: &EventQuery) -> Result<EventPage, InvalidCursor> {
     // Resolve the cursor to the `(ts, position)` boundary to resume strictly after.
     let boundary = match query.after {
@@ -352,7 +366,8 @@ fn query_events(events: &[Event], query: &EventQuery) -> Result<EventPage, Inval
     Ok(EventPage { events: page, next })
 }
 
-/// Whether `channel` matches the `filter`, treating a pair channel as order-independent.
+/// Whether `channel` matches the `filter`, treating a pair channel as
+/// order-independent.
 fn channel_matches(channel: &ChannelId, filter: &ChannelId) -> bool {
     if channel == filter {
         return true;
@@ -368,9 +383,9 @@ fn channel_matches(channel: &ChannelId, filter: &ChannelId) -> bool {
 
 /// The default in-memory event store, for tests and ephemeral use.
 ///
-/// Holds the log and roster in memory behind mutexes; nothing survives a restart
-/// (use [`LogStore`] for durability). A poisoned lock is recovered rather than
-/// panicked, so a bad request can never take the store down.
+/// Holds the log and roster in memory behind mutexes; nothing survives a
+/// restart (use [`LogStore`] for durability). A poisoned lock is recovered
+/// rather than panicked, so a bad request can never take the store down.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     events: Mutex<Vec<Event>>,
@@ -437,12 +452,12 @@ struct Log {
 
 /// A durable event store: an on-disk append-only log with an in-memory index.
 ///
-/// The log is one JSON-encoded [`Event`] per line. [`open`](LogStore::open) replays
-/// the file into memory, so a restart restores the full log; each append updates the
-/// index and writes one line under a single lock. The roster persists to its own
-/// file, rewritten atomically on each change. A torn or unreadable line (for example
-/// a partial write from a crash) is skipped on replay so one bad line never loses the
-/// rest of the log.
+/// The log is one JSON-encoded [`Event`] per line. [`open`](LogStore::open)
+/// replays the file into memory, so a restart restores the full log; each
+/// append updates the index and writes one line under a single lock. The roster
+/// persists to its own file, rewritten atomically on each change. A torn or
+/// unreadable line (for example a partial write from a crash) is skipped on
+/// replay so one bad line never loses the rest of the log.
 #[derive(Debug)]
 pub struct LogStore {
     log: Mutex<Log>,
@@ -454,7 +469,8 @@ impl LogStore {
     /// Opens (creating if needed) the store rooted at `dir`, replaying its log.
     ///
     /// # Errors
-    /// Returns an error if the directory or files cannot be created, read, or opened.
+    /// Returns an error if the directory or files cannot be created, read, or
+    /// opened.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)
@@ -629,7 +645,8 @@ fn read_roster(path: &Path) -> Result<Roster> {
 }
 
 /// Persists the roster, logging (not propagating) a write failure so a roster
-/// change never fails the request; the change stays in memory until the disk recovers.
+/// change never fails the request; the change stays in memory until the disk
+/// recovers.
 fn save_roster(path: &Path, roster: &Roster) {
     if let Err(err) = persist_roster(path, roster) {
         event!(
@@ -653,8 +670,10 @@ fn persist_roster(path: &Path, roster: &Roster) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use crew_core::{
         ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId, Sender,

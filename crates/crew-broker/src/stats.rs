@@ -1,24 +1,29 @@
 //! The usage endpoints: report a turn's spend, and read the rollup (issue #55).
 //!
-//! `POST /telemetry` records a role's per-turn token-and-cost usage as a `telemetry` event
-//! on the stream (from the role, to `all-units`), so per-role and aggregate spend is legible
-//! off the stream regardless of any budget. `GET /stats` reads the rollup the broker folds
-//! from those `telemetry` events (tokens, cost) and the roles' `lifecycle` events (working
-//! time): cost, tokens, and time per role and in aggregate, so the cockpit and the Seraphim
-//! stats show spend live. The idle-stop that keeps that time bounded is the supervisor's
-//! lifecycle machine (issue #22).
+//! `POST /telemetry` records a role's per-turn token-and-cost usage as a
+//! `telemetry` event on the stream (from the role, to `all-units`), so per-role
+//! and aggregate spend is legible off the stream regardless of any budget. `GET
+//! /stats` reads the rollup the broker folds from those `telemetry` events
+//! (tokens, cost) and the roles' `lifecycle` events (working time): cost,
+//! tokens, and time per role and in aggregate, so the cockpit and the Seraphim
+//! stats show spend live. The idle-stop that keeps that time bounded is the
+//! supervisor's lifecycle machine (issue #22).
 
-use axum::extract::State;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use crew_core::{
     ChannelId, Event, EventKind, RoleId, Sender, TelemetryEvent, Timestamp, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::{AppState, RoleStatsView};
+use crate::{
+    error::ApiError,
+    events::JsonBody,
+    state::{AppState, RoleStatsView},
+};
 
 /// The usage routes: report a turn's spend, and read the rollup.
 pub(crate) fn routes() -> Router<AppState> {
@@ -29,8 +34,9 @@ pub(crate) fn routes() -> Router<AppState> {
 
 /// The `POST /telemetry` body: a role's per-turn token-and-cost usage.
 ///
-/// The supervisor supplies each turn's counts (the token feed is the stream-json activity
-/// parser, issue #24); the broker stamps the timestamp and publishes it.
+/// The supervisor supplies each turn's counts (the token feed is the
+/// stream-json activity parser, issue #24); the broker stamps the timestamp and
+/// publishes it.
 #[derive(Debug, Deserialize)]
 struct UsageReport {
     /// The role whose turn this usage belongs to.
@@ -90,7 +96,8 @@ struct StatsView {
     aggregate: Totals,
 }
 
-/// `GET /stats`: the cost / tokens / time rollup, per role and in aggregate (issue #55).
+/// `GET /stats`: the cost / tokens / time rollup, per role and in aggregate
+/// (issue #55).
 async fn read(State(state): State<AppState>) -> Json<StatsView> {
     let roles = state.stats_snapshot(Timestamp::now());
     let aggregate = roles.iter().fold(
@@ -111,14 +118,14 @@ async fn read(State(state): State<AppState>) -> Json<StatsView> {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn send(state: &AppState, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
         let request = Request::builder()

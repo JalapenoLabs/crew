@@ -1,23 +1,21 @@
-//! The budget endpoint: report a role's token spend against the crew budget (issue #54).
+//! The budget endpoint: report a role's token spend against the crew budget
+//! (issue #54).
 //!
-//! The supervisor holds the crew's token [`Budget`](crew_core::Budget) and records each
-//! turn's spend against it. This endpoint is the surface: `POST /budget` records a spend
-//! report as a `budget` event on the stream (from the role, to `all-units`), so a UI reads
-//! spend against budget off the stream and a cap hit is never silent. When the report
-//! carries a `breach`, it marks the moment the supervisor idle-stops the role or the crew
-//! rather than overrun (see `docs/observability.md`).
+//! The supervisor holds the crew's token [`Budget`](crew_core::Budget) and
+//! records each turn's spend against it. This endpoint is the surface: `POST
+//! /budget` records a spend report as a `budget` event on the stream (from the
+//! role, to `all-units`), so a UI reads spend against budget off the stream and
+//! a cap hit is never silent. When the report carries a `breach`, it marks the
+//! moment the supervisor idle-stops the role or the crew rather than overrun
+//! (see `docs/observability.md`).
 
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::{extract::State, routing::post, Json, Router};
 use crew_core::{
     BudgetEvent, BudgetScope, ChannelId, Event, EventKind, RoleId, Sender, Timestamp, ALL_UNITS,
 };
 use serde::Deserialize;
 
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::AppState;
+use crate::{error::ApiError, events::JsonBody, state::AppState};
 
 /// The budget route: report a role's spend against the crew budget.
 pub(crate) fn routes() -> Router<AppState> {
@@ -27,7 +25,8 @@ pub(crate) fn routes() -> Router<AppState> {
 /// The `POST /budget` body: a role's token spend against the crew budget.
 ///
 /// The supervisor supplies the running totals it computed from the crew's
-/// [`Budget`](crew_core::Budget); the broker stamps the timestamp and publishes it.
+/// [`Budget`](crew_core::Budget); the broker stamps the timestamp and publishes
+/// it.
 #[derive(Debug, Deserialize)]
 struct BudgetReport {
     /// The role whose spend this report is about.
@@ -80,15 +79,15 @@ async fn report(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{BudgetScope, EventKind};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn post(state: &AppState, body: Value) -> (StatusCode, Value) {
         let request = Request::builder()

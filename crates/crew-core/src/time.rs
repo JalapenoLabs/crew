@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// A UTC instant on the crew event timeline.
 ///
-/// Wraps a [`chrono::DateTime<Utc>`] so a timestamp is its own type rather than a
-/// bare integer or string, and so the wire format is fixed: it serializes as an
-/// RFC 3339 string. Ordered, so events sort chronologically.
+/// Wraps a [`chrono::DateTime<Utc>`] so a timestamp is its own type rather than
+/// a bare integer or string, and so the wire format is fixed: it serializes as
+/// an RFC 3339 string. Ordered, so events sort chronologically.
 ///
 /// # Examples
 /// ```

@@ -1,10 +1,10 @@
 //! The MCP server: a JSON-RPC 2.0 loop over stdio exposing the crew tools.
 //!
-//! Speaks the Model Context Protocol over newline-delimited stdio so a Claude Code
-//! (or Codex) agent can call [`crew_send`], [`crew_inbox`], and [`crew_roster`]. It
-//! handles the `initialize` handshake, `tools/list`, and `tools/call`, dispatching a
-//! call to the [`Broker`](crate::Broker) client. The tool docs are written for the
-//! agent to get the call right the first try.
+//! Speaks the Model Context Protocol over newline-delimited stdio so a Claude
+//! Code (or Codex) agent can call [`crew_send`], [`crew_inbox`], and
+//! [`crew_roster`]. It handles the `initialize` handshake, `tools/list`, and
+//! `tools/call`, dispatching a call to the [`Broker`](crate::Broker) client.
+//! The tool docs are written for the agent to get the call right the first try.
 
 use std::io::{BufRead, Write};
 
@@ -33,8 +33,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// Builds a server that dispatches tool calls to `broker`, enforcing the role's
-    /// lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
+    /// Builds a server that dispatches tool calls to `broker`, enforcing the
+    /// role's lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
     #[must_use]
     pub fn new(
         broker: Broker,
@@ -48,8 +48,8 @@ impl Server {
         }
     }
 
-    /// Runs the stdio JSON-RPC loop, reading requests and writing responses, until
-    /// the input ends.
+    /// Runs the stdio JSON-RPC loop, reading requests and writing responses,
+    /// until the input ends.
     ///
     /// # Errors
     /// Returns an error only if reading the input or writing the output fails.
@@ -68,8 +68,8 @@ impl Server {
         Ok(())
     }
 
-    /// Handles one JSON-RPC line, returning a response for a request or `None` for a
-    /// notification (which gets no reply).
+    /// Handles one JSON-RPC line, returning a response for a request or `None`
+    /// for a notification (which gets no reply).
     fn handle_line(&mut self, line: &str) -> Option<Value> {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             return Some(rpc_error(&Value::Null, -32700, "parse error"));
@@ -98,8 +98,8 @@ impl Server {
         }
     }
 
-    /// Runs a `tools/call`, mapping a tool error to an `isError` result (which the
-    /// agent reads) rather than a protocol error.
+    /// Runs a `tools/call`, mapping a tool error to an `isError` result (which
+    /// the agent reads) rather than a protocol error.
     fn tools_call(&mut self, id: &Value, params: Option<&Value>) -> Value {
         let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
             return rpc_error(id, -32602, "invalid params: no tool name");
@@ -205,8 +205,8 @@ impl Server {
     }
 }
 
-/// The `initialize` result: echo the client's protocol version (or the default) and
-/// advertise the tools capability.
+/// The `initialize` result: echo the client's protocol version (or the default)
+/// and advertise the tools capability.
 fn initialize(params: Option<&Value>) -> Value {
     let version = params
         .and_then(|p| p.get("protocolVersion"))
@@ -219,7 +219,8 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: coordination, work-ledger, done-gate, board, briefing.
+/// The tool catalog for `tools/list`: coordination, work-ledger, done-gate,
+/// board, briefing.
 fn tool_catalog() -> Value {
     let mut tools = coordination_tools();
     tools.extend(ledger_tools());
@@ -229,7 +230,8 @@ fn tool_catalog() -> Value {
     Value::Array(tools)
 }
 
-/// The coordination tools: message, order, read the inbox and roster, and check a lane.
+/// The coordination tools: message, order, read the inbox and roster, and check
+/// a lane.
 fn coordination_tools() -> Vec<Value> {
     vec![
         json!({
@@ -310,7 +312,8 @@ fn coordination_tools() -> Vec<Value> {
     ]
 }
 
-/// The work-ledger tools: claim a task or move a claim forward, and read the ledger.
+/// The work-ledger tools: claim a task or move a claim forward, and read the
+/// ledger.
 fn ledger_tools() -> Vec<Value> {
     vec![
         json!({
@@ -344,7 +347,8 @@ fn ledger_tools() -> Vec<Value> {
     ]
 }
 
-/// The adversarial done-gate tools: submit work, return a verdict, and read the gate.
+/// The adversarial done-gate tools: submit work, return a verdict, and read the
+/// gate.
 fn done_gate_tools() -> Vec<Value> {
     vec![
         json!({
@@ -394,7 +398,8 @@ fn done_gate_tools() -> Vec<Value> {
     ]
 }
 
-/// The situation-board tools: read the crew's durable memory, and record or retract an entry.
+/// The situation-board tools: read the crew's durable memory, and record or
+/// retract an entry.
 fn board_tools() -> Vec<Value> {
     vec![
         json!({
@@ -559,7 +564,8 @@ fn render_roster(snapshot: &RosterSnapshot) -> String {
     if snapshot.roles.is_empty() {
         return "The roster is empty.".to_owned();
     }
-    // The crew is gated whenever it is not running; a role is also gated on its own.
+    // The crew is gated whenever it is not running; a role is also gated on its
+    // own.
     let crew_gated = snapshot.standing != Standing::Running;
     let lines: Vec<String> = snapshot
         .roles
@@ -589,7 +595,8 @@ fn render_roster(snapshot: &RosterSnapshot) -> String {
     format!("{header}\n{}", lines.join("\n"))
 }
 
-/// Renders the done-gate an agent reads: each task under verification and its standing.
+/// Renders the done-gate an agent reads: each task under verification and its
+/// standing.
 fn render_gate(snapshot: &GateSnapshot) -> String {
     if snapshot.tasks.is_empty() {
         return "The done-gate is empty; no task is under verification.".to_owned();
@@ -621,7 +628,8 @@ fn render_gate(snapshot: &GateSnapshot) -> String {
     )
 }
 
-/// Renders the situation board an agent reads: each entry, its section, author, and content.
+/// Renders the situation board an agent reads: each entry, its section, author,
+/// and content.
 fn render_board(snapshot: &BoardSnapshot) -> String {
     if snapshot.entries.is_empty() {
         return "The situation board is empty.".to_owned();
@@ -648,7 +656,8 @@ fn render_board(snapshot: &BoardSnapshot) -> String {
     )
 }
 
-/// Renders the briefing packet an agent reads on boot: the bounded text plus its size.
+/// Renders the briefing packet an agent reads on boot: the bounded text plus
+/// its size.
 fn render_briefing(packet: &BriefingPacket) -> String {
     let note = if packet.capped {
         format!(
@@ -663,13 +672,14 @@ fn render_briefing(packet: &BriefingPacket) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crew_core::RoleId;
     use serde_json::{json, Value};
 
     use super::Server;
     use crate::broker::Broker;
-    use crew_core::RoleId;
 
-    /// A server whose broker points nowhere; the protocol paths under test never call it.
+    /// A server whose broker points nowhere; the protocol paths under test
+    /// never call it.
     fn server() -> Server {
         Server::new(
             Broker::new(
@@ -835,7 +845,8 @@ mod tests {
 
     #[test]
     fn crew_verdict_without_pass_is_a_tool_error_not_a_broker_call() {
-        // A missing `pass` fails before the broker is touched, so the bogus base is fine.
+        // A missing `pass` fails before the broker is touched, so the bogus base is
+        // fine.
         let response = handle(
             &mut server(),
             &json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call",

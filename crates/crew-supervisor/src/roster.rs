@@ -1,10 +1,12 @@
-//! The supervisor's roster client: register a role on spawn, deregister on exit.
+//! The supervisor's roster client: register a role on spawn, deregister on
+//! exit.
 //!
-//! The supervisor owns each agent's process lifecycle, so it is the authority on
-//! liveness: it registers a role with the broker the moment the process starts and
-//! deregisters it when the process exits (issue #21). This is a thin synchronous
-//! client over the broker's `/roster` HTTP API, distinct from the agent-facing
-//! [`crew_mcp`](crew_mcp) client, which registers only its own role.
+//! The supervisor owns each agent's process lifecycle, so it is the authority
+//! on liveness: it registers a role with the broker the moment the process
+//! starts and deregisters it when the process exits (issue #21). This is a thin
+//! synchronous client over the broker's `/roster` HTTP API, distinct from the
+//! agent-facing [`crew_mcp`](crew_mcp) client, which registers only its own
+//! role.
 
 use std::time::Duration;
 
@@ -16,9 +18,9 @@ use serde_json::{json, Value};
 /// A role's liveness, as the broker roster labels it.
 ///
 /// The supervisor marks each transition of its lifecycle state machine with the
-/// matching liveness (issue #22); the broker turns the change into a `lifecycle`
-/// stream event (`working` first is `started`, again is `restarted`, and `idle` /
-/// `stopped` / `dead` map directly).
+/// matching liveness (issue #22); the broker turns the change into a
+/// `lifecycle` stream event (`working` first is `started`, again is
+/// `restarted`, and `idle` / `stopped` / `dead` map directly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
     /// Up and working.
@@ -50,7 +52,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// surfaces as an error rather than hanging the supervisor.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A client for the broker roster, used to register and deregister spawned roles.
+/// A client for the broker roster, used to register and deregister spawned
+/// roles.
 ///
 /// Cheap to clone: [`ureq::Agent`] shares its connection pool on clone, so each
 /// agent's monitor thread holds a copy to deregister its role on exit.
@@ -58,8 +61,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct RosterClient {
     base: String,
     agent: ureq::Agent,
-    /// The task this supervisor is working, threaded onto every lifecycle transition
-    /// so its events correlate to the task (issue #29). `None` outside a task context.
+    /// The task this supervisor is working, threaded onto every lifecycle
+    /// transition so its events correlate to the task (issue #29). `None`
+    /// outside a task context.
     task: Option<TaskId>,
 }
 
@@ -78,22 +82,24 @@ impl RosterClient {
         }
     }
 
-    /// Sets the task context, so every lifecycle transition this client publishes
-    /// carries the task id (issue #29).
+    /// Sets the task context, so every lifecycle transition this client
+    /// publishes carries the task id (issue #29).
     ///
-    /// The supervisor threads the task it is working, so the roster's `started` /
-    /// `idle` / `restarted` events correlate to it; the clone shares the connection
-    /// pool, so a per-agent monitor keeps the same task context.
+    /// The supervisor threads the task it is working, so the roster's `started`
+    /// / `idle` / `restarted` events correlate to it; the clone shares the
+    /// connection pool, so a per-agent monitor keeps the same task context.
     #[must_use]
     pub fn with_task(mut self, task: TaskId) -> Self {
         self.task = Some(task);
         self
     }
 
-    /// Registers `role` with the lane it owns, marking it working (`POST /roster`).
+    /// Registers `role` with the lane it owns, marking it working (`POST
+    /// /roster`).
     ///
     /// # Errors
-    /// Returns an error if the broker rejects the registration or cannot be reached.
+    /// Returns an error if the broker rejects the registration or cannot be
+    /// reached.
     pub fn register(&self, role: &RoleId, owned_paths: &[String]) -> Result<()> {
         let url = format!("{}/roster", self.base);
         let mut body = json!({ "role": role.as_str(), "owned_paths": owned_paths });
@@ -106,11 +112,13 @@ impl RosterClient {
             .map_err(|err| eyre!("could not register role `{role}` with the broker: {err}"))
     }
 
-    /// Marks `role` with a new liveness, keeping its owned paths (`POST /roster`).
+    /// Marks `role` with a new liveness, keeping its owned paths (`POST
+    /// /roster`).
     ///
-    /// The role must already be registered; this changes only its liveness, which the
-    /// broker publishes as the matching `lifecycle` event. Used for the idle, stopped,
-    /// and dead transitions (a restart re-registers via [`register`](Self::register)).
+    /// The role must already be registered; this changes only its liveness,
+    /// which the broker publishes as the matching `lifecycle` event. Used
+    /// for the idle, stopped, and dead transitions (a restart re-registers
+    /// via [`register`](Self::register)).
     ///
     /// # Errors
     /// Returns an error if the broker rejects the update or cannot be reached.
@@ -126,10 +134,12 @@ impl RosterClient {
             .map_err(|err| eyre!("could not mark role `{role}` as {}: {err}", liveness.wire()))
     }
 
-    /// Reports a role's token spend against the crew budget (`POST /budget`, issue #54).
+    /// Reports a role's token spend against the crew budget (`POST /budget`,
+    /// issue #54).
     ///
-    /// The broker records it as a `budget` event on the stream, so spend against budget is
-    /// visible and a cap hit is never silent. The supervisor computes the totals from the
+    /// The broker records it as a `budget` event on the stream, so spend
+    /// against budget is visible and a cap hit is never silent. The
+    /// supervisor computes the totals from the
     /// crew [`Budget`](crew_core::Budget); this only surfaces them.
     ///
     /// # Errors
@@ -146,10 +156,12 @@ impl RosterClient {
             .map_err(|err| eyre!("could not report budget for role `{}`: {err}", event.role))
     }
 
-    /// Reports a role's per-turn token-and-cost usage (`POST /telemetry`, issue #55).
+    /// Reports a role's per-turn token-and-cost usage (`POST /telemetry`, issue
+    /// #55).
     ///
-    /// The broker records it as a `telemetry` event and folds it into the `GET /stats`
-    /// rollup, so per-role and aggregate spend is legible regardless of any budget.
+    /// The broker records it as a `telemetry` event and folds it into the `GET
+    /// /stats` rollup, so per-role and aggregate spend is legible
+    /// regardless of any budget.
     ///
     /// # Errors
     /// Returns an error if the broker rejects the report or cannot be reached.
@@ -172,10 +184,11 @@ impl RosterClient {
 
     /// Reports a shared-subscription usage reading (`POST /usage`, issue #56).
     ///
-    /// The crew shares one subscription, so a single reading of the window against its limit
-    /// drives the broker's one gauge: at or above the threshold it auto-pauses new work until
-    /// `window_reset`. This is the seam the rate-limit detection (the stream-json parser,
-    /// issue #24) drives; `percent` is the window fill (`0..=100`).
+    /// The crew shares one subscription, so a single reading of the window
+    /// against its limit drives the broker's one gauge: at or above the
+    /// threshold it auto-pauses new work until `window_reset`. This is the
+    /// seam the rate-limit detection (the stream-json parser, issue #24)
+    /// drives; `percent` is the window fill (`0..=100`).
     ///
     /// # Errors
     /// Returns an error if the broker rejects the report or cannot be reached.
@@ -199,12 +212,12 @@ impl RosterClient {
 
     /// Deregisters `role` on exit (`DELETE /roster/{role}`).
     ///
-    /// Idempotent: a `404` (the role is already gone) is treated as success, so a
-    /// double deregister or a role the broker never saw is not an error.
+    /// Idempotent: a `404` (the role is already gone) is treated as success, so
+    /// a double deregister or a role the broker never saw is not an error.
     ///
     /// # Errors
-    /// Returns an error if the broker rejects the request (other than `404`) or cannot
-    /// be reached.
+    /// Returns an error if the broker rejects the request (other than `404`) or
+    /// cannot be reached.
     pub fn deregister(&self, role: &RoleId) -> Result<()> {
         let url = format!("{}/roster/{}", self.base, role.as_str());
         match self.agent.delete(&url).call() {
@@ -220,7 +233,8 @@ impl RosterClient {
     /// The ids of the roles currently on the roster (`GET /roster`).
     ///
     /// # Errors
-    /// Returns an error if the broker cannot be reached or its response is malformed.
+    /// Returns an error if the broker cannot be reached or its response is
+    /// malformed.
     pub fn roles(&self) -> Result<Vec<RoleId>> {
         let url = format!("{}/roster", self.base);
         let text = self
@@ -235,12 +249,14 @@ impl RosterClient {
         Ok(view.roles.into_iter().map(|entry| entry.role).collect())
     }
 
-    /// Reads the events at or after `since`, oldest first, following the history pages.
+    /// Reads the events at or after `since`, oldest first, following the
+    /// history pages.
     ///
-    /// The coordination-stall monitor (issue #48) reads a recent window of the stream to
-    /// look for a crew stuck waiting on itself. Events are returned as raw JSON so the
-    /// supervisor reads the broker's stable stream contract rather than coupling to
-    /// `crew_core::EventKind`, which lets an event kind it does not model pass through.
+    /// The coordination-stall monitor (issue #48) reads a recent window of the
+    /// stream to look for a crew stuck waiting on itself. Events are
+    /// returned as raw JSON so the supervisor reads the broker's stable
+    /// stream contract rather than coupling to `crew_core::EventKind`,
+    /// which lets an event kind it does not model pass through.
     ///
     /// # Errors
     /// Returns an error if the broker cannot be reached or a page is malformed.
@@ -271,7 +287,8 @@ impl RosterClient {
     }
 }
 
-/// One page of `GET /history`: the events, and the cursor to the next page if any.
+/// One page of `GET /history`: the events, and the cursor to the next page if
+/// any.
 #[derive(Debug, Deserialize)]
 struct HistoryPage {
     events: Vec<Value>,

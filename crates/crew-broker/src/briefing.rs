@@ -1,37 +1,44 @@
-//! The new-role briefing packet: bounded context so a role starts productive fast (issue #50).
+//! The new-role briefing packet: bounded context so a role starts productive
+//! fast (issue #50).
 //!
-//! A freshly spawned role must not read the whole transcript to catch up, the 100k-token
-//! problem (see `docs/communication.md`, context management). `GET /briefing?role=<role>`
-//! assembles a small, size-capped packet from what the role actually needs: the current
-//! decision board (the crew's durable memory) and a rolling summary scoped to the role's
-//! own timeline (what it sent and what is addressed to it, so its lane and the work at
-//! hand), never the raw log. The packet is rendered to text, measured, and capped to a
-//! byte budget, so joining a long mission costs bounded context.
+//! A freshly spawned role must not read the whole transcript to catch up, the
+//! 100k-token problem (see `docs/communication.md`, context management). `GET
+//! /briefing?role=<role>` assembles a small, size-capped packet from what the
+//! role actually needs: the current decision board (the crew's durable memory)
+//! and a rolling summary scoped to the role's own timeline (what it sent and
+//! what is addressed to it, so its lane and the work at hand), never the raw
+//! log. The packet is rendered to text, measured, and capped to a byte budget,
+//! so joining a long mission costs bounded context.
 //!
-//! The role's static role card (its lane, acceptance bar, and the coordination rules) is
-//! delivered separately at boot (`CREW_ROLE_CARD`, issue #18); this packet is the live
-//! situation on top of it. Agents reach it through the `crew_briefing` tool.
+//! The role's static role card (its lane, acceptance bar, and the coordination
+//! rules) is delivered separately at boot (`CREW_ROLE_CARD`, issue #18); this
+//! packet is the live situation on top of it. Agents reach it through the
+//! `crew_briefing` tool.
 
 use std::fmt::Write as _;
 
-use axum::extract::{Query, State};
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{
+    extract::{Query, State},
+    routing::get,
+    Json, Router,
+};
 use crew_core::{RoleId, TaskId};
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
-use crate::state::{AppState, BoardEntry};
-use crate::store::{EventFilter, EventQuery};
-use crate::summary::{summarize, HistorySummary};
+use crate::{
+    error::ApiError,
+    state::{AppState, BoardEntry},
+    store::{EventFilter, EventQuery},
+    summary::{summarize, HistorySummary},
+};
 
-/// The default briefing budget, in bytes: a few kilobytes, about a thousand tokens, tiny
-/// against the whole-log read it replaces. Bytes stand in for tokens (roughly four to
-/// one), since the broker has no tokenizer.
+/// The default briefing budget, in bytes: a few kilobytes, about a thousand
+/// tokens, tiny against the whole-log read it replaces. Bytes stand in for
+/// tokens (roughly four to one), since the broker has no tokenizer.
 const DEFAULT_BUDGET: usize = 4096;
 
-/// The smallest budget honored, so a pathological request still yields a usable header
-/// rather than an empty packet.
+/// The smallest budget honored, so a pathological request still yields a usable
+/// header rather than an empty packet.
 const MIN_BUDGET: usize = 256;
 
 /// The briefing route: assemble a bounded packet for a role.
@@ -39,7 +46,8 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/briefing", get(briefing))
 }
 
-/// The `GET /briefing` query: the role to brief, and optional scoping and budget.
+/// The `GET /briefing` query: the role to brief, and optional scoping and
+/// budget.
 #[derive(Debug, Deserialize)]
 struct BriefingQuery {
     /// The role the packet is for; its timeline scopes the rolling summary.
@@ -67,9 +75,9 @@ async fn briefing(
     let role = RoleId::new(role);
     let budget = query.budget.unwrap_or(DEFAULT_BUDGET).max(MIN_BUDGET);
 
-    // The rolling summary, scoped to the role's own timeline (what it sent and what is
-    // addressed to it) and optionally to the task at hand, so it reads its lane, not the
-    // whole crew's chatter.
+    // The rolling summary, scoped to the role's own timeline (what it sent and what
+    // is addressed to it) and optionally to the task at hand, so it reads its
+    // lane, not the whole crew's chatter.
     let filter = EventFilter {
         agent: Some(role.clone()),
         task: query.task,
@@ -110,7 +118,8 @@ struct BoardLine {
     line: String,
 }
 
-/// The board entries as rendered lines, ordered decisions then interfaces then gotchas.
+/// The board entries as rendered lines, ordered decisions then interfaces then
+/// gotchas.
 fn board_lines(state: &AppState) -> Vec<BoardLine> {
     let mut lines: Vec<BoardLine> = state
         .board_snapshot()
@@ -130,7 +139,8 @@ fn board_lines(state: &AppState) -> Vec<BoardLine> {
     lines
 }
 
-/// A board entry's section rank: decisions first, then interfaces, then gotchas.
+/// A board entry's section rank: decisions first, then interfaces, then
+/// gotchas.
 fn section_rank(entry: &BoardEntry) -> u8 {
     use crew_core::BoardSection::{Decision, Gotcha, Interface};
     match entry.section {
@@ -140,11 +150,13 @@ fn section_rank(entry: &BoardEntry) -> u8 {
     }
 }
 
-/// Renders the packet into text bounded by `budget`, returning it and whether it was capped.
+/// Renders the packet into text bounded by `budget`, returning it and whether
+/// it was capped.
 ///
-/// Lines are added in priority order (the header, then the board, then the summary) until
-/// the next line would exceed the budget; the rest are dropped and `capped` is set. The
-/// header is always kept, so even a tiny budget yields a meaningful packet.
+/// Lines are added in priority order (the header, then the board, then the
+/// summary) until the next line would exceed the budget; the rest are dropped
+/// and `capped` is set. The header is always kept, so even a tiny budget yields
+/// a meaningful packet.
 fn render(
     role: &RoleId,
     task: Option<TaskId>,
@@ -187,8 +199,8 @@ fn render(
 
 /// Packs `lines` into a newline-joined string within `budget` bytes.
 ///
-/// The first line (the header) is always kept; each further line is added only while it
-/// fits. Returns the text and whether any line was dropped.
+/// The first line (the header) is always kept; each further line is added only
+/// while it fits. Returns the text and whether any line was dropped.
 fn pack(lines: &[String], budget: usize) -> (String, bool) {
     let mut out = String::new();
     let mut capped = false;
@@ -208,7 +220,8 @@ fn pack(lines: &[String], budget: usize) -> (String, bool) {
     (out, capped)
 }
 
-/// The `GET /briefing` response: the bounded packet and how it measured against the budget.
+/// The `GET /briefing` response: the bounded packet and how it measured against
+/// the budget.
 #[derive(Debug, Serialize)]
 struct BriefingPacket {
     /// The role the packet is for.
@@ -228,14 +241,14 @@ struct BriefingPacket {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn get(state: &AppState, path: &str) -> (StatusCode, Value) {
         let request = Request::builder()
@@ -262,7 +275,8 @@ mod tests {
         api::build(state.clone()).oneshot(request).await.unwrap();
     }
 
-    /// Records a board decision and posts a note, so a briefing has something to carry.
+    /// Records a board decision and posts a note, so a briefing has something
+    /// to carry.
     async fn seed(state: &AppState) {
         post(
             state,
@@ -308,7 +322,8 @@ mod tests {
     #[tokio::test]
     async fn the_briefing_is_scoped_to_the_role_not_the_whole_crew() {
         let state = AppState::new(Config::default());
-        // An order to frontend is not on backend's timeline, so backend's briefing omits it.
+        // An order to frontend is not on backend's timeline, so backend's briefing
+        // omits it.
         post(
             &state,
             "/channels/@frontend/messages",

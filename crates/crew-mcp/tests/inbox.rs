@@ -1,22 +1,27 @@
 //! End-to-end test of the `crew_inbox` push path (issue #76).
 //!
-//! It starts a `crewd` instance in-process, then drives the broker client the way the
-//! MCP server does: a role subscribes to its live inbox, and reads drain the buffered
-//! batch the background SSE stream delivers rather than refetching the whole history. The
-//! pull-based read stays covered as the fallback for a runtime without streaming.
+//! It starts a `crewd` instance in-process, then drives the broker client the
+//! way the MCP server does: a role subscribes to its live inbox, and reads
+//! drain the buffered batch the background SSE stream delivers rather than
+//! refetching the whole history. The pull-based read stays covered as the
+//! fallback for a runtime without streaming.
 //!
-//! The broker runs on a background thread with its own tokio runtime, so the test body
-//! stays synchronous and calls the blocking `ureq`-based client directly.
+//! The broker runs on a background thread with its own tokio runtime, so the
+//! test body stays synchronous and calls the blocking `ureq`-based client
+//! directly.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    net::{Ipv4Addr, SocketAddr, TcpListener},
+    thread,
+    time::{Duration, Instant},
+};
 
 use crew_broker::{AppState, Config};
 use crew_core::RoleId;
 use crew_mcp::Broker;
 
-/// Starts a broker over a fresh in-memory store, returning the address it serves on.
+/// Starts a broker over a fresh in-memory store, returning the address it
+/// serves on.
 fn start_broker() -> SocketAddr {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -44,10 +49,11 @@ fn client(addr: SocketAddr, role: &str) -> Broker {
     )
 }
 
-/// Drains `broker`'s inbox until a message body equals `body`, or a deadline passes.
+/// Drains `broker`'s inbox until a message body equals `body`, or a deadline
+/// passes.
 ///
-/// Draining is destructive, so the caller must ask for one message at a time; each poll
-/// returns only what arrived since the last one.
+/// Draining is destructive, so the caller must ask for one message at a time;
+/// each poll returns only what arrived since the last one.
 fn wait_for_message(broker: &mut Broker, body: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -67,16 +73,16 @@ fn a_subscribed_inbox_seeds_the_backlog_then_pushes_live_messages() {
     let mut backend = client(addr, "backend");
     backend.register(&["api/".to_owned()]).unwrap();
 
-    // A message addressed to backend before it subscribes: the backlog a fresh stream
-    // does not replay, so the subscription must seed it from history.
+    // A message addressed to backend before it subscribes: the backlog a fresh
+    // stream does not replay, so the subscription must seed it from history.
     commander
         .send(Some("backend"), None, "before you subscribed")
         .unwrap();
 
     backend.subscribe().expect("the inbox stream opens");
 
-    // The first read returns the seeded backlog, exactly once (no duplicate from the
-    // stream's overlap window).
+    // The first read returns the seeded backlog, exactly once (no duplicate from
+    // the stream's overlap window).
     let first = backend.inbox().unwrap();
     let backlog: Vec<&str> = first
         .iter()

@@ -1,22 +1,24 @@
-//! The subscription-usage endpoints: report a reading, and read the gauge (issue #56).
+//! The subscription-usage endpoints: report a reading, and read the gauge
+//! (issue #56).
 //!
-//! The crew shares one subscription, so the broker keeps one usage gauge across the crew.
-//! `POST /usage` records a reading of the shared window against its limit; a reading at or
-//! above the configured threshold auto-pauses new work until the window resets, publishing a
-//! `usage` event so the pause is visible, never silent. The gate lifts lazily at the reset
-//! instant, and `crew resume` lifts it early (see `control.rs`). `GET /usage` reads the
-//! gauge: the latest reading, the threshold, and the pause. The usage signal is the
-//! supervisor's to detect from the agents' rate-limit output (the stream-json parser, issue
+//! The crew shares one subscription, so the broker keeps one usage gauge across
+//! the crew. `POST /usage` records a reading of the shared window against its
+//! limit; a reading at or above the configured threshold auto-pauses new work
+//! until the window resets, publishing a `usage` event so the pause is visible,
+//! never silent. The gate lifts lazily at the reset instant, and `crew resume`
+//! lifts it early (see `control.rs`). `GET /usage` reads the gauge: the latest
+//! reading, the threshold, and the pause. The usage signal is the supervisor's
+//! to detect from the agents' rate-limit output (the stream-json parser, issue
 //! #24); this is the surface it reports to.
 
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::{extract::State, routing::post, Json, Router};
 use crew_core::{ChannelId, Event, EventKind, Sender, Timestamp, UsageEvent, ALL_UNITS};
 use serde::Deserialize;
 
-use crate::events::JsonBody;
-use crate::state::{AppState, UsageView};
+use crate::{
+    events::JsonBody,
+    state::{AppState, UsageView},
+};
 
 /// The usage routes: report a reading (`POST`), and read the gauge (`GET`).
 pub(crate) fn routes() -> Router<AppState> {
@@ -32,13 +34,14 @@ struct UsageReport {
     window_reset: Timestamp,
 }
 
-/// `POST /usage`: record a shared-subscription usage reading, auto-pausing if it crosses
-/// the threshold. Returns the gauge.
+/// `POST /usage`: record a shared-subscription usage reading, auto-pausing if
+/// it crosses the threshold. Returns the gauge.
 async fn report(
     State(state): State<AppState>,
     JsonBody(request): JsonBody<UsageReport>,
 ) -> Json<UsageView> {
-    // Auto-pause on crossing the threshold, and surface it so the pause is never silent.
+    // Auto-pause on crossing the threshold, and surface it so the pause is never
+    // silent.
     if state.report_usage(request.percent, request.window_reset) {
         state.publish(usage_event(&state.usage_snapshot()));
     }
@@ -50,7 +53,8 @@ async fn read(State(state): State<AppState>) -> Json<UsageView> {
     Json(state.usage_snapshot())
 }
 
-/// Builds the `usage` stream event for a gauge snapshot: the reading and its pause.
+/// Builds the `usage` stream event for a gauge snapshot: the reading and its
+/// pause.
 pub(crate) fn usage_event(view: &UsageView) -> Event {
     Event {
         ts: Timestamp::now(),
@@ -67,15 +71,15 @@ pub(crate) fn usage_event(view: &UsageView) -> Event {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::EventKind;
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn send(state: &AppState, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
         let request = Request::builder()
@@ -93,7 +97,8 @@ mod tests {
         )
     }
 
-    /// A window reset far in the future, so an engaged pause holds through the test.
+    /// A window reset far in the future, so an engaged pause holds through the
+    /// test.
     const FUTURE_RESET: &str = "2099-01-01T00:00:00Z";
 
     #[tokio::test]
@@ -167,7 +172,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_pause_lifts_at_the_window_reset() {
-        // A reset already in the past: the reading arms the pause, but it is already lifted.
+        // A reset already in the past: the reading arms the pause, but it is already
+        // lifted.
         let state = AppState::new(Config::default());
         send(
             &state,
