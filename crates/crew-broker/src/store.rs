@@ -176,6 +176,8 @@ pub enum EventKindTag {
     Lifecycle,
     /// An agent's own parsed work.
     Activity,
+    /// A lane boundary crossing (issue #46).
+    Boundary,
 }
 
 impl EventKindTag {
@@ -186,6 +188,7 @@ impl EventKindTag {
             "message" => Some(Self::Message),
             "lifecycle" => Some(Self::Lifecycle),
             "activity" => Some(Self::Activity),
+            "boundary" => Some(Self::Boundary),
             _ => None,
         }
     }
@@ -197,6 +200,7 @@ impl EventKindTag {
             (Self::Message, EventKind::Message(_))
                 | (Self::Lifecycle, EventKind::Lifecycle(_))
                 | (Self::Activity, EventKind::Activity(_))
+                | (Self::Boundary, EventKind::Boundary(_))
         )
     }
 }

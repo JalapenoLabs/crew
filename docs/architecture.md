@@ -38,6 +38,9 @@ Planned surface (illustrative, not final):
 - `GET /roster` lists roles, their liveness, their owned paths, and the crew's pause
   `standing`; `POST /pause`, `POST /resume`, and `POST /standdown` gate the crew's work
   (issue #41).
+- `POST /boundary` records a role reaching outside its owned lane as a `boundary` event
+  on the stream (issue #46), so an out-of-lane edit is surfaced to the operator rather
+  than passing silently. See `docs/observability.md`.
 
 Why a broker beats the old shared file:
 
@@ -150,8 +153,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes four tools (issues #17,
-#27):
+broker's HTTP API; it never touches the store. It exposes five tools (issues #17,
+#27, #46):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -167,14 +170,19 @@ broker's HTTP API; it never touches the store. It exposes four tools (issues #17
   and surfaces an order's structured fields so a specialist reads the task.
 - `crew_roster` lists every registered teammate, the paths it owns, and its
   liveness (working / idle / stopped / dead).
+- `crew_lane` checks a repo-relative path against the role's owned lane before it edits
+  a file outside its paths (issue #46). In-lane, it says proceed; out-of-lane, it reports
+  the crossing to the unit (a `boundary` event) and, under a blocking policy, refuses the
+  edit, telling the role to route the change through the commander. The policy comes from
+  the role card (`lane_enforcement`: `warn` / `block` / `off`). See `docs/roles.md`.
 
 Each tool documents itself and its arguments in `tools/list` so an agent calls it
 right the first time. A tool failure comes back as an `isError` result the agent
 reads, not a protocol error.
 
 MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
-the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, and
-`crew roster` act as the role the environment names and reach the broker through the
+the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, `crew roster`, and
+`crew lane` act as the role the environment names and reach the broker through the
 **same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
 broker identically. A Codex agent registers on boot and then sends and reads through
 the shim, so it appears on the roster and the stream like any other role. The parity

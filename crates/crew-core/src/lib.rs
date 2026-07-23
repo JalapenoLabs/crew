@@ -24,11 +24,15 @@ mod channel;
 mod config;
 mod event;
 mod id;
+mod lane;
 mod time;
 
 pub use card::{BrokerEndpoint, CardError, RoleCard, ROLE_CARD_ENV};
 pub use channel::{Channel, ALL_UNITS};
-pub use config::{ConfigError, CrewConfig, RoleSpec};
-pub use event::{Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind};
+pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
+pub use event::{
+    Activity, ArtifactKind, BoundaryEvent, Event, EventKind, Lifecycle, Message, MessageKind,
+};
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
+pub use lane::path_in_lane;
 pub use time::Timestamp;

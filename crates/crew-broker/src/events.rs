@@ -406,7 +406,9 @@ mod tests {
 
         let body_of = |event: &Event| match &event.kind {
             EventKind::Message(message) => message.body.clone(),
-            EventKind::Lifecycle(_) | EventKind::Activity(_) => panic!("expected a message"),
+            EventKind::Lifecycle(_) | EventKind::Activity(_) | EventKind::Boundary(_) => {
+                panic!("expected a message")
+            }
         };
         assert!(
             !body_of(&streamed).contains(secret),

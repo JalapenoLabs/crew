@@ -117,6 +117,19 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Message(message) => (message_kind(&message.kind), message.body.clone()),
         EventKind::Lifecycle(lifecycle) => ("lifecycle", format!("{lifecycle:?}").to_lowercase()),
         EventKind::Activity(activity) => ("activity", activity_body(activity)),
+        EventKind::Boundary(boundary) => (
+            "boundary",
+            format!(
+                "{} reached {} ({})",
+                boundary.role,
+                boundary.path,
+                if boundary.blocked {
+                    "blocked"
+                } else {
+                    "warned"
+                }
+            ),
+        ),
     }
 }
 

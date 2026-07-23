@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use crew_substrate::broker::Config as BrokerConfig;
-use crew_substrate::core::{BrokerEndpoint, RoleCard, RoleId, ROLE_CARD_ENV};
+use crew_substrate::core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV};
 use crew_substrate::mcp::{Broker, InboxItem, RosterSnapshot, Standing};
 use eyre::{eyre, Result, WrapErr};
 
@@ -33,6 +33,8 @@ struct Agent {
     commander: RoleId,
     /// The paths the role owns, registered with the roster.
     owned_paths: Vec<String>,
+    /// How the crew enforces this role's lane (issue #46).
+    lane_enforcement: LaneEnforcement,
 }
 
 impl Agent {
@@ -103,6 +105,26 @@ pub fn roster() -> Result<()> {
     Ok(())
 }
 
+/// Checks whether `path` is in this role's lane, warning or blocking per policy (issue
+/// #46).
+///
+/// Mirrors `crew_lane`: an in-lane path proceeds; an out-of-lane path is reported on the
+/// stream, and under a blocking policy the check fails so the role routes the change
+/// through the commander instead of editing silently.
+///
+/// # Errors
+/// Returns an error if no role context is set, the path is out of lane and enforcement
+/// is `block`, or the broker cannot be reached.
+pub fn lane(path: &str) -> Result<()> {
+    let agent = load_agent()?;
+    let verdict = agent
+        .broker()
+        .check_lane(&agent.owned_paths, agent.lane_enforcement, path)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{verdict}");
+    Ok(())
+}
+
 /// Resolves the agent context from the environment, the way the `crew-mcp` binary does.
 ///
 /// Prefers the role card at [`ROLE_CARD_ENV`], which carries the role, its lane, and
@@ -119,6 +141,7 @@ fn load_agent() -> Result<Agent> {
             role: card.role,
             commander: card.commander,
             owned_paths: card.owned_paths,
+            lane_enforcement: card.lane_enforcement,
         });
     }
 
@@ -140,6 +163,7 @@ fn load_agent() -> Result<Agent> {
         // matching `RoleCard`'s own default when a card omits it.
         commander: RoleId::new("commander"),
         owned_paths: Vec::new(),
+        lane_enforcement: LaneEnforcement::default(),
     })
 }
 

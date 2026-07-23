@@ -6,7 +6,8 @@
 //!   (issue #26), and gates its work with `crew pause` / `crew resume` / `crew standdown`
 //!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
-//!   `crew register`, `crew send`, `crew inbox`, and `crew roster` act as the role the
+//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, and `crew lane` act as
+//!   the role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
 //!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
 //!   stream live, so a peer sees a teammate's messages without polling and never its
@@ -124,6 +125,11 @@ enum Command {
     },
     /// List the unit's roster: every role, its lane, and its liveness.
     Roster,
+    /// Check whether a file path is in this role's lane before editing it.
+    Lane {
+        /// The repo-relative file path to check against this role's owned lane.
+        path: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -150,5 +156,6 @@ fn main() -> Result<()> {
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
         Command::Roster => shim::roster(),
+        Command::Lane { path } => shim::lane(&path),
     }
 }
