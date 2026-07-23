@@ -313,7 +313,7 @@ async fn a_consumer_renders_the_unit_from_the_stream_alone() {
     // one live stream a viz like Runewood renders agents, messages, and the live count,
     // with no crew-specific capture. Each event carries the whole envelope it needs.
     let broker = TestBroker::in_memory().await;
-    let mut stream = broker.stream().await; // subscribe before anything happens
+    let mut stream = broker.stream("").await; // the whole firehose, before anything happens
 
     // An agent appearing is a `started` lifecycle event: a consumer spawns an entity for
     // the role, and every event carries its typed, timestamped, addressed envelope.
