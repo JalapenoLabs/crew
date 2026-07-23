@@ -42,15 +42,25 @@ pub struct AppState {
 impl AppState {
     /// Builds the application state with the default in-memory storage backend.
     ///
-    /// Builds the secret [`Scrubber`] once from [`Config::secrets`] and opens the
-    /// fan-out channel; both are shared across every request.
+    /// For tests and ephemeral use; the `crewd` daemon injects a durable backend with
+    /// [`with_storage`](AppState::with_storage).
     #[must_use]
     pub fn new(config: Config) -> Self {
+        Self::with_storage(config, Arc::new(MemoryStore::default()))
+    }
+
+    /// Builds the application state over a chosen [`Storage`] backend.
+    ///
+    /// Builds the secret [`Scrubber`] once from [`Config::secrets`] and opens the
+    /// fan-out channel; both are shared across every request. Takes the backend as a
+    /// `dyn Storage`, so the broker never depends on a concrete store.
+    #[must_use]
+    pub fn with_storage(config: Config, storage: Arc<dyn Storage>) -> Self {
         let scrubber = Scrubber::new(config.secrets.iter().cloned());
         let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             config: Arc::new(config),
-            storage: Arc::new(MemoryStore::default()),
+            storage,
             router: Arc::new(ChannelRouter),
             scrubber: Arc::new(scrubber),
             broadcast,

@@ -1,17 +1,44 @@
-//! The broker's event storage backend.
+//! The broker's event storage: a swappable [`Storage`] trait and its backends.
+//!
+//! [`Storage`] is the one surface the broker depends on; it never names a concrete
+//! backend, so a durable log today can become `SQLite` or Postgres later without
+//! touching a handler. Two backends ship now:
+//!
+//! - [`MemoryStore`] keeps everything in memory, for tests and ephemeral use.
+//! - [`LogStore`] persists to an on-disk append-only log (JSON per line) with an
+//!   in-memory index, so a restart replays the log and no event is lost.
+//!
+//! The trait covers the whole persisted surface: [`append`](Storage::append) an
+//! event, [`query`](Storage::query) the log with filters and a stable page cursor,
+//! read every event, and read or write the [`Roster`]. `query` has a default that
+//! scans the in-memory index; a backend with a real index (a database) overrides it
+//! to push the filter down, which is why the query types here stay backend-neutral.
 
+use std::collections::BTreeSet;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use crew_core::Event;
+use crew_core::{Channel, ChannelId, Event, EventKind, RoleId, Sender, TaskId, Timestamp};
+use eyre::{Result, WrapErr};
+use serde::{Deserialize, Serialize};
+use tracing::{event, Level};
 
-/// The pluggable backend the broker keeps its event log in.
+/// The append-only event log's file name inside the state directory.
+const EVENTS_FILE: &str = "events.jsonl";
+
+/// The roster's file name inside the state directory.
+const ROSTER_FILE: &str = "roster.json";
+
+/// The pluggable backend the broker keeps its event log and roster in.
 ///
-/// Kept behind a trait so the backend is swappable (see `docs/architecture.md`):
-/// the default [`MemoryStore`] holds everything in memory, and a durable backend
-/// (an on-disk log or `SQLite`) can drop in later. Pruning and the rolling-summary
-/// read (`history?summary=true`) land in later tickets.
+/// Kept behind a trait so the backend is swappable (see `docs/architecture.md`): the
+/// broker holds a `dyn Storage` and never a concrete type, so a database backend can
+/// drop in later. The query types ([`EventQuery`], [`EventPage`]) are backend-neutral
+/// for the same reason. Pruning and the rolling-summary read land in later tickets.
 pub trait Storage: std::fmt::Debug + Send + Sync {
-    /// A short, stable name for the backend, such as `memory`.
+    /// A short, stable name for the backend, such as `memory` or `log`.
     fn backend(&self) -> &'static str;
 
     /// Appends an event to the log.
@@ -19,16 +46,246 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
 
     /// Returns every stored event, oldest first.
     fn events(&self) -> Vec<Event>;
+
+    /// Returns the current roster.
+    fn roster(&self) -> Roster;
+
+    /// Replaces the roster.
+    fn set_roster(&self, roster: Roster);
+
+    /// Returns one filtered, ordered page of events (see [`EventQuery`]).
+    ///
+    /// The default scans the in-memory index via [`events`](Storage::events). A
+    /// backend with its own index should override this to push the filter and paging
+    /// down to the store.
+    ///
+    /// # Errors
+    /// Returns [`InvalidCursor`] if the query's `after` cursor is not a stored position.
+    fn query(&self, query: &EventQuery) -> Result<EventPage, InvalidCursor> {
+        query_events(&self.events(), query)
+    }
 }
 
-/// The default in-memory event store.
+/// The set of roles the crew knows about.
 ///
-/// Holds the log in a `Vec` behind a mutex; the on-disk log and pruning land in
-/// later tickets. A poisoned lock is recovered rather than panicked, so a bad
-/// request can never take the store down.
+/// Minimal on purpose: the roster/liveness ticket enriches each role with liveness
+/// and owned paths. What matters here is that a backend can read and write it, and a
+/// durable backend persists it across a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Roster {
+    /// The known roles, kept sorted for a stable on-disk form.
+    roles: BTreeSet<RoleId>,
+}
+
+impl Roster {
+    /// An empty roster.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a role, returning whether it was newly inserted.
+    pub fn insert(&mut self, role: RoleId) -> bool {
+        self.roles.insert(role)
+    }
+
+    /// Removes a role, returning whether it was present.
+    pub fn remove(&mut self, role: &RoleId) -> bool {
+        self.roles.remove(role)
+    }
+
+    /// Whether `role` is in the roster.
+    #[must_use]
+    pub fn contains(&self, role: &RoleId) -> bool {
+        self.roles.contains(role)
+    }
+
+    /// The roles in the roster, sorted.
+    pub fn roles(&self) -> impl Iterator<Item = &RoleId> {
+        self.roles.iter()
+    }
+
+    /// How many roles are in the roster.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.roles.len()
+    }
+
+    /// Whether the roster is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.roles.is_empty()
+    }
+}
+
+/// The three event kinds a query can filter on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKindTag {
+    /// Inter-agent communication.
+    Message,
+    /// A supervised lifecycle transition.
+    Lifecycle,
+    /// An agent's own parsed work.
+    Activity,
+}
+
+impl EventKindTag {
+    /// Parses a kind name, or `None` if it names no event kind.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "message" => Some(Self::Message),
+            "lifecycle" => Some(Self::Lifecycle),
+            "activity" => Some(Self::Activity),
+            _ => None,
+        }
+    }
+
+    /// Whether `kind` is of this tag.
+    fn matches(self, kind: &EventKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Message, EventKind::Message(_))
+                | (Self::Lifecycle, EventKind::Lifecycle(_))
+                | (Self::Activity, EventKind::Activity(_))
+        )
+    }
+}
+
+/// The filters a query narrows the log by; an unset field matches every event.
+#[derive(Debug, Default, Clone)]
+pub struct EventFilter {
+    /// Keep only events on this channel (pair member order does not matter).
+    pub channel: Option<ChannelId>,
+    /// Keep only events sent by this role.
+    pub role: Option<RoleId>,
+    /// Keep only events of this kind.
+    pub kind: Option<EventKindTag>,
+    /// Keep only events belonging to this task.
+    pub task: Option<TaskId>,
+    /// Keep only events at or after this instant.
+    pub since: Option<Timestamp>,
+}
+
+impl EventFilter {
+    /// Whether `event` satisfies every set filter.
+    fn matches(&self, event: &Event) -> bool {
+        if let Some(since) = self.since {
+            if event.ts < since {
+                return false;
+            }
+        }
+        if let Some(task) = self.task {
+            if event.task != Some(task) {
+                return false;
+            }
+        }
+        if let Some(role) = &self.role {
+            if !matches!(&event.from, Sender::Role(from) if from == role) {
+                return false;
+            }
+        }
+        if let Some(channel) = &self.channel {
+            if !channel_matches(&event.channel, channel) {
+                return false;
+            }
+        }
+        if let Some(kind) = self.kind {
+            if !kind.matches(&event.kind) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// A page request: the filter, an optional resume cursor, and a size limit.
+#[derive(Debug, Clone)]
+pub struct EventQuery {
+    /// Which events to keep.
+    pub filter: EventFilter,
+    /// Resume after this log position (from a previous page's [`EventPage::next`]).
+    pub after: Option<u64>,
+    /// The maximum number of events to return.
+    pub limit: usize,
+}
+
+/// One page of query results, ordered by `ts` then log position.
+#[derive(Debug)]
+pub struct EventPage {
+    /// The matching events for this page, oldest first.
+    pub events: Vec<Event>,
+    /// The cursor for the next page (a log position), absent on the last page.
+    pub next: Option<u64>,
+}
+
+/// The query's `after` cursor did not point at a stored event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidCursor;
+
+/// Runs a query over an in-memory event slice, the scan both backends share.
+///
+/// Orders matches by `(ts, position)`, a total order the cursor resumes from: since
+/// the log is append-only, a position never moves, so paging stays stable under
+/// concurrent writes. Returns the page and the position to resume after, if any.
+fn query_events(events: &[Event], query: &EventQuery) -> Result<EventPage, InvalidCursor> {
+    // Resolve the cursor to the `(ts, position)` boundary to resume strictly after.
+    let boundary = match query.after {
+        Some(position) => {
+            let event = events
+                .get(usize::try_from(position).unwrap_or(usize::MAX))
+                .ok_or(InvalidCursor)?;
+            Some((event.ts, position))
+        }
+        None => None,
+    };
+
+    let mut matched: Vec<(u64, &Event)> = events
+        .iter()
+        .enumerate()
+        .map(|(position, event)| (position as u64, event))
+        .filter(|(_, event)| query.filter.matches(event))
+        .collect();
+    matched.sort_by(|a, b| a.1.ts.cmp(&b.1.ts).then_with(|| a.0.cmp(&b.0)));
+
+    let start = match boundary {
+        Some(key) => matched.partition_point(|(position, event)| (event.ts, *position) <= key),
+        None => 0,
+    };
+    let rest = &matched[start..];
+    let take = rest.len().min(query.limit);
+    let page = rest[..take]
+        .iter()
+        .map(|(_, event)| (*event).clone())
+        .collect();
+    let next = (rest.len() > take).then(|| rest[take - 1].0);
+
+    Ok(EventPage { events: page, next })
+}
+
+/// Whether `channel` matches the `filter`, treating a pair channel as order-independent.
+fn channel_matches(channel: &ChannelId, filter: &ChannelId) -> bool {
+    if channel == filter {
+        return true;
+    }
+    match (
+        Channel::parse(channel.as_str()),
+        Channel::parse(filter.as_str()),
+    ) {
+        (Some(channel), Some(filter)) => channel == filter,
+        _ => false,
+    }
+}
+
+/// The default in-memory event store, for tests and ephemeral use.
+///
+/// Holds the log and roster in memory behind mutexes; nothing survives a restart
+/// (use [`LogStore`] for durability). A poisoned lock is recovered rather than
+/// panicked, so a bad request can never take the store down.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     events: Mutex<Vec<Event>>,
+    roster: Mutex<Roster>,
 }
 
 impl Storage for MemoryStore {
@@ -48,5 +305,485 @@ impl Storage for MemoryStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn roster(&self) -> Roster {
+        self.roster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_roster(&self, roster: Roster) {
+        *self.roster.lock().unwrap_or_else(PoisonError::into_inner) = roster;
+    }
+}
+
+/// The event log and its on-disk writer, held together under one lock so the
+/// in-memory positions always match the file's line order.
+#[derive(Debug)]
+struct Log {
+    /// The in-memory index: every event, oldest first.
+    events: Vec<Event>,
+    /// The append-only writer, positioned at the end of the log file.
+    writer: BufWriter<File>,
+}
+
+/// A durable event store: an on-disk append-only log with an in-memory index.
+///
+/// The log is one JSON-encoded [`Event`] per line. [`open`](LogStore::open) replays
+/// the file into memory, so a restart restores the full log; each append updates the
+/// index and writes one line under a single lock. The roster persists to its own
+/// file, rewritten atomically on each change. A torn or unreadable line (for example
+/// a partial write from a crash) is skipped on replay so one bad line never loses the
+/// rest of the log.
+#[derive(Debug)]
+pub struct LogStore {
+    log: Mutex<Log>,
+    roster: Mutex<Roster>,
+    roster_path: PathBuf,
+}
+
+impl LogStore {
+    /// Opens (creating if needed) the store rooted at `dir`, replaying its log.
+    ///
+    /// # Errors
+    /// Returns an error if the directory or files cannot be created, read, or opened.
+    pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)
+            .wrap_err_with(|| format!("could not create state dir {}", dir.display()))?;
+
+        let log_path = dir.join(EVENTS_FILE);
+        let events = replay(&log_path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .wrap_err_with(|| format!("could not open event log {}", log_path.display()))?;
+
+        let roster_path = dir.join(ROSTER_FILE);
+        let roster = read_roster(&roster_path)?;
+
+        event!(
+            name: "broker.store.opened",
+            Level::INFO,
+            crew.events = events.len(),
+            crew.roles = roster.len(),
+            "replayed {{crew.events}} events from the log",
+        );
+
+        Ok(Self {
+            log: Mutex::new(Log {
+                events,
+                writer: BufWriter::new(file),
+            }),
+            roster: Mutex::new(roster),
+            roster_path,
+        })
+    }
+}
+
+impl Storage for LogStore {
+    fn backend(&self) -> &'static str {
+        "log"
+    }
+
+    fn append(&self, event: Event) {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        // Persist first, then index. A write failure is logged rather than fatal: the
+        // event stays in memory so the running broker is consistent, only its
+        // durability is degraded until the operator resolves the disk problem.
+        match serde_json::to_string(&event) {
+            Ok(line) => {
+                if let Err(err) = write_line(&mut log.writer, &line) {
+                    event!(
+                        name: "broker.store.persist.failed",
+                        Level::ERROR,
+                        error = %err,
+                        "could not persist event to the log; keeping it in memory only",
+                    );
+                }
+            }
+            Err(err) => event!(
+                name: "broker.store.encode.failed",
+                Level::ERROR,
+                error = %err,
+                "could not encode event for the log; keeping it in memory only",
+            ),
+        }
+        log.events.push(event);
+    }
+
+    fn events(&self) -> Vec<Event> {
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .events
+            .clone()
+    }
+
+    fn query(&self, query: &EventQuery) -> Result<EventPage, InvalidCursor> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        query_events(&log.events, query)
+    }
+
+    fn roster(&self) -> Roster {
+        self.roster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_roster(&self, roster: Roster) {
+        let mut guard = self.roster.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(err) = persist_roster(&self.roster_path, &roster) {
+            event!(
+                name: "broker.store.roster.persist.failed",
+                Level::ERROR,
+                error = %err,
+                "could not persist roster; keeping it in memory only",
+            );
+        }
+        *guard = roster;
+    }
+}
+
+/// Writes one log line and flushes it to the OS so a restart can replay it.
+fn write_line(writer: &mut BufWriter<File>, line: &str) -> std::io::Result<()> {
+    writeln!(writer, "{line}")?;
+    writer.flush()
+}
+
+/// Replays the on-disk log into memory, skipping any unreadable line.
+fn replay(path: &Path) -> Result<Vec<Event>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err)
+                .wrap_err_with(|| format!("could not read event log {}", path.display()))
+        }
+    };
+
+    let mut events = Vec::new();
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.wrap_err_with(|| format!("could not read event log {}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Event>(&line) {
+            Ok(event) => events.push(event),
+            // A torn or corrupt line (e.g. a crash mid-append) must not lose the rest.
+            Err(err) => event!(
+                name: "broker.store.replay.skipped",
+                Level::WARN,
+                crew.line = index + 1,
+                error = %err,
+                "skipping an unreadable log line at {{crew.line}}",
+            ),
+        }
+    }
+    Ok(events)
+}
+
+/// Reads the roster file, defaulting to empty if it is absent or unreadable.
+fn read_roster(path: &Path) -> Result<Roster> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Roster::default()),
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("could not read roster {}", path.display()))
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(roster) => Ok(roster),
+        // The roster is rebuildable state, so a corrupt file starts empty, not fatal.
+        Err(err) => {
+            event!(
+                name: "broker.store.roster.unreadable",
+                Level::WARN,
+                error = %err,
+                "roster file unreadable; starting with an empty roster",
+            );
+            Ok(Roster::default())
+        }
+    }
+}
+
+/// Writes the roster atomically: to a temp file, then rename over the target.
+fn persist_roster(path: &Path, roster: &Roster) -> Result<()> {
+    let tmp = path.with_file_name(format!("{ROSTER_FILE}.tmp"));
+    let bytes = serde_json::to_vec_pretty(roster).wrap_err("could not encode roster")?;
+    std::fs::write(&tmp, &bytes).wrap_err_with(|| format!("could not write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .wrap_err_with(|| format!("could not replace {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crew_core::{
+        ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId, Sender,
+        Timestamp,
+    };
+
+    use super::{
+        query_events, EventFilter, EventKindTag, EventQuery, InvalidCursor, LogStore, MemoryStore,
+        Roster, Storage,
+    };
+
+    /// A unique temp directory that removes itself on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("crew-store-test-{}-{unique}", std::process::id()));
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ts(seconds: u32) -> Timestamp {
+        let text = format!("\"2020-01-01T00:00:{seconds:02}Z\"");
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn message(role: &str, channel: &str, at: Timestamp) -> Event {
+        Event {
+            ts: at,
+            from: Sender::Role(RoleId::new(role)),
+            channel: ChannelId::new(channel),
+            task: None,
+            kind: EventKind::Message(Message {
+                id: MessageId::new(),
+                kind: MessageKind::Note,
+                body: String::new(),
+            }),
+        }
+    }
+
+    fn unfiltered(after: Option<u64>, limit: usize) -> EventQuery {
+        EventQuery {
+            filter: EventFilter::default(),
+            after,
+            limit,
+        }
+    }
+
+    #[test]
+    fn query_orders_by_timestamp_then_position() {
+        let log = vec![
+            message("backend", "all-units", ts(3)),
+            message("backend", "all-units", ts(1)),
+            message("backend", "all-units", ts(2)),
+        ];
+        let page = query_events(&log, &unfiltered(None, 10)).unwrap();
+        let times: Vec<_> = page.events.iter().map(|event| event.ts).collect();
+        assert_eq!(times, vec![ts(1), ts(2), ts(3)]);
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn query_paging_is_stable_when_events_are_appended_between_pages() {
+        let mut log: Vec<Event> = (0..20)
+            .map(|i| message("backend", "all-units", ts(i)))
+            .collect();
+
+        let page1 = query_events(&log, &unfiltered(None, 8)).unwrap();
+        assert_eq!(page1.events.len(), 8);
+
+        // A concurrent writer appends newer events after page 1 was read.
+        log.push(message("frontend", "all-units", ts(40)));
+        log.push(message("frontend", "all-units", ts(41)));
+
+        let page2 = query_events(&log, &unfiltered(page1.next, 8)).unwrap();
+        let page3 = query_events(&log, &unfiltered(page2.next, 8)).unwrap();
+
+        let seen: Vec<Timestamp> = page1
+            .events
+            .iter()
+            .chain(&page2.events)
+            .chain(&page3.events)
+            .map(|event| event.ts)
+            .collect();
+        let originals: Vec<Timestamp> = (0..20).map(ts).collect();
+        assert_eq!(
+            seen[..20],
+            originals[..],
+            "the 20 originals page through intact"
+        );
+        assert_eq!(
+            seen[20..],
+            vec![ts(40), ts(41)],
+            "new writes land after the cursor"
+        );
+        assert_eq!(seen.len(), 22, "no duplicates or skips");
+    }
+
+    #[test]
+    fn query_filters_compose() {
+        let log = vec![
+            message("backend", "all-units", ts(1)),
+            message("frontend", "all-units", ts(2)),
+            Event {
+                kind: EventKind::Lifecycle(Lifecycle::Started),
+                ..message("backend", "all-units", ts(3))
+            },
+            message("backend", "@backend", ts(4)),
+        ];
+
+        let filtered = |filter: EventFilter| {
+            query_events(
+                &log,
+                &EventQuery {
+                    filter,
+                    after: None,
+                    limit: 100,
+                },
+            )
+            .unwrap()
+            .events
+        };
+
+        let by_role = filtered(EventFilter {
+            role: Some(RoleId::new("frontend")),
+            ..EventFilter::default()
+        });
+        assert_eq!(by_role.len(), 1);
+
+        let by_kind = filtered(EventFilter {
+            kind: Some(EventKindTag::Lifecycle),
+            ..EventFilter::default()
+        });
+        assert_eq!(by_kind.len(), 1);
+        assert!(matches!(by_kind[0].kind, EventKind::Lifecycle(_)));
+
+        let by_since = filtered(EventFilter {
+            since: Some(ts(3)),
+            ..EventFilter::default()
+        });
+        assert_eq!(by_since.len(), 2, "ts 3 and 4 remain");
+    }
+
+    #[test]
+    fn query_channel_filter_ignores_pair_member_order() {
+        let log = vec![message("backend", "frontend+backend", ts(1))];
+        let page = query_events(
+            &log,
+            &EventQuery {
+                filter: EventFilter {
+                    channel: Some(ChannelId::new("backend+frontend")),
+                    ..EventFilter::default()
+                },
+                after: None,
+                limit: 100,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 1);
+    }
+
+    #[test]
+    fn query_rejects_a_cursor_past_the_end() {
+        let log = vec![message("backend", "all-units", ts(1))];
+        assert!(matches!(
+            query_events(&log, &unfiltered(Some(99), 10)),
+            Err(InvalidCursor)
+        ));
+    }
+
+    #[test]
+    fn memory_store_round_trips_events_and_roster() {
+        let store = MemoryStore::default();
+        assert_eq!(store.backend(), "memory");
+        store.append(message("backend", "all-units", ts(1)));
+        assert_eq!(store.events().len(), 1);
+
+        let mut roster = Roster::new();
+        roster.insert(RoleId::new("backend"));
+        store.set_roster(roster.clone());
+        assert_eq!(store.roster(), roster);
+        assert!(store.roster().contains(&RoleId::new("backend")));
+    }
+
+    #[test]
+    fn log_store_replays_events_across_a_restart() {
+        let dir = TempDir::new();
+
+        // First run: append three events, then drop the store (closing the file).
+        let store = LogStore::open(dir.path()).unwrap();
+        assert_eq!(store.backend(), "log");
+        store.append(message("backend", "all-units", ts(1)));
+        store.append(message("frontend", "@backend", ts(2)));
+        store.append(message("backend", "all-units", ts(3)));
+        drop(store);
+
+        // Second run: a fresh store over the same dir replays the log.
+        let reopened = LogStore::open(dir.path()).unwrap();
+        let events = reopened.events();
+        assert_eq!(events.len(), 3, "every event survived the restart");
+        assert_eq!(events[0].ts, ts(1));
+        assert_eq!(events[2].ts, ts(3));
+
+        // A new append extends the replayed log rather than truncating it.
+        reopened.append(message("qa", "all-units", ts(4)));
+        assert_eq!(reopened.events().len(), 4);
+        drop(reopened);
+        let again = LogStore::open(dir.path()).unwrap();
+        assert_eq!(again.events().len(), 4);
+    }
+
+    #[test]
+    fn log_store_persists_the_roster_across_a_restart() {
+        let dir = TempDir::new();
+        let store = LogStore::open(dir.path()).unwrap();
+        let mut roster = Roster::new();
+        roster.insert(RoleId::new("backend"));
+        roster.insert(RoleId::new("frontend"));
+        store.set_roster(roster);
+        drop(store);
+
+        let reopened = LogStore::open(dir.path()).unwrap();
+        let roster = reopened.roster();
+        assert_eq!(roster.len(), 2);
+        assert!(roster.contains(&RoleId::new("backend")));
+        assert!(roster.contains(&RoleId::new("frontend")));
+    }
+
+    #[test]
+    fn log_store_skips_a_torn_final_line_on_replay() {
+        let dir = TempDir::new();
+        let store = LogStore::open(dir.path()).unwrap();
+        store.append(message("backend", "all-units", ts(1)));
+        drop(store);
+
+        // Simulate a crash mid-append: a partial JSON line appended to the log file.
+        let log_path = dir.path().join(super::EVENTS_FILE);
+        let mut existing = std::fs::read_to_string(&log_path).unwrap();
+        existing.push_str("{\"ts\":\"2020-01-01T00:00:0");
+        std::fs::write(&log_path, existing).unwrap();
+
+        let reopened = LogStore::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.events().len(),
+            1,
+            "the good event survives; the torn line is skipped"
+        );
     }
 }

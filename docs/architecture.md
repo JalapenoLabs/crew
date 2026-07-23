@@ -105,10 +105,22 @@ parsed from stream-json. See `observability.md`.
 
 ## Persistence
 
-Open question. The standalone broker can run in memory with an on-disk log, or
-back onto SQLite for durable history and summaries. Seraphim brings Postgres, so
-the Seraphim front-end persists there. Keep the broker storage behind a trait so
-the backend is swappable.
+The broker keeps its state behind a `Storage` trait, so the backend is swappable
+and no handler names a concrete store (issue #13). The trait covers the whole
+persisted surface: append an event, query the log with filters and a stable page
+cursor, read every event, and read or write the roster. `query` has a default that
+scans the in-memory index, so a backend with a real index (a database) overrides it
+to push the filter down; the query types stay backend-neutral so no backend type
+leaks.
+
+Two backends ship. `MemoryStore` holds everything in memory, for tests and
+ephemeral runs. `LogStore` is the durable default the `crewd` daemon uses: an
+on-disk append-only log (one JSON-encoded event per line) plus an in-memory index,
+rooted at the state directory (`events.jsonl` and `roster.json`). On start it
+replays the log into memory, so a restart restores the full history; a torn or
+unreadable line (a crash mid-append) is skipped so one bad line never loses the
+rest. `SQLite` and Postgres remain future backends behind the same trait; Seraphim
+persists to its own Postgres when it is the front-end.
 
 ## Distribution
 
