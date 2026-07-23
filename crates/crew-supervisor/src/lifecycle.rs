@@ -185,14 +185,14 @@ pub struct Incident {
 ///
 /// Launch it with the roles resolved into [`PreparedAgent`]s; every agent
 /// starts [`Stopped`](AgentState::Stopped), so an unused role costs nothing.
-/// Drive an agent with [`start`](Fleet::start) and [`stop`](Fleet::stop); read
-/// captured output with [`outputs`](Fleet::outputs) and recorded deaths with
-/// [`incidents`](Fleet::incidents). Dropping the fleet, like
+/// Drive an agent with [`start`](Fleet::start) and [`stop`](Fleet::stop), and
+/// read recorded deaths with [`incidents`](Fleet::incidents). Each agent's
+/// captured stream-json is parsed into activity events on the broker (issue
+/// #24; see [`crate::activity`]). Dropping the fleet, like
 /// [`shutdown`](Fleet::shutdown), stops every agent and deregisters its role.
 #[derive(Debug)]
 pub struct Fleet {
     drivers: Vec<AgentDriver>,
-    output: Receiver<Captured>,
     incidents: Arc<Mutex<Vec<Incident>>>,
     watchdog_stop: Sender<()>,
     watchdog: Option<JoinHandle<()>>,
@@ -228,6 +228,11 @@ impl Fleet {
     ) -> Self {
         let (sink, output) = mpsc::channel();
         let incidents = Arc::new(Mutex::new(Vec::new()));
+
+        // Parse each agent's captured stream-json into activity events on the broker
+        // (issue #24). The forwarder owns the receiver and ends when every agent has
+        // stopped and dropped its capture sink.
+        crate::activity::forward_activity(output, roster.clone());
 
         let mut drivers = Vec::with_capacity(agents.len());
         let mut shared = Vec::with_capacity(agents.len());
@@ -272,7 +277,6 @@ impl Fleet {
 
         Self {
             drivers,
-            output,
             incidents,
             watchdog_stop,
             watchdog: Some(watchdog),
@@ -461,12 +465,6 @@ impl Fleet {
     /// The roles under management.
     pub fn roles(&self) -> impl Iterator<Item = &RoleId> {
         self.drivers.iter().map(|driver| &driver.shared.role)
-    }
-
-    /// The stream of lines captured from every agent's stdout and stderr.
-    #[must_use]
-    pub fn outputs(&self) -> &Receiver<Captured> {
-        &self.output
     }
 
     /// A snapshot of the recorded defibrillator incidents, oldest first.

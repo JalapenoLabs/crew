@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use crew_core::{BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
+use crew_core::{Activity, BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
 use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -180,6 +180,31 @@ impl RosterClient {
                     event.role
                 )
             })
+    }
+
+    /// Records a role's parsed stream-json activity on the stream (`POST
+    /// /activity`, issue #24).
+    ///
+    /// The broker records it as an `activity` event keyed by the role and
+    /// correlated to this client's task (issue #29), so a role's turns and tool
+    /// calls appear on its per-agent timeline (`GET /activity?agent=<role>`)
+    /// and the aggregate stream. The supervisor's parser produces the
+    /// [`Activity`](crew_core::Activity); this only surfaces it.
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn emit_activity(&self, role: &RoleId, activity: &Activity) -> Result<()> {
+        let url = format!("{}/activity", self.base);
+        let mut body = json!({ "role": role.as_str(), "activity": activity });
+        if let Some(task) = &self.task {
+            body["task"] = json!(task);
+        }
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not report activity for role `{role}`: {err}"))
     }
 
     /// Reports a shared-subscription usage reading (`POST /usage`, issue #56).

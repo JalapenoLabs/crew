@@ -382,6 +382,7 @@ fn activity_body(activity: &Activity) -> String {
         Activity::TurnEnded => "turn ended".to_owned(),
         Activity::ToolCall { tool } => format!("tool {tool}"),
         Activity::Output { text } => text.clone(),
+        Activity::Other { raw } => format!("({raw})"),
     }
 }
 

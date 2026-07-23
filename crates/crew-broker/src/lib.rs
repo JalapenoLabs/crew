@@ -21,6 +21,7 @@
 //!
 //! [`crew_core`]: crew_core
 
+mod activity;
 mod api;
 mod board;
 mod boundary;

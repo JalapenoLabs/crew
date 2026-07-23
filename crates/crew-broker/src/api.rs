@@ -4,8 +4,8 @@ use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
 
 use crate::{
-    board, boundary, briefing, budget, complete, control, events, gate, history, inbox, ledger,
-    roster, stall, state::AppState, stats, usage,
+    activity, board, boundary, briefing, budget, complete, control, events, gate, history, inbox,
+    ledger, roster, stall, state::AppState, stats, usage,
 };
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
@@ -18,16 +18,18 @@ use crate::{
 /// for the rolling-summary compaction), the `/roster` endpoints (list,
 /// register, deregister), the control endpoints (`POST /pause`, `POST /resume`,
 /// `POST /standdown`), `POST /complete` (report a graceful mission finish,
-/// issue #121), `POST /boundary` (record a lane crossing), the `/ledger`
-/// endpoints (`GET /ledger`, `POST /ledger`), the done-gate endpoints (`GET
-/// /gate`, `POST /gate/submit`, `POST /gate/verdict`), the situation-board
-/// endpoints (`GET /board`, `POST /board`), `POST /stall` (surface a
-/// coordination stall, issue #120), and `GET /briefing?role=<role>` (the
-/// bounded new-role briefing packet).
+/// issue #121), `POST /activity` (record an agent's parsed stream-json
+/// activity, issue #24), `POST /boundary` (record a lane crossing), the
+/// `/ledger` endpoints (`GET /ledger`, `POST /ledger`), the done-gate endpoints
+/// (`GET /gate`, `POST /gate/submit`, `POST /gate/verdict`), the
+/// situation-board endpoints (`GET /board`, `POST /board`), `POST /stall`
+/// (surface a coordination stall, issue #120), and `GET /briefing?role=<role>`
+/// (the bounded new-role briefing packet).
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .merge(events::routes())
+        .merge(activity::routes())
         .merge(inbox::routes())
         .merge(history::routes())
         .merge(roster::routes())

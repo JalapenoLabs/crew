@@ -115,15 +115,20 @@ pub fn register_server(server: &Path) -> Result<()> {
 /// silently.
 ///
 /// `-p` runs the turn headless with `briefing` as the opening prompt (the role
-/// card's thin bootstrap), and `--permission-mode bypassPermissions` is what
-/// makes the user-scope crew server load with no approval gate. `argv[0]` is
-/// the program.
+/// card's thin bootstrap), `--output-format stream-json --verbose` makes the
+/// agent emit its per-turn activity as stream-json for the supervisor to parse
+/// (issue #24; `--verbose` is required alongside `stream-json` under `-p`), and
+/// `--permission-mode bypassPermissions` is what makes the user-scope crew
+/// server load with no approval gate. `argv[0]` is the program.
 #[must_use]
 pub fn agent_turn_argv(briefing: &str) -> Vec<String> {
     vec![
         CLAUDE_BIN.to_owned(),
         "-p".to_owned(),
         briefing.to_owned(),
+        "--output-format".to_owned(),
+        "stream-json".to_owned(),
+        "--verbose".to_owned(),
         "--permission-mode".to_owned(),
         "bypassPermissions".to_owned(),
     ]
@@ -283,6 +288,17 @@ mod tests {
             .position(|arg| arg == "--permission-mode")
             .unwrap();
         assert_eq!(argv[mode + 1], "bypassPermissions");
+        // The turn emits stream-json so the supervisor can parse its activity
+        // (issue #24); `--verbose` is required alongside it under `-p`.
+        let format = argv
+            .iter()
+            .position(|arg| arg == "--output-format")
+            .expect("the turn sets an output format");
+        assert_eq!(argv[format + 1], "stream-json");
+        assert!(
+            argv.iter().any(|arg| arg == "--verbose"),
+            "stream-json under -p requires --verbose: {argv:?}",
+        );
     }
 
     #[test]
