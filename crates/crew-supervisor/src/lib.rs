@@ -29,6 +29,7 @@
 //!   unanswered question, or a ledger with no forward motion, and escalates the
 //!   specific [`Stall`] so silence never reads as progress.
 
+mod activity;
 mod integrate;
 mod lifecycle;
 mod mcp;

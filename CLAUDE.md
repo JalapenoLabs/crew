@@ -505,7 +505,7 @@ register the role on the broker roster, and spawn one `claude -p` process wired 
 broker. The supervisor owns lifecycle, so it registers a role on start and
 deregisters it on exit (via `RosterClient`), keeping `GET /roster` a true picture of
 the live unit; each process's stdout and stderr are captured and streamed as
-`Captured` lines for the activity parser (issue #24). `Crew::spawn` holds the
+`Captured` lines the activity parser reads (issue #24, below). `Crew::spawn` holds the
 lifecycle mechanics and takes fully-resolved `AgentCommand`s, so it is exercised in
 tests with a stub process instead of a real `claude`. Shutting the crew down kills the
 processes and deregisters every role; a dropped crew still kills its processes.
@@ -523,6 +523,24 @@ quiet period the driver stops the process but keeps the roster entry, marked idl
 a restart is fast and keeps context), and **restart on demand** (`Fleet::start` on a
 stopped or idle agent restarts it).
 
+The supervisor captures **what each agent does inside its own process**, the per-agent
+activity log the broker cannot see (issue #24, `crew_supervisor::activity`). Each agent
+runs with `--output-format stream-json --verbose` (`agent_turn_argv`), so it emits one
+JSON object per stdout line. `activity::parse` distills each line into `crew_core::Activity`
+items, modeled on Seraphim's parser: a session `init` is a `TurnStarted`, the `result`
+line a `TurnEnded`, an assistant `tool_use` a `ToolCall`, and assistant `text` an `Output`;
+the partial-message usage firehose, tool results, and rate-limit notices are dropped (their
+token and usage feeds are issues #114 and #113). A line the parser does not recognize
+becomes `Activity::Other` rather than an error, so a schema drift across Claude Code
+versions is visible on the stream, never a crash. `activity::forward_activity` is the
+runtime half, started by `Fleet::launch`: a detached thread drains the fleet's captured
+output, parses each stdout line, and records every activity through
+`RosterClient::emit_activity` (`POST /activity`). The broker keys the `activity` event to
+the role on its own `@role` channel (via `Channel::Direct`), so it rides the aggregate
+stream and the role's per-agent timeline (`GET /activity?agent=<role>`) but never floods
+another role's inbox, and threads the supervisor's task (issue #29) for correlation.
+Recording is best-effort: a broker hiccup is logged, never fatal.
+
 The **defibrillator** (issue #23) recovers an agent whose turn died mid-flight,
 mirroring Seraphim's, with layered detection: each driver's in-turn **heartbeat**
 reaps a turn that crashed (its process exited) or hung (alive but silent past
@@ -536,10 +554,11 @@ stream carry the matching `lifecycle` event (started / idle / stopped / restarte
 died / recovered): the broker derives `recovered` from a `dead` role coming back to
 `working` (issue #23 adds the `Recovered` variant to `crew_core::Lifecycle`). The
 `LifecyclePolicy` defaults to a five-minute idle-stop, a twenty-minute heartbeat under
-a twenty-five-minute watchdog, and three recoveries. Precise hang-versus-idle
-discrimination awaits the activity parser's turn boundaries (issue #24), so by default
-a quiet agent parks rather than being force-recovered. (Unifying the eager `Crew` from
-#21 into the lifecycle-managed `Fleet` is a later cleanup.)
+a twenty-five-minute watchdog, and three recoveries. The activity parser now puts turn
+boundaries on the stream (issue #24), but the watchdog does not yet key on them for precise
+hang-versus-idle discrimination, so by default a quiet agent still parks rather than being
+force-recovered. (Wiring the watchdog to those turn boundaries, and unifying the eager
+`Crew` from #21 into the lifecycle-managed `Fleet`, are later cleanups.)
 
 The defibrillator also catches a crew stuck waiting on itself, not just a dead agent
 (issue #48, `crew_supervisor::stall`). A fleet-wide **stall monitor** thread reads a

@@ -24,11 +24,13 @@ Build the stream once; every surface reads from it.
 - **Broker** owns **communication** and **roster/liveness**. Every message an
   agent sends (order, question, answer, status, artifact, note) and every roster
   change (a role joins, goes idle, stops, restarts, dies) is a broker event.
-- **Supervisor** owns **per-agent activity**. It spawns each agent as a
-  `claude -p --output-format stream-json` process, so it parses that stream into
-  activity events (turn start and end, tool calls, output) exactly as Seraphim
-  parses the agent stream today. This is the agent's own timeline, which the
-  broker cannot see because it happens inside the agent's process.
+- **Supervisor** owns **per-agent activity** (issue #24). It spawns each agent as a
+  `claude -p --output-format stream-json --verbose` process, parses that stream into
+  activity events (turn start and end, tool calls, text output) modeled on Seraphim's
+  parser, and posts each to the broker (`POST /activity`, keyed by role). This is the
+  agent's own timeline, which the broker cannot see because it happens inside the agent's
+  process. An unrecognized stream shape is kept as `other` rather than dropped, so the log
+  survives a schema drift across Claude Code versions.
 
 Both funnel into the one event log, keyed by `role`, correlated to a `task` when
 one applies, and timestamped, so a consumer gets a unified ordered stream.
@@ -40,8 +42,10 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
 - `lifecycle` an agent's supervised state change (started, idle, stopped,
   restarted, died, recovered), including the defibrillator's death and recovery,
   and the General's control gestures (paused, resumed, stood_down; issue #41).
-- `activity` an agent's own work, parsed from its stream-json (turn boundaries,
-  tool calls, text output).
+- `activity` an agent's own work, parsed from its stream-json (issue #24): turn
+  boundaries, tool calls, text output, or `other` for a shape the parser does not model.
+  Keyed to the role on its own `@role` channel, so it rides the aggregate stream and the
+  role's timeline without reaching other roles' inboxes.
 - `boundary` a role reaching outside its owned lane (issue #46): the role, the
   out-of-lane path, and whether the crew's policy blocked the edit or only warned.
 - `ledger` a change to the shared work ledger: a role claiming a task or moving it
@@ -454,6 +458,7 @@ threads (the broker preserves it). A lifecycle event carries the task the
 supervisor is working: `RosterClient::with_task` sets the task context, and every
 registration and liveness mark it publishes correlates to that task, so `started`,
 `idle`, and `restarted` all carry it (a role fully leaving the unit is not
-task-scoped, so its `stopped` carries none). Activity events, when the stream-json
-parser lands, thread the task the same way through the `Event.task` field. An event
-produced outside any task carries no id, which serializes to an omitted field.
+task-scoped, so its `stopped` carries none). Activity events thread the task the same
+way through the `Event.task` field (issue #24): `RosterClient::emit_activity` carries the
+supervisor's task context onto each `POST /activity`. An event produced outside any task
+carries no id, which serializes to an omitted field.

@@ -345,10 +345,16 @@ pub enum Lifecycle {
     MissionComplete,
 }
 
-/// An agent's own work item, parsed from its `claude -p` stream-json.
+/// An agent's own work item, parsed from its `claude -p` stream-json (issue
+/// #24).
 ///
-/// The turn and tool payloads grow when the supervisor's stream-json parsing
-/// lands; this is the vocabulary the parse targets.
+/// The supervisor's parser distills each stream-json line into these: a session
+/// init is a [`TurnStarted`](Activity::TurnStarted), the result line a
+/// [`TurnEnded`](Activity::TurnEnded), an assistant tool-use a
+/// [`ToolCall`](Activity::ToolCall), and assistant text an
+/// [`Output`](Activity::Output). Any line the parser does not recognize becomes
+/// [`Other`](Activity::Other) rather than an error, so the log survives a
+/// schema drift across Claude Code versions instead of the parser crashing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
@@ -365,6 +371,13 @@ pub enum Activity {
     Output {
         /// The output text.
         text: String,
+    },
+    /// A stream-json shape the parser does not model, kept rather than dropped
+    /// so a schema drift is visible on the stream, never a crash (issue #24).
+    Other {
+        /// A short label for the unrecognized line: its stream-json `type`, or
+        /// `non-json` for a line that did not parse as JSON.
+        raw: String,
     },
 }
 
@@ -784,6 +797,9 @@ mod tests {
             })),
             envelope(EventKind::Activity(Activity::Output {
                 text: "build succeeded".to_owned(),
+            })),
+            envelope(EventKind::Activity(Activity::Other {
+                raw: "rate_limit_event".to_owned(),
             })),
             envelope(EventKind::Verification(VerificationEvent {
                 task: "Scaffold the broker".to_owned(),

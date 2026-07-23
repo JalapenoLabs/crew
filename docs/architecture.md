@@ -104,7 +104,8 @@ register the role on the broker roster, and spawn a `claude -p` process wired to
 broker. The supervisor owns lifecycle, so it is the authority on liveness: it
 registers a role on start and deregisters it on exit, so `GET /roster` always
 reflects the live unit. Each process's stdout and stderr are captured and streamed as
-`Captured` lines for the activity parser (issue #24). The set of roles comes from the
+`Captured` lines; the fleet's forwarder parses each agent's stdout stream-json into
+`activity` events on the broker, keyed by role (issue #24). The set of roles comes from the
 crew config (issue #25); the supervisor consumes resolved role cards, so the two
 compose without either owning the other's job.
 
@@ -140,10 +141,10 @@ role coming back to `working`), and the live count and every activity view stay 
 projection of that one stream. Recorded incidents (read with `Fleet::incidents`) give
 the operator the diagnostic behind each death. The policy is configurable, defaulting
 to a five-minute idle-stop, a twenty-minute heartbeat under a twenty-five-minute
-watchdog, and three recoveries. Precise hang-versus-idle discrimination awaits the
-activity parser's turn boundaries (issue #24); until then the heartbeat is a coarse
-output-silence signal, so by default a quiet agent parks (idle-stop) rather than being
-force-recovered.
+watchdog, and three recoveries. The activity parser now puts turn boundaries on the
+stream (issue #24), but the watchdog does not yet key on them for precise hang-versus-idle
+discrimination; until it does, the heartbeat is a coarse output-silence signal, so by
+default a quiet agent parks (idle-stop) rather than being force-recovered.
 
 The supervisor targets Claude Code by default. A Codex agent (a runtime without MCP)
 reaches the same broker through the CLI shim instead of MCP tools (issue #28), so a
