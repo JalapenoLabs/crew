@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV};
 use crew_substrate::mcp::{
-    BoardSnapshot, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing,
+    BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing,
 };
 use eyre::{eyre, Result, WrapErr};
 
@@ -104,6 +104,38 @@ pub fn roster() -> Result<()> {
         .roster()
         .map_err(|reason| eyre!("{reason}"))?;
     print_roster(&snapshot);
+    Ok(())
+}
+
+/// Claims a task, or moves this role's claim to `state`, on the work ledger (issue #45).
+///
+/// Mirrors `crew_claim`: the broker refuses a claim on work another role holds, and the
+/// error names the holder.
+///
+/// # Errors
+/// Returns an error if no role context is set, another role holds the task, or the
+/// broker cannot be reached.
+pub fn claim(task: &str, state: &str, title: &str) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .claim(task, state, title)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Prints the work ledger: every claimed task, its owner, and its state.
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn ledger() -> Result<()> {
+    let agent = load_agent()?;
+    let items = agent
+        .broker()
+        .ledger()
+        .map_err(|reason| eyre!("{reason}"))?;
+    print_ledger(&items);
     Ok(())
 }
 
@@ -324,6 +356,23 @@ fn print_roster(snapshot: &RosterSnapshot) {
             ""
         };
         println!("- {} [{}]{}{}", role.role, role.liveness, owns, gated);
+    }
+}
+
+/// Prints the work ledger, one task per line.
+fn print_ledger(items: &[LedgerItem]) {
+    if items.is_empty() {
+        println!("The ledger is empty; no work is claimed.");
+        return;
+    }
+    println!("{} task(s):", items.len());
+    for item in items {
+        let title = if item.title.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", item.title)
+        };
+        println!("- {} [{}] {}{}", item.task, item.state, item.owner, title);
     }
 }
 

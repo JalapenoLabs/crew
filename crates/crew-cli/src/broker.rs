@@ -134,6 +134,10 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Message(message) => (message_kind(&message.kind), message.body.clone()),
         EventKind::Lifecycle(lifecycle) => ("lifecycle", format!("{lifecycle:?}").to_lowercase()),
         EventKind::Activity(activity) => ("activity", activity_body(activity)),
+        EventKind::Ledger(ledger) => (
+            "ledger",
+            format!("{} {} {}", ledger.owner, ledger.state.label(), ledger.task),
+        ),
         EventKind::Boundary(boundary) => (
             "boundary",
             format!(

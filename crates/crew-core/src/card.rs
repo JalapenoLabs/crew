@@ -239,6 +239,15 @@ impl RoleCard {
 
         out.push('\n');
         out.push_str(
+            "Claim work before you touch it: call crew_claim with a stable key (a path, a \
+             feature, an order's title) so two roles never edit the same thing blind. If the \
+             claim is refused, a teammate holds it: coordinate, do not race. Move your claim to \
+             in_progress when you start, blocked if you are stuck, and done when you finish. \
+             Check crew_ledger to see who holds what.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
             "Done means verified, not asserted. When you believe a task meets its acceptance \
              criteria, do not report it done: submit it with crew_submit, and an independent role \
              tries to break it. If it fails, you get the specific failure back to fix and \
@@ -512,6 +521,10 @@ mod tests {
         assert!(
             briefing.contains("paused") && briefing.contains("pull no new work"),
             "tells the role to honor a pause"
+        );
+        assert!(
+            briefing.contains("crew_claim") && briefing.contains("before you touch it"),
+            "tells the role to claim work before starting"
         );
     }
 

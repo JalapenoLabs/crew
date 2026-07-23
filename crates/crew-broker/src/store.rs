@@ -167,7 +167,7 @@ impl Roster {
     }
 }
 
-/// The three event kinds a query can filter on.
+/// The event kinds a query can filter on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKindTag {
     /// Inter-agent communication.
@@ -176,6 +176,8 @@ pub enum EventKindTag {
     Lifecycle,
     /// An agent's own parsed work.
     Activity,
+    /// A work-ledger change (issue #45).
+    Ledger,
     /// A lane boundary crossing (issue #46).
     Boundary,
     /// A done-gate step: a submission or a verdict (issue #47).
@@ -198,6 +200,7 @@ impl EventKindTag {
             "message" => Some(Self::Message),
             "lifecycle" => Some(Self::Lifecycle),
             "activity" => Some(Self::Activity),
+            "ledger" => Some(Self::Ledger),
             "boundary" => Some(Self::Boundary),
             "verification" => Some(Self::Verification),
             "board" => Some(Self::Board),
@@ -215,6 +218,7 @@ impl EventKindTag {
             (Self::Message, EventKind::Message(_))
                 | (Self::Lifecycle, EventKind::Lifecycle(_))
                 | (Self::Activity, EventKind::Activity(_))
+                | (Self::Ledger, EventKind::Ledger(_))
                 | (Self::Boundary, EventKind::Boundary(_))
                 | (Self::Verification, EventKind::Verification(_))
                 | (Self::Board, EventKind::Board(_))

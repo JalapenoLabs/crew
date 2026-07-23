@@ -7,7 +7,8 @@ use serde::Serialize;
 
 use crate::state::AppState;
 use crate::{
-    board, boundary, briefing, budget, control, events, gate, history, inbox, roster, stats, usage,
+    board, boundary, briefing, budget, control, events, gate, history, inbox, ledger, roster,
+    stats, usage,
 };
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
@@ -18,10 +19,11 @@ use crate::{
 /// `GET /activity?agent=<role>` (a role's live activity timeline over SSE),
 /// `GET /history` (read past events, filtered and paginated, or `summary=true` for the
 /// rolling-summary compaction), the `/roster` endpoints (list, register, deregister),
-/// the control endpoints (`POST /pause`, `POST /resume`, `POST /standdown`), the
-/// done-gate endpoints (`GET /gate`, `POST /gate/submit`, `POST /gate/verdict`), the
-/// situation-board endpoints (`GET /board`, `POST /board`), and `GET /briefing?role=<role>`
-/// (the bounded new-role briefing packet).
+/// the control endpoints (`POST /pause`, `POST /resume`, `POST /standdown`), `POST
+/// /boundary` (record a lane crossing), the `/ledger` endpoints (`GET /ledger`, `POST
+/// /ledger`), the done-gate endpoints (`GET /gate`, `POST /gate/submit`, `POST
+/// /gate/verdict`), the situation-board endpoints (`GET /board`, `POST /board`), and
+/// `GET /briefing?role=<role>` (the bounded new-role briefing packet).
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -35,6 +37,7 @@ pub(crate) fn build(state: AppState) -> Router {
         .merge(stats::routes())
         .merge(usage::routes())
         .merge(gate::routes())
+        .merge(ledger::routes())
         .merge(board::routes())
         .merge(briefing::routes())
         .with_state(state)

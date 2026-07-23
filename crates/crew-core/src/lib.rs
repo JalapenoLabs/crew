@@ -9,8 +9,10 @@
 //!   [`TaskId`]) and the [`Timestamp`] wrapper;
 //! - the [`Sender`] of an event (a role, or the General);
 //! - the [`Event`] stream item and its [`EventKind`] payloads ([`Message`] with a
-//!   [`MessageKind`], [`Lifecycle`], [`Activity`], [`BoundaryEvent`], [`VerificationEvent`],
-//!   and [`BoardEvent`]);
+//!   [`MessageKind`], [`Lifecycle`], [`Activity`], a [`LedgerEvent`] work claim, a
+//!   [`BoundaryEvent`] lane crossing, a [`VerificationEvent`] done-gate step, a
+//!   [`BoardEvent`] board change, and the [`BudgetEvent`], [`TelemetryEvent`], and
+//!   [`UsageEvent`] economy reports);
 //! - the [`Channel`] model that names a message's audience (`all-units`, a direct
 //!   `@role`, or a `a+b` pair) and resolves which roles it reaches;
 //! - the [`RoleCard`] an agent boots from: its lane, its acceptance bar, and how to
@@ -35,7 +37,8 @@ pub use channel::{Channel, ALL_UNITS};
 pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
 pub use event::{
     Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, Event, EventKind,
-    Lifecycle, Message, MessageKind, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
+    LedgerEvent, Lifecycle, Message, MessageKind, TaskState, TelemetryEvent, UsageEvent, Verdict,
+    VerificationEvent,
 };
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use lane::path_in_lane;

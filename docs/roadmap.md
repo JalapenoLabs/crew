@@ -83,11 +83,11 @@ it.
   (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
   the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
-  config, issue #43, done) with an integrator to follow, a work ledger with claims,
-  lane-ownership enforcement (`lane_enforcement` and the `crew_lane` tool, issue #46,
-  done), an adversarial done-gate (`crew_submit` / `crew_verdict` / `crew_gate`, issue
-  #47, done), and coordination-stall detection (the defibrillator's fleet-wide stall
-  monitor, issue #48, done).
+  config, issue #43, done) with an integrator to follow, a work ledger with claims
+  (`crew_claim` / `crew_ledger`, issue #45, done), lane-ownership enforcement
+  (`lane_enforcement` and the `crew_lane` tool, issue #46, done), an adversarial done-gate
+  (`crew_submit` / `crew_verdict` / `crew_gate`, issue #47, done), and coordination-stall
+  detection (the defibrillator's fleet-wide stall monitor, issue #48, done).
 - **Team Memory + Cockpit.** A shared situation board (`crew_board` / `crew_record`,
   issue #49, done: the crew's durable memory of decisions, interfaces, and gotchas,
   rebuilt from the log across a restart), a new-role briefing packet (`crew_briefing`,

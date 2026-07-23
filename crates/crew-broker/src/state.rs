@@ -12,6 +12,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::config::Config;
+use crate::ledger::Ledger;
 use crate::router::ChannelRouter;
 use crate::secrets::Scrubber;
 use crate::store::{MemoryStore, Storage};
@@ -398,6 +399,9 @@ pub struct AppState {
     /// live recoverable authority, and every pause change is also recorded as a
     /// `lifecycle` event in the durable log.
     control: Arc<Mutex<Control>>,
+    /// The shared work ledger (issue #45): who holds which task. In memory, with every
+    /// claim also recorded as a `ledger` event in the durable log.
+    ledger: Arc<Mutex<Ledger>>,
     /// The adversarial done-gate: tasks under verification (issue #47). In memory like
     /// the control state, with every transition also recorded as a `verification` event.
     gate: Arc<Mutex<Gate>>,
@@ -446,11 +450,20 @@ impl AppState {
             broadcast,
             publish_order: Arc::new(Mutex::new(())),
             control: Arc::new(Mutex::new(Control::default())),
+            ledger: Arc::new(Mutex::new(Ledger::default())),
             gate: Arc::new(Mutex::new(Gate::default())),
             board: Arc::new(Mutex::new(board)),
             stats: Arc::new(Mutex::new(stats)),
             usage: Arc::new(Mutex::new(usage)),
         }
+    }
+
+    /// The work ledger behind its lock, recovering from a poisoned mutex.
+    ///
+    /// The claim handler holds this across its check, update, and publish, so the
+    /// broker serializes claims: two roles can never both take the same task.
+    pub(crate) fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
+        self.ledger.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Pauses one role: it pulls no new work until resumed (issue #41).

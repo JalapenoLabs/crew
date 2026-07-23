@@ -35,6 +35,13 @@ Two rules keep a unit healthy:
    An idle role is a running tax. Spin roles up on demand and stand them down when
    the push is over.
 
+Ownership by directory sets the lanes; the **work ledger** enforces them on live work
+(issue #45). A role claims a task before it starts (`crew_claim`, or the shim `crew
+claim`) and moves the claim to `in_progress`, `blocked`, and `done` as it goes, so two
+roles never grab the same work or edit the same file blind. The broker keeps one owner
+per task and refuses a conflicting claim, naming the holder, so a clash surfaces rather
+than races. `crew_ledger` shows who holds what. See `docs/observability.md`.
+
 A crew is described by a declarative config (`crew_core::CrewConfig`, issue #25): the
 roles and the lane each owns, the model they run, the repos in scope, the idle-stop
 timeout, and the commander. `crew up` reads it, and it validates itself (an unknown

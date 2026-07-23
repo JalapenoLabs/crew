@@ -33,6 +33,7 @@ mod filter;
 mod gate;
 mod history;
 mod inbox;
+mod ledger;
 mod roster;
 mod router;
 mod secrets;

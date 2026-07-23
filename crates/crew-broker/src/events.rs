@@ -429,6 +429,7 @@ mod tests {
             EventKind::Message(message) => message.body.clone(),
             EventKind::Lifecycle(_)
             | EventKind::Activity(_)
+            | EventKind::Ledger(_)
             | EventKind::Boundary(_)
             | EventKind::Verification(_)
             | EventKind::Board(_)

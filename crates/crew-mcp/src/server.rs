@@ -12,7 +12,8 @@ use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
 use crate::broker::{
-    BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing,
+    BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot,
+    Standing,
 };
 
 /// The MCP protocol version this server implements.
@@ -145,6 +146,16 @@ impl Server {
                 self.broker
                     .check_lane(&self.owned_paths, self.lane_enforcement, path)
             }
+            "crew_claim" => {
+                let task =
+                    str_arg(arguments, "task").ok_or("crew_claim requires a `task` to claim")?;
+                self.broker.claim(
+                    task,
+                    str_arg(arguments, "state").unwrap_or("claimed"),
+                    str_arg(arguments, "title").unwrap_or_default(),
+                )
+            }
+            "crew_ledger" => Ok(render_ledger(&self.broker.ledger()?)),
             "crew_submit" => {
                 let task =
                     str_arg(arguments, "task").ok_or("crew_submit requires a `task` to submit")?;
@@ -208,9 +219,10 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: coordination, done-gate, board, then briefing.
+/// The tool catalog for `tools/list`: coordination, work-ledger, done-gate, board, briefing.
 fn tool_catalog() -> Value {
     let mut tools = coordination_tools();
+    tools.extend(ledger_tools());
     tools.extend(done_gate_tools());
     tools.extend(board_tools());
     tools.extend(briefing_tools());
@@ -294,6 +306,40 @@ fn coordination_tools() -> Vec<Value> {
                 },
                 "required": ["path"]
             }
+        }),
+    ]
+}
+
+/// The work-ledger tools: claim a task or move a claim forward, and read the ledger.
+fn ledger_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "crew_claim",
+            "description": "Claim a piece of work before you start it, so no two roles touch \
+                the same work. `task` is a stable key the crew agrees on (a path, a feature, an \
+                order's title). If another role already holds it, this fails and names the \
+                holder: coordinate, do not race. Call it again with `state` to move your claim \
+                forward: `in_progress` when you start, `blocked` if you are stuck, and `done` \
+                when you finish (which frees the task). `title` is an optional human label.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The work item's key (a path, feature, or order title)." },
+                    "state": {
+                        "type": "string",
+                        "enum": ["claimed", "in_progress", "blocked", "done"],
+                        "description": "The state to move it to; defaults to `claimed`."
+                    },
+                    "title": { "type": "string", "description": "An optional short label for the ledger." }
+                },
+                "required": ["task"]
+            }
+        }),
+        json!({
+            "name": "crew_ledger",
+            "description": "Read the work ledger: every claimed task, who owns it, and its \
+                state. Check it before claiming, so you never grab work a teammate already holds.",
+            "inputSchema": { "type": "object", "properties": {} }
         }),
     ]
 }
@@ -487,6 +533,25 @@ fn render_inbox(items: &[InboxItem]) -> String {
         })
         .collect();
     format!("{} new message(s):\n{}", items.len(), lines.join("\n"))
+}
+
+/// Renders the work ledger an agent reads.
+fn render_ledger(items: &[LedgerItem]) -> String {
+    if items.is_empty() {
+        return "The ledger is empty; no work is claimed.".to_owned();
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .map(|item| {
+            let title = if item.title.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", item.title)
+            };
+            format!("- {} [{}] {}{}", item.task, item.state, item.owner, title)
+        })
+        .collect();
+    format!("{} task(s):\n{}", items.len(), lines.join("\n"))
 }
 
 /// Renders the roster an agent reads.
@@ -686,6 +751,8 @@ mod tests {
                 "crew_inbox",
                 "crew_roster",
                 "crew_lane",
+                "crew_claim",
+                "crew_ledger",
                 "crew_submit",
                 "crew_verdict",
                 "crew_gate",

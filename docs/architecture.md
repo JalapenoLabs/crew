@@ -41,6 +41,8 @@ Planned surface (illustrative, not final):
 - `POST /boundary` records a role reaching outside its owned lane as a `boundary` event
   on the stream (issue #46), so an out-of-lane edit is surfaced to the operator rather
   than passing silently. See `docs/observability.md`.
+- `GET /ledger` reads the work ledger, and `POST /ledger` claims a task or moves a
+  claim's state, refusing a claim another role holds (issue #45).
 - `GET /gate` reads the adversarial done-gate; `POST /gate/submit` submits work for
   verification and `POST /gate/verdict` records an independent verdict, refusing a
   self-verdict so "done" means an independent role could not break it (issue #47). See
@@ -165,8 +167,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes eleven tools (issues #17,
-#27, #46, #47, #49, #50):
+broker's HTTP API; it never touches the store. It exposes thirteen tools (issues #17,
+#27, #45, #46, #47, #49, #50):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -187,6 +189,10 @@ broker's HTTP API; it never touches the store. It exposes eleven tools (issues #
   the crossing to the unit (a `boundary` event) and, under a blocking policy, refuses the
   edit, telling the role to route the change through the commander. The policy comes from
   the role card (`lane_enforcement`: `warn` / `block` / `off`). See `docs/roles.md`.
+- `crew_claim` claims a piece of work (a task key) before the role starts it, or moves
+  the role's claim to `in_progress`, `blocked`, or `done`. The broker refuses a claim
+  another role holds, so two roles never edit the same work blind (issue #45).
+- `crew_ledger` reads the work ledger: every claimed task, its owner, and its state.
 - `crew_submit`, `crew_verdict`, and `crew_gate` are the adversarial done-gate (issue
   #47). A role submits finished work for verification with `crew_submit` rather than
   reporting it done; an independent role tries to break it and records a pass or a
@@ -210,8 +216,9 @@ reads, not a protocol error.
 
 MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
 the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, `crew roster`,
-`crew lane`, the done-gate trio `crew submit` / `crew verdict` / `crew gate`, the
-situation-board pair `crew board` / `crew record`, and `crew briefing` act as
+`crew lane`, the work-ledger pair `crew claim` / `crew ledger`, the done-gate trio
+`crew submit` / `crew verdict` / `crew gate`, the situation-board pair `crew board` /
+`crew record`, and `crew briefing` act as
 the role the environment names and reach the broker through the
 **same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
 broker identically. A Codex agent registers on boot and then sends and reads through

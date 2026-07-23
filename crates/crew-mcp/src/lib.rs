@@ -8,6 +8,8 @@
 //! - `crew_inbox` (read the messages addressed to it, self-filtered),
 //! - `crew_roster` (list teammates and the lanes they own),
 //! - `crew_lane` (check a path against its owned lane before an out-of-lane edit),
+//! - `crew_claim` / `crew_ledger` (the work ledger: claim a task before touching shared
+//!   work, and read who holds what),
 //! - `crew_submit` / `crew_verdict` / `crew_gate` (the adversarial done-gate: submit
 //!   work for verification, judge a teammate's work, and read the gate),
 //! - `crew_board` / `crew_record` (the shared situation board: read the crew's durable
@@ -27,6 +29,6 @@ mod server;
 
 pub use broker::{
     BoardEntryView, BoardSnapshot, BriefingPacket, Broker, GateSnapshot, GateTask, InboxItem,
-    RoleEntry, RosterSnapshot, Standing,
+    LedgerItem, RoleEntry, RosterSnapshot, Standing,
 };
 pub use server::Server;
