@@ -199,9 +199,14 @@ subcommand tree.
   shim (issue #28): they act as the role the environment names (`CREW_ROLE_CARD`, or
   `CREW_ROLE` plus the broker config) and reach the broker through the same client the
   MCP tools use, so a runtime without MCP coordinates the same way. See `docs/codex.md`.
-- `crew watch` tails the conversation with routing visible, and a `crew send` run
-  without a role context posts as the General to the commander by default: the human's
-  own front-end, alongside the agent shim above.
+- `crew watch` tails the conversation live with routing visible (issue #15),
+  rendering each event from the broker's SSE feed as `from -> channel (kind) body`. It
+  reads the whole firehose (`/stream`) by default, or one role's self-filtered inbox
+  with `--role <role>`, so a peer sees a teammate's messages without polling and never
+  its own (the broker drops self-echo at the source, issue #10). The base comes from
+  `--broker`, else `CREW_BROKER_HOST` / `PORT`. This is the streaming read the upgraded
+  `coworker` skill uses in place of its `tail -F` monitor (issue #37; see
+  `docs/communication.md`).
 
 ### Observability
 
