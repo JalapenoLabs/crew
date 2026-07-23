@@ -161,8 +161,8 @@ The full design is in `docs/architecture.md`. In short:
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
   (auto-reconnecting like `tail -F`, resuming from `Last-Event-ID` without loss, issue #117),
   `crew notify` to push a native notification on each actionable moment (a question, a
-  death, a stand-down, a coordination stall) over that same stream, and `crew usage` to read
-  the shared-subscription usage gauge (issue #56).
+  death, a stand-down, a coordination stall, a mission completion) over that same stream, and
+  `crew usage` to read the shared-subscription usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -321,7 +321,7 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes thirteen
+API; it never touches the store. It exposes fourteen
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
@@ -336,7 +336,9 @@ touching shared work, moving the claim through `in_progress` / `blocked` / `done
 read the ledger; the broker refuses a claim another role holds, issue #45), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
 work for verification instead of asserting it done, judge a teammate's work as an
-independent skeptic, and read the gate; issue #47), the situation-board pair `crew_board`
+independent skeptic, and read the gate; issue #47), `crew_complete` (report the mission
+gracefully finished, typically as the commander, so `crew notify` fires on a true
+completion rather than a stand-down; issue #121), the situation-board pair `crew_board`
 / `crew_record` (read the crew's durable memory, and record or retract a decision,
 interface, or gotcha; issue #49), and `crew_briefing` (the bounded new-role briefing
 packet: the board plus a lane-scoped rolling summary, size-capped; issue #50). A tool
@@ -610,7 +612,8 @@ in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
 `crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue #45), the
-done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), the
+done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), `crew complete`
+(report the mission gracefully finished, issue #121), the
 situation-board pair `crew board` / `crew record` (issue #49), and `crew briefing`
 (issue #50) let an agent on a runtime without MCP, such
 as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
@@ -643,12 +646,14 @@ sharing the `broker::tail_events` read half, so there is no separate signal path
 auto-reconnects on a dropped connection along with `crew watch`, issue #117) and
 pushes a native notification on each **actionable moment**: a question asked
 (`message`/`question`), a role dead (`lifecycle`/`died`), the crew stood down
-(`lifecycle`/`stood_down`), or the crew stalled (a `stall`/`detected` event, issue #120; a
-`resolved` stall stays quiet). Routine chatter (status, notes, orders, answers, artifacts,
-ordinary lifecycle, activity, board, boundary, verification) stays quiet by default. A
-pure classifier, `notification_for`, decides per event, so the policy is fully unit-tested;
-`--mute <moments>` (`question,died,stood-down,stalled`) narrows the set and `--no-sound`
-drops the terminal bell. Each push prints a log line (the durable record), sounds the bell
+(`lifecycle`/`stood_down`), the crew stalled (a `stall`/`detected` event, issue #120; a
+`resolved` stall stays quiet), or the mission complete (a `lifecycle`/`mission_complete`
+event, issue #121: the crew's graceful finish, reported through `crew_complete`, distinct
+from the stand-down that used to approximate it). Routine chatter (status, notes, orders,
+answers, artifacts, ordinary lifecycle, activity, board, boundary, verification) stays
+quiet by default. A pure classifier, `notification_for`, decides per event, so the policy
+is fully unit-tested; `--mute <moments>` (`question,died,stood-down,stalled,complete`)
+narrows the set and `--no-sound` drops the terminal bell. Each push prints a log line (the durable record), sounds the bell
 (mirroring Seraphim's notification sound), and calls the platform desktop notifier
 (`notify-send` on Linux, `osascript` on macOS), degrading quietly when no notifier is
 present. An approval pending (issue #40) plugs into the same classifier when its event

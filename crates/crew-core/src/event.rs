@@ -337,6 +337,12 @@ pub enum Lifecycle {
     /// preserved so the crew is recoverable (issue #41). The General's
     /// emergency kill switch.
     StoodDown,
+    /// The crew gracefully finished its mission: the work is done, not halted
+    /// (issue #121). A role, typically the commander, reports it as the mission
+    /// completes, so `crew notify` can pull the General back on a true finish
+    /// rather than approximating it with a [`StoodDown`](Self::StoodDown)
+    /// emergency halt.
+    MissionComplete,
 }
 
 /// An agent's own work item, parsed from its `claude -p` stream-json.
@@ -771,6 +777,7 @@ mod tests {
             envelope(EventKind::Lifecycle(Lifecycle::Paused)),
             envelope(EventKind::Lifecycle(Lifecycle::Resumed)),
             envelope(EventKind::Lifecycle(Lifecycle::StoodDown)),
+            envelope(EventKind::Lifecycle(Lifecycle::MissionComplete)),
             envelope(EventKind::Activity(Activity::TurnStarted)),
             envelope(EventKind::Activity(Activity::ToolCall {
                 tool: "cargo".to_owned(),

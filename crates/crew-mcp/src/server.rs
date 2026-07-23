@@ -177,6 +177,7 @@ impl Server {
                 )
             }
             "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
+            "crew_complete" => self.broker.complete(),
             "crew_board" => Ok(render_board(
                 &self.broker.board(str_arg(arguments, "section"))?,
             )),
@@ -393,6 +394,16 @@ fn done_gate_tools() -> Vec<Value> {
             "description": "Read the done-gate: every task under verification, who owns it, who \
                 is verifying it, and whether it is submitted, passed, or failed. Use it to see \
                 what is awaiting an independent verifier and what has been proven done.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "crew_complete",
+            "description": "Report the whole mission gracefully complete, the crew's version of \
+                signing off. Call this, typically as the commander, only when the work is truly \
+                done (every task verified through the done-gate), so the General is pulled back \
+                on a real finish. This is a graceful completion, not the emergency stand-down, \
+                and it does not halt the crew; it announces the mission is done. Send a summary \
+                of what shipped with crew_send first if useful.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
     ]
@@ -766,6 +777,7 @@ mod tests {
                 "crew_submit",
                 "crew_verdict",
                 "crew_gate",
+                "crew_complete",
                 "crew_board",
                 "crew_record",
                 "crew_briefing"

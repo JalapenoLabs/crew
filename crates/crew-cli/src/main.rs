@@ -255,6 +255,10 @@ enum Command {
     },
     /// Read the done-gate: tasks under verification and their standing.
     Gate,
+    /// Report the mission gracefully complete, as the crew (typically the
+    /// commander). Distinct from the emergency `standdown`; it announces a
+    /// finish without halting the crew.
+    Complete,
     /// Record or retract a shared situation board entry: a decision, interface,
     /// or gotcha.
     Record {
@@ -359,6 +363,7 @@ fn main() -> Result<()> {
             failure,
         } => shim::verdict(&task, pass, failure.as_deref()),
         Command::Gate => shim::gate(),
+        Command::Complete => shim::complete(),
         Command::Record {
             key,
             section,

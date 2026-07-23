@@ -21,6 +21,9 @@
 //! - **The crew is stalled** (a `stall` event, [`StallStatus::Detected`]): the
 //!   crew is stuck waiting on itself and needs the General (issue #48, #120). A
 //!   resolved stall is good news and stays quiet.
+//! - **The mission completes** ([`Lifecycle::MissionComplete`]): the crew
+//!   gracefully finished its work (issue #121). This is the true completion,
+//!   distinct from the stand-down that used to stand in for it.
 //!
 //! Everything else (status, notes, orders, answers, artifacts, ordinary
 //! lifecycle such as `started` or `idle`, activity, board, boundary, and
@@ -68,8 +71,8 @@ const MAX_DETAIL: usize = 160;
 /// An actionable moment: a stream event that changes what the General would do
 /// next.
 ///
-/// The `clap` value names (`question`, `died`, `stood-down`, `stalled`) are the
-/// tokens `--mute` accepts.
+/// The `clap` value names (`question`, `died`, `stood-down`, `stalled`,
+/// `complete`) are the tokens `--mute` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Moment {
     /// A role asked a question and is waiting on a decision.
@@ -85,6 +88,10 @@ pub(crate) enum Moment {
     /// to unstick it (issue #48, #120).
     #[value(name = "stalled")]
     RoleStalled,
+    /// The mission completed: the crew gracefully finished its work (issue
+    /// #121), distinct from a stand-down.
+    #[value(name = "complete")]
+    MissionComplete,
 }
 
 /// Which moments push a notification, and whether a push sounds the bell.
@@ -157,6 +164,7 @@ fn moment_of(event: &Event) -> Option<Moment> {
         },
         EventKind::Lifecycle(Lifecycle::Died) => Some(Moment::RoleDied),
         EventKind::Lifecycle(Lifecycle::StoodDown) => Some(Moment::CrewStoodDown),
+        EventKind::Lifecycle(Lifecycle::MissionComplete) => Some(Moment::MissionComplete),
         // Only a newly detected stall pulls the General in; a resolved one is
         // good news that needs no push.
         EventKind::Stall(stall) if stall.status == StallStatus::Detected => {
@@ -196,6 +204,10 @@ fn render(event: &Event, moment: Moment) -> Notification {
                 body: format!("coordination stall: {detail}"),
             }
         }
+        Moment::MissionComplete => Notification {
+            title: "crew: mission complete".to_owned(),
+            body: format!("{who} reports the mission gracefully finished"),
+        },
     }
 }
 
@@ -524,6 +536,48 @@ mod tests {
             )
             .is_none(),
             "a muted stall does not notify"
+        );
+    }
+
+    #[test]
+    fn a_mission_completion_is_an_actionable_moment_distinct_from_stand_down() {
+        assert_eq!(
+            moment_of(&lifecycle("commander", Lifecycle::MissionComplete)),
+            Some(Moment::MissionComplete),
+            "a graceful finish fires its own moment, not the stand-down one"
+        );
+        assert_eq!(
+            moment_of(&lifecycle("commander", Lifecycle::StoodDown)),
+            Some(Moment::CrewStoodDown),
+            "a stand-down is still its own moment"
+        );
+    }
+
+    #[test]
+    fn a_mission_completion_notification_names_the_reporter() {
+        let policy = NotifyPolicy::new(vec![], true);
+        let notification =
+            notification_for(&lifecycle("commander", Lifecycle::MissionComplete), &policy)
+                .expect("a mission completion is an actionable moment");
+        assert!(
+            notification.title.contains("complete"),
+            "title: {}",
+            notification.title
+        );
+        assert!(
+            notification.body.contains("commander"),
+            "body names who reported it: {}",
+            notification.body
+        );
+    }
+
+    #[test]
+    fn a_muted_completion_does_not_notify() {
+        let policy = NotifyPolicy::new(vec![Moment::MissionComplete], true);
+        assert!(
+            notification_for(&lifecycle("commander", Lifecycle::MissionComplete), &policy)
+                .is_none(),
+            "a muted completion does not notify"
         );
     }
 }
