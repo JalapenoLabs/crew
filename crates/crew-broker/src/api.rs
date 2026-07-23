@@ -13,6 +13,7 @@ use crate::{events, history, inbox, roster};
 /// Serves `GET /health`, `POST /channels/{channel}/messages` (post a message),
 /// `GET /events` (read the log), `GET /stream` (the whole live feed),
 /// `GET /inbox?role=<role>` (a role's live, self-filtered SSE stream),
+/// `GET /activity?agent=<role>` (a role's live activity timeline over SSE),
 /// `GET /history` (read past events, filtered and paginated, or `summary=true` for the
 /// rolling-summary compaction), and the `/roster` endpoints (list, register,
 /// deregister).

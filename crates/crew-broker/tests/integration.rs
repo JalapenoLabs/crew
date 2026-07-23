@@ -122,6 +122,25 @@ impl TestBroker {
         }
     }
 
+    /// Subscribes to a role's activity timeline SSE stream, live from now.
+    async fn activity(&self, agent: &str) -> Inbox {
+        let response = self
+            .client
+            .get(self.url(&format!("/activity?agent={agent}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "activity for {agent} should open"
+        );
+        Inbox {
+            response,
+            buffer: String::new(),
+        }
+    }
+
     /// Subscribes to the aggregate live stream with a query (e.g. `?role=backend`).
     async fn stream(&self, query: &str) -> Inbox {
         let response = self
@@ -228,6 +247,48 @@ async fn a_posted_message_is_received_live_and_appears_in_history() {
     // ...and persisted, so history returns it.
     let history = broker.get_json("/history").await;
     assert_eq!(bodies(&history), vec!["the API is ready"]);
+
+    broker.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_s_timeline_is_retrievable_as_history_and_live() {
+    // The per-agent activity log (issue #30): one role's full timeline, retrievable
+    // both as history and as a live SSE stream.
+    let broker = TestBroker::in_memory().await;
+
+    // A live subscription to backend's timeline, open before anything is posted.
+    let mut timeline = broker.activity("backend").await;
+
+    // What backend does and receives, plus a message between others it should not see.
+    broker
+        .post_note("@frontend", role("backend"), "sent") // backend sent
+        .await;
+    broker
+        .post_note("@backend", role("frontend"), "received") // backend received
+        .await;
+    broker
+        .post_note("@qa", role("frontend"), "not backend's") // between others
+        .await;
+
+    // Live: the timeline carries backend's own message and the one it received, in
+    // order, but never a message between other roles.
+    let first = timeline.recv(EXPECTED).await.expect("its own message");
+    assert_eq!(body_of(&first), "sent");
+    assert_eq!(from_of(&first), "backend");
+    let second = timeline.recv(EXPECTED).await.expect("the received message");
+    assert_eq!(body_of(&second), "received");
+    assert!(
+        timeline.recv(ABSENT).await.is_none(),
+        "a message between other roles is not on backend's timeline",
+    );
+
+    // History: the same timeline is retrievable after the fact, and it differs from
+    // the sender-only `role` filter (which omits what backend received).
+    let history = broker.get_json("/history?agent=backend").await;
+    assert_eq!(bodies(&history), vec!["sent", "received"]);
+    let sent_only = broker.get_json("/history?role=backend").await;
+    assert_eq!(bodies(&sent_only), vec!["sent"]);
 
     broker.stop().await;
 }

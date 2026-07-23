@@ -1,9 +1,10 @@
 //! The history endpoint: read past events, filtered, ordered, and paginated.
 //!
 //! `GET /history` lets a consumer or a late joiner read the stored log without
-//! holding a stream open. It filters by `channel`, `role`, `kind`, `task`, and
-//! `since`, orders deterministically by `ts` then log position, and pages with a
-//! stable cursor so concurrent writes never shift a page already returned.
+//! holding a stream open. It filters by `channel`, `role` (sent by), `agent` (a
+//! role's full activity timeline: what it sent and received, issue #30), `kind`,
+//! `task`, and `since`, orders deterministically by `ts` then log position, and pages
+//! with a stable cursor so concurrent writes never shift a page already returned.
 //!
 //! This module owns the HTTP surface only: it parses and validates the query string
 //! into a backend-neutral [`EventQuery`] and formats the [`EventPage`] the store
@@ -175,7 +176,8 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use crew_core::{
-        ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender, Timestamp,
+        Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId,
+        Sender, Timestamp,
     };
     use serde_json::Value;
     use tower::ServiceExt;
@@ -190,19 +192,49 @@ mod tests {
         from_str(&format!("2020-01-01T00:00:{seconds:02}Z")).unwrap()
     }
 
-    /// A note message event from `role` on `channel`, stamped at `at`.
-    fn message(role: &str, channel: &str, at: Timestamp) -> Event {
+    /// An event of `kind` from `role` on `channel`, stamped at `at`.
+    fn event(role: &str, channel: &str, at: Timestamp, kind: EventKind) -> Event {
         Event {
             ts: at,
             from: Sender::Role(RoleId::new(role)),
             channel: ChannelId::new(channel),
             task: None,
-            kind: EventKind::Message(Message {
+            kind,
+        }
+    }
+
+    /// A note message event from `role` on `channel`, stamped at `at`.
+    fn message(role: &str, channel: &str, at: Timestamp) -> Event {
+        event(
+            role,
+            channel,
+            at,
+            EventKind::Message(Message {
                 id: MessageId::new(),
                 kind: MessageKind::Note,
                 body: String::new(),
             }),
-        }
+        )
+    }
+
+    /// A `started` lifecycle event for `role`, on `all-units`, stamped at `at`.
+    fn lifecycle(role: &str, at: Timestamp) -> Event {
+        event(
+            role,
+            "all-units",
+            at,
+            EventKind::Lifecycle(Lifecycle::Started),
+        )
+    }
+
+    /// A `turn started` activity event for `role`, on `all-units`, stamped at `at`.
+    fn activity(role: &str, at: Timestamp) -> Event {
+        event(
+            role,
+            "all-units",
+            at,
+            EventKind::Activity(Activity::TurnStarted),
+        )
     }
 
     fn seed(state: &AppState, events: impl IntoIterator<Item = Event>) {
@@ -256,6 +288,93 @@ mod tests {
         let mut sorted = collected.clone();
         sorted.sort();
         assert_eq!(collected, sorted, "events arrive time-ordered across pages");
+    }
+
+    #[tokio::test]
+    async fn agent_returns_the_role_s_full_timeline_ordered() {
+        let state = AppState::new(Config::default());
+        // backend's own events: a message it sent, its lifecycle, its activity.
+        seed(
+            &state,
+            [
+                message("backend", "@frontend", ts(0)),
+                lifecycle("backend", ts(1)),
+                activity("backend", ts(2)),
+            ],
+        );
+        // messages backend received: a direct one and a broadcast.
+        seed(
+            &state,
+            [
+                message("frontend", "@backend", ts(3)),
+                message("qa", "all-units", ts(4)),
+            ],
+        );
+        // not backend's timeline: a message between others, and a peer's lifecycle.
+        seed(
+            &state,
+            [
+                message("frontend", "@qa", ts(5)),
+                lifecycle("frontend", ts(6)),
+            ],
+        );
+
+        let (status, body) = get(&state, "?agent=backend").await;
+        assert_eq!(status, StatusCode::OK);
+        let events = body["events"].as_array().unwrap();
+        let times: Vec<&str> = events
+            .iter()
+            .map(|event| event["ts"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            times,
+            [
+                "2020-01-01T00:00:00Z", // sent
+                "2020-01-01T00:00:01Z", // own lifecycle
+                "2020-01-01T00:00:02Z", // own activity
+                "2020-01-01T00:00:03Z", // received direct
+                "2020-01-01T00:00:04Z", // received broadcast
+            ],
+            "the timeline is what it sent and received, time-ordered, excluding others'",
+        );
+
+        // The `agent` timeline differs from the sender-only `role` filter: `role`
+        // keeps only what backend sent (its 3 own events), not what it received.
+        let (_, by_role) = get(&state, "?role=backend").await;
+        assert_eq!(by_role["events"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn agent_timeline_pages_with_a_stable_cursor() {
+        let state = AppState::new(Config::default());
+        // Five events on backend's timeline (sent and received), plus noise for others.
+        seed(
+            &state,
+            (0..5).map(|i| message("frontend", "@backend", ts(i))),
+        );
+        seed(&state, [message("frontend", "@qa", ts(9))]);
+
+        let mut collected = Vec::new();
+        let mut query = "?agent=backend&limit=2".to_owned();
+        loop {
+            let (status, body) = get(&state, &query).await;
+            assert_eq!(status, StatusCode::OK);
+            for event in body["events"].as_array().unwrap() {
+                collected.push(event["ts"].as_str().unwrap().to_owned());
+            }
+            match body.get("next_cursor").and_then(Value::as_str) {
+                Some(cursor) => query = format!("?agent=backend&limit=2&after={cursor}"),
+                None => break,
+            }
+        }
+        assert_eq!(
+            collected.len(),
+            5,
+            "every timeline event, once, across pages"
+        );
+        let mut sorted = collected.clone();
+        sorted.sort();
+        assert_eq!(collected, sorted, "pages arrive time-ordered");
     }
 
     #[tokio::test]

@@ -26,6 +26,9 @@ pub(crate) struct FilterQuery {
     pub channel: Option<String>,
     /// Keep only events sent by this role.
     pub role: Option<String>,
+    /// Keep only events on this role's activity timeline: its own events (messages it
+    /// sent, its lifecycle, its activity) plus the messages addressed to it (issue #30).
+    pub agent: Option<String>,
     /// Keep only events of this kind: `message`, `lifecycle`, or `activity`.
     pub kind: Option<String>,
     /// Keep only events belonging to this task (a UUID).
@@ -52,6 +55,7 @@ impl FilterQuery {
         Ok(EventFilter {
             channel: nonempty(self.channel.as_deref()).map(ChannelId::new),
             role: nonempty(self.role.as_deref()).map(RoleId::new),
+            agent: nonempty(self.agent.as_deref()).map(RoleId::new),
             kind,
             task: nonempty(self.task.as_deref())
                 .map(|task| from_str::<TaskId>(task).map_err(|_error| bad("task", "a UUID")))

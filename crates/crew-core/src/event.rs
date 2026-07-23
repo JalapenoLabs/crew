@@ -8,7 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{ChannelId, MessageId, Sender, TaskId};
+use crate::channel::Channel;
+use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 use crate::time::Timestamp;
 
 /// A single, typed, addressed item on the crew event stream.
@@ -81,6 +82,54 @@ impl Event {
             }
         }
         true
+    }
+
+    /// Whether this event belongs to `role`'s activity timeline (issue #30).
+    ///
+    /// A role's full timeline, the "watch what the backend engineer is doing" view, is
+    /// every event the role took part in (see `docs/observability.md`):
+    ///
+    /// - the role's **own** events: the messages it sent, its lifecycle transitions,
+    ///   and its stream-json activity (all stamped `from` the role);
+    /// - the messages it **received**: message events whose channel addresses the role
+    ///   (its direct `@role` channel, a pair it belongs to, or `all-units`).
+    ///
+    /// It is not self-filtered like the inbox, since the timeline is what the role does
+    /// as well as what reaches it. Another role's lifecycle or activity is excluded
+    /// even when broadcast to `all-units`: only messages count as "received".
+    ///
+    /// # Examples
+    /// ```
+    /// use crew_core::{ChannelId, Event, EventKind, Lifecycle, MessageId, Message,
+    ///     MessageKind, RoleId, Sender, Timestamp};
+    ///
+    /// let backend = RoleId::new("backend");
+    /// let note = |from: &str, channel: &str| Event {
+    ///     ts: Timestamp::now(),
+    ///     from: Sender::Role(RoleId::new(from)),
+    ///     channel: ChannelId::new(channel),
+    ///     task: None,
+    ///     kind: EventKind::Message(Message {
+    ///         id: MessageId::new(),
+    ///         kind: MessageKind::Note,
+    ///         body: String::new(),
+    ///     }),
+    /// };
+    ///
+    /// assert!(note("backend", "@frontend").in_timeline_of(&backend), "a message it sent");
+    /// assert!(note("frontend", "@backend").in_timeline_of(&backend), "a message it received");
+    /// assert!(note("frontend", "all-units").in_timeline_of(&backend), "a broadcast reaches it");
+    /// assert!(!note("frontend", "@qa").in_timeline_of(&backend), "not its concern");
+    /// ```
+    #[must_use]
+    pub fn in_timeline_of(&self, role: &RoleId) -> bool {
+        // The role's own events: sent messages, its lifecycle, and its activity.
+        if matches!(&self.from, Sender::Role(from) if from == role) {
+            return true;
+        }
+        // Plus messages addressed to it: its direct channel, a pair, or `all-units`.
+        matches!(self.kind, EventKind::Message(_))
+            && Channel::parse(self.channel.as_str()).is_some_and(|channel| channel.addresses(role))
     }
 }
 
@@ -339,6 +388,66 @@ mod tests {
             }
             .is_well_formed(),
             "a blank role sender is not well formed",
+        );
+    }
+
+    #[test]
+    fn in_timeline_of_covers_sent_received_and_own_lifecycle_and_activity() {
+        let backend = RoleId::new("backend");
+        let note = |from: Sender, channel: &str| Event {
+            ts: Timestamp::now(),
+            from,
+            channel: ChannelId::new(channel),
+            task: None,
+            kind: EventKind::Message(Message {
+                id: MessageId::new(),
+                kind: MessageKind::Note,
+                body: String::new(),
+            }),
+        };
+        let role = |name: &str| Sender::Role(RoleId::new(name));
+
+        // Messages: sent by the role, and received (direct, pair, or all-units).
+        assert!(
+            note(role("backend"), "@frontend").in_timeline_of(&backend),
+            "sent"
+        );
+        assert!(
+            note(role("frontend"), "@backend").in_timeline_of(&backend),
+            "direct"
+        );
+        assert!(
+            note(role("qa"), "backend+qa").in_timeline_of(&backend),
+            "a pair it belongs to",
+        );
+        assert!(
+            note(role("frontend"), "all-units").in_timeline_of(&backend),
+            "a broadcast it receives",
+        );
+        assert!(
+            !note(role("frontend"), "@qa").in_timeline_of(&backend),
+            "a message between others is not its concern",
+        );
+
+        // Its own lifecycle and activity (stamped `from` the role) belong to it...
+        let own = |kind| Event {
+            ts: Timestamp::now(),
+            from: role("backend"),
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind,
+        };
+        assert!(own(EventKind::Lifecycle(Lifecycle::Started)).in_timeline_of(&backend));
+        assert!(own(EventKind::Activity(Activity::TurnStarted)).in_timeline_of(&backend));
+
+        // ...but another role's lifecycle broadcast to all-units is not "received".
+        let others_lifecycle = Event {
+            from: role("frontend"),
+            ..own(EventKind::Lifecycle(Lifecycle::Started))
+        };
+        assert!(
+            !others_lifecycle.in_timeline_of(&backend),
+            "only messages count as received; a peer's lifecycle is not",
         );
     }
 

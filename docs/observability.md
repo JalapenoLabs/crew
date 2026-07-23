@@ -58,7 +58,20 @@ a link, so the task view reads as the team's conversation about that task.
 One role's full timeline: its lifecycle transitions, the messages it sent and
 received, and its own stream-json activity (tools, output, turns). This is the
 "open the backend engineer and watch what it is doing" view. It is the event
-stream filtered to one `role`.
+stream filtered to one role's timeline.
+
+The broker serves it both ways (issue #30): `GET /history?agent=<role>` reads the
+timeline as history (time-ordered, cursor-paginated like any `/history` query, and
+`summary=true` compacts it), and `GET /activity?agent=<role>` streams it live over
+SSE, resuming from `Last-Event-ID` like the inbox. The timeline is defined by
+`crew_core::Event::in_timeline_of`: the role's own events (its sent messages, its
+lifecycle, its activity, all stamped `from` the role) plus the messages addressed to
+it (its `@role` channel, a pair it belongs to, or `all-units`). Unlike the inbox it
+is not self-filtered, because a timeline is what the role does as well as what
+reaches it; unlike the aggregate log's sender-only `role` filter, it also carries
+what the role received. Another role's lifecycle or activity is excluded even when
+broadcast to `all-units`, since only messages count as "received". The live stream
+and the history read share one predicate, so they never disagree.
 
 ### Aggregate activity log
 
@@ -67,19 +80,19 @@ channel, or kind. This is the "what is happening across the team right now" view
 structured rather than a firehose.
 
 The broker serves it both ways under one filter, so the live and historical views
-always agree (issues #12, #31). Historically, `GET /history` reads the past:
-filters (`channel`, `role`, `kind`, `task`, `since`), deterministic ordering by `ts`
-then log position, and cursor pagination that stays stable under concurrent writes,
-so a consumer or a late joiner reads the past without holding the stream open.
-`summary=true` returns the rolling compaction instead (issue #19): the older events
-folded into bounded aggregates plus the recent raw tail, so joining a long-running
-conversation costs bounded context rather than the full log. Live, `GET /stream`
-delivers the same view over SSE, narrowed by the same filter params applied with the
-very same `EventFilter::matches`: with no filter it is the firehose, and with one it
-delivers only matching events. A consumer loads the backlog from `/history` and
-subscribes to `/stream` for what follows, both under the same filter; on a lagged or
-dropped connection it catches the gap up through `/history` again, since the stream
-is live-only.
+always agree (issues #12, #31). Historically, `GET /history` reads the past: filters
+(`channel`, `role` sent-by, `agent` a role's timeline, `kind`, `task`, `since`),
+deterministic ordering by `ts` then log position, and cursor pagination that stays
+stable under concurrent writes, so a consumer or a late joiner reads the past without
+holding the stream open. `summary=true` returns the rolling compaction instead (issue
+#19): the older events folded into bounded aggregates plus the recent raw tail, so
+joining a long-running conversation costs bounded context rather than the full log.
+Live, `GET /stream` delivers the same view over SSE, narrowed by the same filter
+params applied with the very same `EventFilter::matches`: with no filter it is the
+firehose, and with one it delivers only matching events. A consumer loads the backlog
+from `/history` and subscribes to `/stream` for what follows, both under the same
+filter; on a lagged or dropped connection it catches the gap up through `/history`
+again, since the stream is live-only.
 
 ## Live agent count and roster
 
