@@ -29,6 +29,8 @@ struct Agent {
     base: String,
     /// The role this agent plays on the crew.
     role: RoleId,
+    /// The crew's commander, the default addressee for an unaddressed `send`.
+    commander: RoleId,
     /// The paths the role owns, registered with the roster.
     owned_paths: Vec<String>,
 }
@@ -36,7 +38,7 @@ struct Agent {
 impl Agent {
     /// A broker client acting as this agent's role.
     fn broker(&self) -> Broker {
-        Broker::new(self.base.clone(), self.role.clone())
+        Broker::new(self.base.clone(), self.role.clone(), self.commander.clone())
     }
 }
 
@@ -115,6 +117,7 @@ fn load_agent() -> Result<Agent> {
         return Ok(Agent {
             base: card.broker.base_url(),
             role: card.role,
+            commander: card.commander,
             owned_paths: card.owned_paths,
         });
     }
@@ -133,6 +136,9 @@ fn load_agent() -> Result<Agent> {
     Ok(Agent {
         base,
         role: RoleId::new(role),
+        // No card to name the commander, so fall back to the conventional default,
+        // matching `RoleCard`'s own default when a card omits it.
+        commander: RoleId::new("commander"),
         owned_paths: Vec::new(),
     })
 }
@@ -145,9 +151,15 @@ fn print_inbox(items: &[InboxItem]) {
     }
     println!("{} message(s):", items.len());
     for item in items {
+        // Lead with the structured detail (an order's task); fall back to the body.
+        let content = match (item.detail.as_str(), item.body.as_str()) {
+            ("", body) => body.to_owned(),
+            (detail, "") => detail.to_owned(),
+            (detail, body) => format!("{detail}. {body}"),
+        };
         println!(
             "- {} on {} ({}): {}",
-            item.from, item.channel, item.kind, item.body
+            item.from, item.channel, item.kind, content
         );
     }
 }

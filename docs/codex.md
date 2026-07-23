@@ -55,6 +55,11 @@ self-filter the same way. These gaps remain, by the nature of a stateless CLI:
 - **No push.** The MCP roadmap subscribes to the broker's per-role SSE stream for
   native notifications. The shim polls with `crew inbox`; it does not hold a stream
   open.
+- **No `crew_order` yet.** The MCP surface added `crew_order` for the commander to
+  issue a structured order (issue #27); the shim does not expose it, so a shim agent
+  sends plain messages with `crew send` but cannot yet issue an order. A shim agent
+  still reads orders addressed to it: `crew inbox` renders an order's structured detail
+  the same way the MCP path does. Adding a `crew order` subcommand is a small follow-up.
 - **Operator-launched today.** `crew up` spawns a Claude process per role. Auto-spawning
   a Codex agent per role (a per-role runtime choice in the crew config) is future work;
   today a Codex agent joins a running crew through the shim, launched by the operator or
