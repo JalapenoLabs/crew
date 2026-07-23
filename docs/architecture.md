@@ -169,8 +169,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes fifteen tools (issues #17,
-#27, #45, #46, #47, #49, #50, #123):
+broker's HTTP API; it never touches the store. It exposes sixteen tools (issues #17,
+#27, #45, #46, #47, #49, #50, #121, #123):
 
 - `crew_send` sends a note as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -209,6 +209,10 @@ broker's HTTP API; it never touches the store. It exposes fifteen tools (issues 
   self-verdict, so a task is done only when a role other than the owner could not break
   it, and a failure hands the work back to the owner's inbox. See `docs/roles.md` (the
   done-gate).
+- `crew_complete` reports the mission gracefully finished (issue #121): the crew, typically
+  through the commander, declares the work done, so the broker records a `mission_complete`
+  lifecycle event and `crew notify` fires on a true completion rather than a stand-down. It
+  announces, it does not halt: unlike `crew standdown` it does not gate the crew.
 - `crew_board` and `crew_record` are the shared situation board (issue #49), the crew's
   durable memory. `crew_record` records or retracts an entry (a decision, an interface, or
   a gotcha, keyed by a stable topic); `crew_board` reads it. A role reads the board before
@@ -227,8 +231,8 @@ MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim
 the fallback (issue #28): `crew register`, `crew send`, the typed-message pair
 `crew ask` / `crew answer`, `crew inbox`, `crew roster`,
 `crew lane`, the work-ledger pair `crew claim` / `crew ledger`, the done-gate trio
-`crew submit` / `crew verdict` / `crew gate`, the situation-board pair `crew board` /
-`crew record`, and `crew briefing` act as
+`crew submit` / `crew verdict` / `crew gate`, `crew complete` (report the mission
+finished), the situation-board pair `crew board` / `crew record`, and `crew briefing` act as
 the role the environment names and reach the broker through the
 **same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
 broker identically. A Codex agent registers on boot and then sends and reads through

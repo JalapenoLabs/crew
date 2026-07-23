@@ -270,6 +270,7 @@ fn lifecycle_label(state: Lifecycle) -> &'static str {
         Lifecycle::Paused => "paused",
         Lifecycle::Resumed => "resumed",
         Lifecycle::StoodDown => "stood_down",
+        Lifecycle::MissionComplete => "mission_complete",
     }
 }
 

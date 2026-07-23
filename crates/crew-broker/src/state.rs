@@ -305,7 +305,8 @@ impl RoleStats {
             | Lifecycle::Stopped
             | Lifecycle::Died
             | Lifecycle::Paused
-            | Lifecycle::StoodDown => {
+            | Lifecycle::StoodDown
+            | Lifecycle::MissionComplete => {
                 if let Some(since) = self.working_since.take() {
                     self.active += span(since, at);
                 }

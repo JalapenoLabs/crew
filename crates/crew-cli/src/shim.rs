@@ -260,6 +260,25 @@ pub fn gate() -> Result<()> {
     Ok(())
 }
 
+/// Reports the mission gracefully complete (issue #121).
+///
+/// Mirrors `crew_complete`: the crew, typically through the commander, declares
+/// the mission done so `crew notify` fires on a true finish, distinct from the
+/// General's emergency stand-down. It announces completion; it does not halt
+/// the crew.
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn complete() -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .complete()
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
 /// Records or retracts a shared situation board entry (issue #49).
 ///
 /// Mirrors `crew_record`: records a `decision`, `interface`, or `gotcha` under
