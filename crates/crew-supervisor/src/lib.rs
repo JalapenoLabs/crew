@@ -43,13 +43,13 @@ use std::{
 };
 
 pub use crew_core::StallKind;
-use crew_core::{RoleCard, ROLE_CARD_ENV};
+use crew_core::{RoleCard, Runtime, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
 pub use integrate::{
     CheckOutcome, Conflict, IntegrationReport, Integrator, Standing, DEFAULT_INTEGRATION_BRANCH,
 };
 pub use lifecycle::{AgentState, DeathCause, Fleet, Incident, LifecyclePolicy, Recovery};
-pub use mcp::{agent_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
+pub use mcp::{agent_turn_argv, codex_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
 pub use roster::{Liveness, RosterClient};
 pub use spawn::{
     agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
@@ -76,6 +76,9 @@ pub struct Launch {
     pub env: Vec<(String, String)>,
     /// The thin bootstrap prompt for the agent (see [`RoleCard::briefing`]).
     pub briefing: String,
+    /// The runtime to spawn the agent on (issue #128): `claude` with the MCP
+    /// server, or `codex` wired to the CLI shim.
+    pub runtime: Runtime,
 }
 
 /// Writes `card` into `agent_dir` and returns the [`Launch`] its agent boots
@@ -116,6 +119,7 @@ pub fn provision(card: &RoleCard, agent_dir: &Path) -> Result<Launch> {
     Ok(Launch {
         env: vec![(ROLE_CARD_ENV.to_owned(), card_path.display().to_string())],
         briefing: card.briefing(),
+        runtime: card.runtime,
         card_path,
     })
 }

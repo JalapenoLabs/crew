@@ -45,6 +45,7 @@ owned_paths = ["web/"]    # defaults to the standard tier
 role = "qa"
 owned_paths = ["tests/"]
 tier = "cheap"            # an explicit tier for this role
+runtime = "codex"         # spawn this role as a Codex agent, not Claude (issue #128)
 ```
 
 Every field is optional and takes a default:
@@ -83,6 +84,12 @@ Every field is optional and takes a default:
   the check. The policy is crew-wide and rides each role card; a role checks a path with
   the `crew_lane` tool before editing outside its lane. See `docs/roles.md` (lane
   enforcement) and `docs/observability.md` (the `boundary` event).
+- a role's `runtime` (issue #128) is the agent runtime the supervisor spawns it on:
+  `claude` (the default) runs `claude` with the crew MCP tools, and `codex` runs a headless
+  `codex` wired to the CLI shim (`crew send`, ...). Different roles can run different
+  runtimes, so `crew up` brings up a mixed unit in one command; the MCP server is
+  registered only when the crew has a Claude role, so a Codex-only crew needs no `claude`.
+  See `docs/codex.md`.
 
 An empty config document (`""`) therefore resolves to the default crew, so `crew up`
 with no config still brings a full unit online.

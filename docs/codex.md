@@ -63,11 +63,17 @@ self-filter the same way. These gaps remain, by the nature of a stateless CLI:
   cannot yet issue a structured order. A shim agent
   still reads orders addressed to it: `crew inbox` renders an order's structured detail
   the same way the MCP path does. Adding a `crew order` subcommand is a small follow-up.
-- **Operator-launched today.** `crew up` spawns a Claude process per role. Auto-spawning
-  a Codex agent per role (a per-role runtime choice in the crew config) is future work;
-  today a Codex agent joins a running crew through the shim, launched by the operator or
-  a wrapper script, and registers itself. The broker and roster do not care which
-  runtime produced a role, so a mixed unit works the moment the Codex agent registers.
+- **Auto-spawned from the config (issue #128).** `crew up` spawns each role on its
+  configured runtime: a per-role `runtime` in the crew config (`claude`, the default, or
+  `codex`) tells the supervisor which CLI to launch. A `codex` role is spawned as a
+  headless `codex exec` wired to the shim, handed the same `CREW_ROLE_CARD` environment as
+  a Claude role, and its briefing is adapted to name the `crew <cmd>` shim invocations
+  instead of the MCP tools; the MCP server is registered only when the crew has a Claude
+  role, so a Codex-only unit never needs `claude` on `PATH`. The broker and roster do not
+  care which runtime produced a role, so `crew up` brings up a mixed unit in one command.
+  A Codex agent can still join a running crew through the shim, launched by the operator or
+  a wrapper script, the same way. (The exact `codex exec` autonomy flags may need tuning
+  against the installed `codex` version.)
 
 ## References
 
