@@ -20,10 +20,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crew_core::{BrokerEndpoint, RoleCard, RoleId};
+use crew_core::{BrokerEndpoint, CrewConfig, RoleCard, RoleId};
 use eyre::{Result, WrapErr};
 use tracing::{event, Level};
 
+use crate::lifecycle::{Fleet, LifecyclePolicy};
 use crate::mcp::{agent_turn_argv, locate_server, register_server, CLAUDE_BIN};
 use crate::provision;
 use crate::roster::RosterClient;
@@ -146,21 +147,67 @@ impl Supervisor {
         let server = locate_server()?;
         register_server(&server)?;
 
+        let prepared = self.prepare(cards, None)?;
+        let roster = RosterClient::new(self.broker.base_url());
+        Crew::spawn(&roster, prepared)
+    }
+
+    /// Launches a lifecycle-managed [`Fleet`] for the crew described by `config`.
+    ///
+    /// The counterpart to [`up`](Supervisor::up) for the whole `crew up` experience
+    /// (issue #26): it registers the MCP server, provisions a card per role, and hands
+    /// the resolved agents to a [`Fleet`], which manages lazy start, idle-stop, and the
+    /// defibrillator (issues #22, #23). Each agent runs the config's model for its role
+    /// (its override or the crew default), and the fleet idle-stops on the config's
+    /// timeout. The fleet launches with every agent stopped; bring the unit online with
+    /// [`Fleet::start_all`], which registers each role on the roster.
+    ///
+    /// # Errors
+    /// Returns an error if the MCP server cannot be located or registered, or a card
+    /// cannot be provisioned.
+    pub fn launch(&self, config: &CrewConfig) -> Result<Fleet> {
+        // One-time, unit-wide: make the crew tools available with no approval gate.
+        let server = locate_server()?;
+        register_server(&server)?;
+
+        let cards = config.to_cards(&self.broker);
+        let prepared = self.prepare(&cards, Some(config))?;
+        let roster = RosterClient::new(self.broker.base_url());
+        let policy = LifecyclePolicy {
+            idle_timeout: config.idle_stop,
+            ..LifecyclePolicy::default()
+        };
+        Ok(Fleet::launch(&roster, prepared, policy))
+    }
+
+    /// Provisions each card and builds its spawn command into a [`PreparedAgent`].
+    ///
+    /// When `config` is given, each command runs the role's configured model (its
+    /// override or the crew default), so the same provisioning serves the eager
+    /// [`up`](Supervisor::up) and the lifecycle-managed [`launch`](Supervisor::launch).
+    fn prepare(
+        &self,
+        cards: &[RoleCard],
+        config: Option<&CrewConfig>,
+    ) -> Result<Vec<PreparedAgent>> {
         let mut prepared = Vec::with_capacity(cards.len());
         for card in cards {
             let dir = self.root.join(card.role.as_str());
             std::fs::create_dir_all(&dir)
                 .wrap_err_with(|| format!("could not create agent dir {}", dir.display()))?;
             let launch = provision(card, &dir)?;
+            let mut command = agent_command(&launch, &dir);
+            if let Some(config) = config {
+                command.args.push("--model".to_owned());
+                command.args.push(config.model_for(&card.role).to_owned());
+            }
             prepared.push(PreparedAgent {
                 role: card.role.clone(),
                 owned_paths: card.owned_paths.clone(),
-                command: agent_command(&launch, &dir),
+                command,
             });
         }
-
-        let roster = RosterClient::new(self.broker.base_url());
-        Crew::spawn(&roster, prepared)
+        Ok(prepared)
     }
 }
 

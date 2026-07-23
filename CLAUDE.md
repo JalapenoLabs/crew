@@ -289,6 +289,25 @@ discrimination awaits the activity parser's turn boundaries (issue #24), so by d
 a quiet agent parks rather than being force-recovered. (Unifying the eager `Crew` from
 #21 into the lifecycle-managed `Fleet` is a later cleanup.)
 
+`crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
+`crew` binary is a `clap` subcommand tree. `crew up` reads the crew config
+(`--config`, else `./crew.toml`, else the default crew), resolves the broker address,
+and starts the broker in-process only if none is already listening (via a `GET /health`
+probe), so an operator can instead run a long-lived `crewd` and bring crews up against
+it. It then launches a lifecycle-managed `Fleet` from the config
+(`Supervisor::launch`, which registers the MCP server, provisions a card per role, and
+runs each role's configured model by appending `--model`) and starts every role
+(`Fleet::start_all`), so the unit is live and connected: each role registers on the
+roster, and idle roles idle-stop on the config's timeout while keeping their roster
+entry. It surfaces the live roster and the commander entry point, then holds the unit
+online in the foreground until Ctrl-C or `SIGTERM`, when it stands the crew down
+gracefully (`Fleet::shutdown` stops and deregisters every agent, then the in-process
+broker drains) and removes its pidfile. `crew down` signals that process (`SIGTERM` via
+the pidfile the two share under the broker state dir), so `crew down` and Ctrl-C take
+the one graceful-shutdown path and neither leaves an orphaned process. The broker
+exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` drives the
+in-process broker's shutdown itself. `crew send` and `crew watch` follow.
+
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
@@ -297,6 +316,13 @@ default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 out of every message before storing or streaming it).
 Binding a non-loopback address is refused unless the non-local flag is set, so the
 broker never exposes itself to the network by accident.
+
+**Running the crew:** `cargo run --bin crew -- up` brings the unit online (add
+`--config <path>` to point at a crew config; it defaults to `./crew.toml`, then the
+default crew). It runs in the foreground, holding the unit online until Ctrl-C. From
+another terminal, `cargo run --bin crew -- down` stands it down. The broker address and
+state dir come from the same `CREW_BROKER_*` env as `crewd`, so `crew up` reuses an
+already-running `crewd` or starts its own.
 
 ## Local conventions
 

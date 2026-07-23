@@ -159,14 +159,30 @@ stream for native notifications instead of the current history read on each call
 
 ### CLI (`crew`, human front-end)
 
-- `crew up` brings a crew online from a config (`crew_core::CrewConfig`, issue #25):
-  the roles and their owned paths, the model, the repos in scope, the idle-stop
-  timeout, and the commander. The config validates itself and resolves the default
-  crew when omitted (see `docs/config.md`); it produces the role cards the supervisor
-  spawns.
+The `crew` binary is the terminal front-end; its argument surface is a `clap`
+subcommand tree.
+
+- `crew up` is the headline: one command brings the whole unit online (issue #26). It
+  reads the crew config (`crew_core::CrewConfig`, issue #25; `--config <path>`, else
+  `./crew.toml`, else the default crew), resolves the broker address, and **starts the
+  broker if one is not already listening** (in-process, so an operator can instead run
+  a long-lived `crewd` and bring crews up against it). It then launches a
+  lifecycle-managed `Fleet` from the config (`Supervisor::launch`) and starts every
+  role, so the unit is live and connected: each role registers on the roster and runs
+  the model the config assigns it. It surfaces the live roster and the commander entry
+  point, then holds the unit online in the foreground until a shutdown signal. Idle
+  roles cost nothing: the fleet idle-stops them on the config's timeout, keeping their
+  roster entry, so the unit stays visible while quiet roles park.
+- `crew down` stands the running crew down gracefully (issue #26): it signals the
+  `crew up` process (`SIGTERM` via the pidfile the two rendezvous on under the broker
+  state dir), which stops every agent, deregisters it, and drains the broker it
+  started. The graceful shutdown itself lives in `crew up` (a single source of truth
+  for how a unit stands down), so `crew down` and Ctrl-C take the same path and neither
+  leaves an orphaned process. `crew up` owns the crew: it holds the fleet's driver
+  threads and, when it started one, the in-process broker, so standing down tears both
+  down together.
 - `crew send` posts a message as the General, to the commander by default.
 - `crew watch` tails the conversation with routing visible.
-- `crew down` stands the crew down.
 
 ### Observability
 
