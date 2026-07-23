@@ -317,9 +317,16 @@ teammate's work as an independent skeptic, and read the gate; issue #47), the
 situation-board pair `crew_board` / `crew_record` (read the crew's durable memory, and
 record or retract a decision, interface, or gotcha; issue #49), and `crew_briefing` (the
 bounded new-role briefing packet: the board plus a lane-scoped rolling summary, size-capped;
-issue #50). A tool failure returns as an `isError` result, not a protocol error. The
-roadmap step is `crew_inbox` push over the per-role SSE stream instead of the current
-history read.
+issue #50). A tool failure returns as an `isError` result, not a protocol error.
+
+`crew_inbox` has a push path (issue #76): `Broker::subscribe` opens the broker's per-role
+SSE inbox (`GET /inbox?role=<role>`) at boot, seeds the backlog from history once (a fresh
+stream starts at the live tail), and a background thread buffers events as they arrive,
+resuming from a `Last-Event-ID` cursor across reconnects and deduplicating the seed overlap
+by message id. A read drains the buffered batch (`InboxStream`) instead of refetching the
+whole message history, so it is O(new) not O(total) per call. The pull-based history read
+stays the fallback when the stream cannot be opened (a runtime without streaming); surfacing
+native MCP notifications as events arrive is the remaining refinement.
 
 `crew-core` also carries the role card (issue #18): `RoleCard` is the thin bootstrap
 an agent boots from, a TOML document naming the role, its owned lane, its acceptance
