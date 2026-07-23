@@ -212,6 +212,18 @@ address from `--broker` or the `CREW_BROKER_*` environment. `crew up` / `crew do
 (the supervisor front-end) come in a later phase. Verify with `cargo build` and
 `cargo test` at the root.
 
+`crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
+speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
+`initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
+agent. It acts as a single role (`CREW_ROLE`) and is a thin synchronous client
+(`ureq`) over the broker's HTTP API; it never touches the store. It exposes three
+tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
+teammate, defaulting to the commander), `crew_inbox` (read the messages addressed to
+the role since the last call, self-filtered, over a per-session history cursor), and
+`crew_roster` (list registered teammates, their owned paths, and liveness). A tool
+failure returns as an `isError` result, not a protocol error. The roadmap step is
+`crew_inbox` push over the per-role SSE stream instead of the current history read.
+
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and

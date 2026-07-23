@@ -11,6 +11,27 @@ publish = false
 [lints]
 workspace = true
 
+# The agent-facing MCP server binary. Claude Code (or Codex) spawns it and talks
+# JSON-RPC over stdio; the library holds the logic, this is its thin entry point.
+[[bin]]
+name = "crew-mcp"
+path = "src/main.rs"
+
 [dependencies]
+# The shared vocabulary (event and channel types) and `Config` for the broker
+# address. The server never touches the store: it talks the broker's HTTP + SSE API.
 crew-core.workspace = true
 crew-broker.workspace = true
+# Application conventions: eyre errors (M-APP-ERROR) and the mimalloc allocator
+# (M-MIMALLOC-APPS) for the binary.
+eyre.workspace = true
+mimalloc.workspace = true
+# The MCP JSON-RPC messages and tool arguments, and a synchronous HTTP client to
+# the broker (http-only, so no system TLS is needed).
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+# Run a real broker in-process for the end-to-end tool test (issue #17).
+tokio = { workspace = true }

@@ -291,6 +291,12 @@ version = "0.0.0"
 dependencies = [
  "crew-broker",
  "crew-core",
+ "eyre",
+ "mimalloc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

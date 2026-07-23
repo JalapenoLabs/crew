@@ -63,15 +63,32 @@ interface via a CLI shim.
 
 ### MCP server (agent-facing surface)
 
-Agents coordinate through MCP tools, not by shelling out to append to a file:
+Agents coordinate through MCP tools, not by shelling out to append to a file.
+The `crew-mcp` crate ships the `crew-mcp` binary: a JSON-RPC 2.0 server over
+newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one of
+per agent. It acts as a single role (`CREW_ROLE`) and is a thin client over the
+broker's HTTP API (`CREW_BROKER_HOST` / `CREW_BROKER_PORT`); it never touches the
+store. It exposes three tools (issue #17):
 
-- `crew_send` sends a message to a channel or a role.
-- `crew_inbox` reads new messages (or the agent subscribes via a broker stream
-  and gets native notifications).
-- `crew_roster` lists teammates and their lanes.
+- `crew_send` sends a message as the role to a channel or a teammate. With
+  neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
+  messages one role, `channel: "all-units"` reaches the unit, and a pair like
+  `frontend+backend` reaches just those two.
+- `crew_inbox` reads the messages addressed to the role since the last call (its
+  direct `@role` channel, any pair it belongs to, and `all-units`), with its own
+  messages filtered out. It tracks a per-session cursor over the broker's history.
+- `crew_roster` lists every registered teammate, the paths it owns, and its
+  liveness (working / idle / stopped / dead).
+
+Each tool documents itself and its arguments in `tools/list` so an agent calls it
+right the first time. A tool failure comes back as an `isError` result the agent
+reads, not a protocol error.
 
 MCP is the clean path. A thin CLI shim (`crew send`, `crew inbox`) is the
 fallback for a runtime without MCP.
+
+The roadmap step is `crew_inbox` push: subscribing to the broker's per-role SSE
+stream for native notifications instead of the current history read on each call.
 
 ### CLI (`crew`, human front-end)
 

@@ -1,9 +1,22 @@
 //! The crew agent-facing MCP surface.
 //!
-//! Exposes the coordination tools agents call instead of shelling out to append
-//! to a file: `crew_send` (message a channel or role), `crew_inbox` (read new
-//! messages), `crew_roster` (list teammates and their lanes), and friends. It is
-//! a thin adapter over the broker ([`crew_broker`]) speaking [`crew_core`] types.
+//! An MCP (Model Context Protocol) server that gives agents real coordination tools
+//! instead of shelling out to append to a file (see `docs/architecture.md`). A
+//! Claude Code (or Codex) agent connects over stdio and calls:
 //!
-//! This is the scaffold from issue #1; the tool surface lands in a later phase
-//! (see `docs/architecture.md` and `docs/communication.md`).
+//! - `crew_send` (message a channel or role),
+//! - `crew_inbox` (read the messages addressed to it, self-filtered),
+//! - `crew_roster` (list teammates and the lanes they own).
+//!
+//! The server is a thin client over the broker's HTTP + SSE API ([`crew_broker`]);
+//! it never touches the store. It acts as one role, configured when the supervisor
+//! spawns it. Run it with the `crew-mcp` binary, or drive it as a library through
+//! [`Server`].
+//!
+//! [`crew_broker`]: crew_broker
+
+mod broker;
+mod server;
+
+pub use broker::{Broker, InboxItem, RoleEntry};
+pub use server::Server;
