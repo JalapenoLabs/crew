@@ -176,7 +176,7 @@ vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
-`crewd` (the broker, issues #7, #8, #9, #11, #12 and #13)
+`crewd` (the broker, issues #7, #8, #9, #11, #12, #13 and #14)
 starts on loopback, serves `GET /health`, and shuts down gracefully. It keeps state
 behind a swappable `Storage` trait (append, query, roster read/write; issue #13): the
 daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus an in-memory
@@ -191,11 +191,15 @@ subscriber on the `GET /stream` SSE feed. `GET /history` reads past events filte
 by `channel`, `role`, `kind`, `task`, and `since`, ordered by `ts` then log
 position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
 under concurrent writes; `summary=true` is reserved (a `501` hook) for the Phase 2
-compaction (issue #12). Its `ChannelRouter` resolves a channel to
-the roles it reaches (issue #11), filtering a supplied roster through the `Channel`
-membership test. The live roster that feeds routing, the self-filtered per-role
-streams, and the rolling-summary history are still scaffolds waiting for the phased
-build in `docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
+compaction (issue #12). The `/roster` endpoints expose who is in the unit (issue
+#14): `GET /roster` lists roles with their owned paths and liveness (working / idle
+/ stopped / dead), a role registers on join with `POST /roster` and leaves with
+`DELETE /roster/{role}`, and every change publishes a `lifecycle` event to
+`all-units`, so it rides history, `/stream`, and each inbox. Its `ChannelRouter`
+resolves a channel to the roles it reaches (issue #11), filtering a supplied roster
+through the `Channel` membership test. The self-filtered per-role streams and the
+rolling-summary history are still scaffolds waiting for the phased build in
+`docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

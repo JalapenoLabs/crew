@@ -37,7 +37,7 @@ pub(crate) fn routes() -> Router<AppState> {
 /// Unlike axum's built-in `Json`, a bad body (invalid JSON, wrong types, an
 /// unknown message kind, a missing per-kind field) yields a 400 with a
 /// `{ "error": ... }` body instead of a plain-text rejection, and never a panic.
-struct JsonBody<T>(T);
+pub(crate) struct JsonBody<T>(pub T);
 
 impl<S, T> FromRequest<S> for JsonBody<T>
 where
@@ -154,14 +154,9 @@ async fn post_message(
             body: request.body,
         }),
     };
-    // Mask before both sinks, so a leaked secret reaches neither storage nor a
-    // subscriber; the persisted log and the live stream carry the same scrubbed event.
-    state.scrubber.scrub_event(&mut event);
-    state.storage.append(event.clone());
-    // A send error means no subscriber is listening right now, which is fine: the
-    // event is already persisted, so a later subscriber reads it from the log.
-    let _ = state.broadcast.send(event.clone());
-
+    // `publish` scrubs, stores, and fans out under the shared path, so the response,
+    // the log, and every live stream carry the same scrubbed event.
+    state.publish(&mut event);
     Ok((StatusCode::CREATED, Json(event)))
 }
 
