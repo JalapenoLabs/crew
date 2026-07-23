@@ -11,9 +11,10 @@
 //! `GET /inbox?role=<role>`, a role's live, self-filtered events resumable from a
 //! `Last-Event-ID` cursor (issue #10). A `GET /history` reads past events, filtered,
 //! time-ordered, and paginated with a cursor stable under concurrent writes
-//! (issue #12), and the `/roster` endpoints expose the unit's roles and liveness,
-//! publishing each change as a lifecycle event (issue #14). The rolling-summary
-//! history comes in a later ticket.
+//! (issue #12), and `GET /history?summary=true` folds older events into a bounded
+//! rolling summary plus the recent tail, so joining a long conversation costs bounded
+//! context (issue #19). The `/roster` endpoints expose the unit's roles and liveness,
+//! publishing each change as a lifecycle event (issue #14).
 //!
 //! Run it with the `crewd` binary, or drive it as a library through [`run`].
 //!
@@ -31,6 +32,7 @@ mod secrets;
 mod serve;
 mod state;
 mod store;
+mod summary;
 
 pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
 pub use error::ApiError;

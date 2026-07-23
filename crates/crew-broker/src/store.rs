@@ -36,7 +36,8 @@ const ROSTER_FILE: &str = "roster.json";
 /// Kept behind a trait so the backend is swappable (see `docs/architecture.md`): the
 /// broker holds a `dyn Storage` and never a concrete type, so a database backend can
 /// drop in later. The query types ([`EventQuery`], [`EventPage`]) are backend-neutral
-/// for the same reason. Pruning and the rolling-summary read land in later tickets.
+/// for the same reason. The rolling-summary read (issue #19) is a projection over
+/// [`query`](Storage::query); physically pruning aged-out events is a later ticket.
 pub trait Storage: std::fmt::Debug + Send + Sync {
     /// A short, stable name for the backend, such as `memory` or `log`.
     fn backend(&self) -> &'static str;

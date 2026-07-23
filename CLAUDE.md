@@ -193,16 +193,20 @@ subscriber. Subscribers read either `GET /stream`, the whole live feed, or
 a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
 filtered by `channel`, `role`, `kind`, `task`, and `since`, ordered by `ts` then log
 position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
-under concurrent writes; `summary=true` is reserved (a `501` hook) for the Phase 2
-compaction (issue #12). The `/roster` endpoints expose who is in the unit (issue
+under concurrent writes (issue #12); `summary=true` returns the rolling-summary
+compaction instead (issue #19): the older events folded into bounded aggregates
+(counts by sender, message kind, and lifecycle state, plus a capped digest of recent
+orders and artifacts and a one-line headline) plus the recent raw `tail` sized by
+`limit`, so joining a long conversation costs bounded context, not the full log. The
+`/roster` endpoints expose who is in the unit (issue
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with
 `DELETE /roster/{role}`, and every change publishes a `lifecycle` event to
 `all-units`, so it rides history, `/stream`, and each inbox. Its `ChannelRouter`
 resolves a channel to the roles it reaches (issue #11), filtering a supplied roster
-through the `Channel` membership test. The live roster that feeds routing and the
-rolling-summary history are still scaffolds waiting for the phased build in
-`docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
+through the `Channel` membership test. The live roster that feeds routing is still a
+scaffold waiting for the phased build in `docs/roadmap.md`. Verify with `cargo build`
+and `cargo test` at the root.
 
 `crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,

@@ -334,6 +334,62 @@ async fn history_filters_by_role_channel_and_kind_and_paginates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_a_long_conversation_costs_bounded_context() {
+    let broker = TestBroker::in_memory().await;
+
+    // An early order handoff, then a long-running conversation on top of it, so the
+    // order is old enough to fall behind the summary rather than into the tail.
+    broker
+        .post(
+            "@backend",
+            json!({
+                "from": role("commander"),
+                "kind": "order",
+                "title": "Ship the endpoint",
+                "scope": "api only",
+                "owned_paths": ["api/"],
+                "acceptance": "tests green",
+                "body": "please build it",
+            }),
+        )
+        .await;
+    let backlog = 200;
+    for i in 0..backlog {
+        broker
+            .post_note("all-units", role("backend"), &format!("m{i}"))
+            .await;
+    }
+
+    // A late joiner asks for the rolling summary with a small tail.
+    let view = broker.get_json("/history?summary=true&limit=10").await;
+
+    // The tail is bounded to the requested size, not the whole 201-event log.
+    let tail = view["tail"].as_array().unwrap();
+    assert_eq!(
+        tail.len(),
+        10,
+        "the joiner reads a bounded tail, not the full log"
+    );
+
+    // The rest is compacted into aggregates that stand in for the older events.
+    assert_eq!(view["summary"]["event_count"], backlog + 1 - 10);
+    assert_eq!(
+        view["summary"]["senders"][0]["name"], "backend",
+        "the busiest sender leads the tally",
+    );
+    // The order handoff surfaces in the digest, so a joiner still sees the work.
+    let orders = view["summary"]["recent_orders"].as_array().unwrap();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0]["title"], "Ship the endpoint");
+    assert!(view["summary"]["headline"]
+        .as_str()
+        .unwrap()
+        .contains("summarized"));
+
+    broker.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_survive_a_broker_restart_via_log_replay() {
     let dir = TempDir::new();
 
