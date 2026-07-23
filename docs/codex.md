@@ -49,13 +49,14 @@ A Codex agent participates like this:
 
 The shim reaches the same broker with the same client, so a shim agent appears on the
 roster and the stream exactly as an MCP agent does, and its messages route and
-self-filter the same way. These gaps remain, by the nature of a stateless CLI:
+self-filter the same way. `crew inbox` matches the MCP server's per-session cursor too:
+though each call is its own process, it persists a **per-role inbox cursor** on disk, so
+it shows only what arrived since the last call (issue #130). The cursor is one small
+file per role under the broker state dir (`<state_dir>/shim-cursors/<role>.cursor`),
+holding the count of inbox messages already seen; `crew inbox` seeds the client from it
+and writes the advanced position back. A first call, or a role with no saved cursor,
+shows the whole inbox. These gaps remain, by the nature of a stateless CLI:
 
-- **No per-session inbox cursor.** The MCP server is one long-lived process, so
-  `crew_inbox` returns only what arrived since the last call. Each `crew inbox` is its
-  own short-lived process with no memory, so it reports every message currently
-  addressed to the role. An agent that wants "new since last look" tracks that itself
-  for now; a persisted per-role cursor is a future enhancement.
 - **No push.** The MCP roadmap subscribes to the broker's per-role SSE stream for
   native notifications. The shim polls with `crew inbox`; it does not hold a stream
   open.

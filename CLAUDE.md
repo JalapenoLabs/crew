@@ -657,10 +657,11 @@ the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_B
 config) and reuses the same `crew_client::Broker` the MCP server dispatches to (issue
 #129), so a shim agent's I/O maps onto
 the broker identically to the MCP path: it registers on boot (appearing on the roster
-and stream) and sends and reads the same way. The shim is stateless (a short-lived
-process per call), so `crew inbox` reports every message currently addressed to the
-role, not only those since a previous call; that and the remaining parity gap (no push)
-are in `docs/codex.md`. A Codex role no longer needs an operator to launch it: with
+and stream) and sends and reads the same way. The shim is a short-lived process per
+call, so where the MCP server holds its inbox cursor in memory, the shim persists a
+per-role cursor on disk (`<state_dir>/shim-cursors/<role>.cursor`, a count of inbox
+messages seen), so `crew inbox` shows only messages since the last call (issue #130);
+the remaining parity gap (no push) is in `docs/codex.md`. A Codex role no longer needs an operator to launch it: with
 `runtime = "codex"` in the config, `crew up` supervisor-spawns it alongside the Claude
 roles (issue #128). The General's own `crew send` / `crew watch` front-end follows.
 

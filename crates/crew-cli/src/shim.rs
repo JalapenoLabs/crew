@@ -13,10 +13,11 @@
 //! same environment it hands a Claude agent, and the agent shells out to `crew`
 //! instead of calling a tool.
 //!
-//! Each invocation is its own short-lived process, so unlike the long-lived MCP
-//! server the shim keeps no per-session state: `crew inbox` reports every
-//! message currently addressed to the role, not only those since a previous
-//! call. `docs/codex.md` records this and the other parity gaps.
+//! Each invocation is its own short-lived process, so where the long-lived MCP
+//! server holds per-session state in memory, the shim persists it on disk: a
+//! per-role inbox cursor under the broker state dir lets `crew inbox` show only
+//! messages that arrived since the last call ([`crate::cursor`], issue #130).
+//! `docs/codex.md` records the remaining parity gaps.
 
 use std::path::PathBuf;
 
@@ -28,6 +29,8 @@ use crew_substrate::{
     core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV},
 };
 use eyre::{eyre, Result, WrapErr};
+
+use crate::cursor::InboxCursor;
 
 /// The resolved agent context a shim command acts as: its broker, role, and
 /// lane.
@@ -132,18 +135,31 @@ pub fn answer(
     Ok(())
 }
 
-/// Prints the messages addressed to this agent's role.
+/// Prints the messages addressed to this agent's role that are new since the
+/// last call.
 ///
-/// Mirrors `crew_inbox`, but statelessly: a short-lived shim keeps no
-/// per-session cursor, so it reports every message currently addressed to the
-/// role.
+/// Mirrors `crew_inbox`. The MCP server holds its inbox cursor in memory; the
+/// shim is a process per call, so it persists a per-role cursor under the
+/// broker state dir (issue #130): it seeds the client from the saved position,
+/// reads only what arrived since, and writes the advanced position back. A
+/// first call, or a role with no saved cursor, shows the whole inbox.
 ///
 /// # Errors
-/// Returns an error if no role context is set, or the broker cannot be reached.
+/// Returns an error if no role context is set, the broker configuration cannot
+/// be read, the broker cannot be reached, or the cursor cannot be saved.
 pub fn inbox() -> Result<()> {
     let agent = load_agent()?;
-    let items = agent.broker().inbox().map_err(|reason| eyre!("{reason}"))?;
+    let state_dir = BrokerConfig::from_env()
+        .wrap_err("could not read the broker configuration")?
+        .state_dir;
+    let cursor = InboxCursor::new(&state_dir, &agent.role);
+
+    let mut broker = agent.broker().with_read_through(cursor.load());
+    let items = broker.inbox().map_err(|reason| eyre!("{reason}"))?;
+    // Print first, then advance the cursor, so a message is marked seen only once
+    // it has been shown: a failed write reprints next time rather than dropping it.
     print_inbox(&items);
+    cursor.save(broker.read_through())?;
     Ok(())
 }
 

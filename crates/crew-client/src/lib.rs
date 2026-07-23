@@ -99,10 +99,38 @@ impl Broker {
         }
     }
 
+    /// Seeds the pull-based inbox cursor, so the next [`inbox`](Broker::inbox)
+    /// returns only messages past `read_through`.
+    ///
+    /// The MCP server holds this cursor in memory across its session; a
+    /// short-lived caller such as the CLI shim persists it instead and seeds a
+    /// fresh client with it, so `crew inbox` resumes where the last call left
+    /// off rather than re-reading the whole history (issue #130). Pass the
+    /// value a prior [`read_through`](Broker::read_through) returned. It
+    /// seeds only the pull fallback; the push path
+    /// ([`subscribe`](Broker::subscribe)) tracks its own position.
+    #[must_use]
+    pub fn with_read_through(mut self, read_through: usize) -> Self {
+        self.read_through = read_through;
+        self
+    }
+
     /// The role this client acts as.
     #[must_use]
     pub fn role(&self) -> &RoleId {
         &self.role
+    }
+
+    /// The number of inbox messages the pull-based read has delivered, a stable
+    /// cursor into the append-only message log.
+    ///
+    /// Persist it after an [`inbox`](Broker::inbox) read and hand it to
+    /// [`with_read_through`](Broker::with_read_through) on the next client, so
+    /// a stateless caller shows only messages that arrived since (issue
+    /// #130).
+    #[must_use]
+    pub fn read_through(&self) -> usize {
+        self.read_through
     }
 
     /// Posts a note as this role to a role's direct channel, a named channel,
