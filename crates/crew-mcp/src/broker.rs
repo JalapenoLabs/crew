@@ -5,6 +5,7 @@
 //! serves): `send` posts as that role, `inbox` reads the messages addressed to it
 //! (self-filtered), and `roster` lists the unit.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use crew_core::{Channel, Event, EventKind, MessageKind, RoleId, Sender};
@@ -19,14 +20,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// surfaces as a tool error rather than hanging the agent.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The channel `crew_send` posts to when neither a role nor a channel is given.
-const DEFAULT_CHANNEL: &str = "@commander";
-
 /// The broker client for one agent role.
 #[derive(Debug)]
 pub struct Broker {
     base: String,
     role: RoleId,
+    commander: RoleId,
     agent: ureq::Agent,
     /// How many message events the inbox has already delivered, so a later read
     /// returns only what is new. The event log is append-only, so the count is a
@@ -35,9 +34,14 @@ pub struct Broker {
 }
 
 impl Broker {
-    /// Builds a client for `role` against the broker at `base` (e.g. `http://127.0.0.1:2739`).
+    /// Builds a client for `role` against the broker at `base`, with `commander` as the
+    /// default addressee.
+    ///
+    /// The `commander` is the hub of the topology: a [`send`](Broker::send) with neither
+    /// `to` nor `channel` reaches it (see `docs/communication.md`). It comes from the
+    /// role card, which names the crew's commander.
     #[must_use]
-    pub fn new(base: impl Into<String>, role: RoleId) -> Self {
+    pub fn new(base: impl Into<String>, role: RoleId, commander: RoleId) -> Self {
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(READ_TIMEOUT)
@@ -45,6 +49,7 @@ impl Broker {
         Self {
             base: base.into(),
             role,
+            commander,
             agent,
             read_through: 0,
         }
@@ -59,21 +64,67 @@ impl Broker {
     /// Posts a note as this role to a role's direct channel, a named channel, or the
     /// commander by default, returning a short confirmation.
     ///
+    /// The target follows the crew's one addressing rule ([`Channel::resolve`]): a `to`
+    /// role wins, else a `channel` name, else the commander.
+    ///
     /// # Errors
-    /// Returns a message if the broker rejects the post or cannot be reached.
+    /// Returns a message if the target is not routable, or the broker rejects the post
+    /// or cannot be reached.
     pub fn send(
         &self,
         to: Option<&str>,
         channel: Option<&str>,
         body: &str,
     ) -> Result<String, String> {
-        let channel = resolve_channel(to, channel);
-        let url = format!("{}/channels/{channel}/messages", self.base);
+        let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
+            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
+                .to_owned()
+        })?;
         let payload = json!({
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": "note",
             "body": body,
         });
+        self.post_message(target.name().as_str(), &payload)
+    }
+
+    /// Issues an order as this role to `to`, giving the specialist a scoped task.
+    ///
+    /// This is the commander's fan-out handle: it posts an `order` message (title,
+    /// scope, owned paths, acceptance) on the specialist's direct channel, so the
+    /// specialist reads a task it can act on rather than freeform prose.
+    ///
+    /// # Errors
+    /// Returns a message if `to` is not a plain role name, or the broker rejects the
+    /// post or cannot be reached.
+    pub fn order(
+        &self,
+        to: &str,
+        title: &str,
+        scope: &str,
+        owned_paths: &[String],
+        acceptance: &str,
+        body: &str,
+    ) -> Result<String, String> {
+        let target = Channel::resolve(Some(to), None, &self.commander)
+            .filter(|channel| matches!(channel, Channel::Direct(_)))
+            .ok_or_else(|| format!("`{to}` is not a role to order; name a single specialist"))?;
+        let payload = json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": "order",
+            "title": title,
+            "scope": scope,
+            "owned_paths": owned_paths,
+            "acceptance": acceptance,
+            "body": body,
+        });
+        self.post_message(target.name().as_str(), &payload)?;
+        Ok(format!("ordered {to}: {title}"))
+    }
+
+    /// Posts `payload` to `channel`, returning `sent to {channel}` or a broker error.
+    fn post_message(&self, channel: &str, payload: &Value) -> Result<String, String> {
+        let url = format!("{}/channels/{channel}/messages", self.base);
         match self
             .agent
             .post(&url)
@@ -176,6 +227,7 @@ impl Broker {
             from: sender_label(&event.from),
             channel: event.channel.as_str().to_owned(),
             kind: message_kind_label(&message.kind).to_owned(),
+            detail: kind_detail(&message.kind),
             body: message.body.clone(),
         })
     }
@@ -216,6 +268,11 @@ pub struct InboxItem {
     pub channel: String,
     /// The message kind (order, question, status, note, ...).
     pub kind: String,
+    /// A human summary of the kind's structured fields, empty when it has none.
+    ///
+    /// An order carries its title, scope, owned paths, and acceptance here, so a
+    /// specialist reads the task from its inbox rather than losing it to the body.
+    pub detail: String,
     /// The message body.
     pub body: String,
 }
@@ -245,21 +302,6 @@ struct HistoryPage {
     next_cursor: Option<String>,
 }
 
-/// The channel a `send` targets: `to` becomes `@role`, a `channel` is used as is,
-/// and neither defaults to the commander.
-fn resolve_channel(to: Option<&str>, channel: Option<&str>) -> String {
-    match (nonempty(to), nonempty(channel)) {
-        (Some(role), _) => format!("@{role}"),
-        (None, Some(name)) => name.to_owned(),
-        (None, None) => DEFAULT_CHANNEL.to_owned(),
-    }
-}
-
-/// The trimmed value if present and not blank.
-fn nonempty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
 /// The `{ "error": ... }` message from a broker error response, if any.
 fn broker_message(response: ureq::Response) -> Option<String> {
     let text = response.into_string().ok()?;
@@ -287,21 +329,62 @@ fn message_kind_label(kind: &MessageKind) -> &'static str {
     }
 }
 
+/// A human summary of a kind's structured fields, so the inbox surfaces them.
+///
+/// Returns an empty string for kinds whose content is only their body (note, status,
+/// answer). An order renders as the task a specialist can act on.
+fn kind_detail(kind: &MessageKind) -> String {
+    match kind {
+        MessageKind::Order {
+            title,
+            scope,
+            owned_paths,
+            acceptance,
+        } => {
+            // Built from short pieces; `write!` to a String never fails.
+            let mut detail = title.clone();
+            if !scope.is_empty() {
+                let _ = write!(detail, "; scope: {scope}");
+            }
+            if !owned_paths.is_empty() {
+                let _ = write!(detail, "; owns: {}", owned_paths.join(", "));
+            }
+            if !acceptance.is_empty() {
+                let _ = write!(detail, "; acceptance: {acceptance}");
+            }
+            detail
+        }
+        MessageKind::Question { options } if !options.is_empty() => {
+            format!("options: {}", options.join(", "))
+        }
+        MessageKind::Artifact { reference, .. } => format!("artifact: {reference}"),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_channel;
+    use super::{message_kind_label, sender_label};
+    use crew_core::{MessageKind, RoleId, Sender};
 
     #[test]
-    fn resolve_channel_defaults_to_the_commander() {
-        assert_eq!(resolve_channel(None, None), "@commander");
+    fn a_sender_labels_a_role_or_the_general() {
+        assert_eq!(
+            sender_label(&Sender::Role(RoleId::new("backend"))),
+            "backend"
+        );
+        assert_eq!(sender_label(&Sender::General), "general");
     }
 
     #[test]
-    fn resolve_channel_maps_a_role_and_uses_a_named_channel_verbatim() {
-        assert_eq!(resolve_channel(Some("backend"), None), "@backend");
-        assert_eq!(resolve_channel(None, Some("all-units")), "all-units");
-        // A role takes precedence and blank values fall through to the default.
-        assert_eq!(resolve_channel(Some("qa"), Some("all-units")), "@qa");
-        assert_eq!(resolve_channel(Some("  "), None), "@commander");
+    fn a_message_kind_labels_an_order() {
+        let order = MessageKind::Order {
+            title: "build login".to_owned(),
+            scope: "the /login route".to_owned(),
+            owned_paths: vec!["api/".to_owned()],
+            acceptance: "tests green".to_owned(),
+        };
+        assert_eq!(message_kind_label(&order), "order");
+        assert_eq!(message_kind_label(&MessageKind::Note), "note");
     }
 }

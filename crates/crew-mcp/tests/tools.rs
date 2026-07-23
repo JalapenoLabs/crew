@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::thread;
 
 use crew_broker::{AppState, Config};
-use crew_core::RoleId;
+use crew_core::{Channel, RoleId};
 use crew_mcp::Broker;
 
 /// A broker serving on an ephemeral loopback port, driven over HTTP.
@@ -45,15 +45,32 @@ impl TestBroker {
         Self { base }
     }
 
-    /// A client acting as `role`.
+    /// A client acting as `role`, with `commander` as the topology hub.
     fn client(&self, role: &str) -> Broker {
-        Broker::new(self.base.clone(), RoleId::new(role))
+        Broker::new(
+            self.base.clone(),
+            RoleId::new(role),
+            RoleId::new("commander"),
+        )
     }
 
     /// Registers `role` with the paths it owns, so it appears in the roster.
     fn register(&self, role: &str, owned_paths: &[&str]) {
         let payload = serde_json::json!({ "role": role, "owned_paths": owned_paths });
         ureq::post(&format!("{}/roster", self.base))
+            .set("content-type", "application/json")
+            .send_string(&payload.to_string())
+            .unwrap();
+    }
+
+    /// Posts a plain note as the General to `channel`, standing in for a human brief.
+    fn general_note(&self, channel: &str, body: &str) {
+        let payload = serde_json::json!({
+            "from": { "kind": "general" },
+            "kind": "note",
+            "body": body,
+        });
+        ureq::post(&format!("{}/channels/{channel}/messages", self.base))
             .set("content-type", "application/json")
             .send_string(&payload.to_string())
             .unwrap();
@@ -113,5 +130,69 @@ fn an_agent_sends_receives_self_filtered_and_lists_the_roster() {
     assert!(
         roster.iter().any(|entry| entry.role == "frontend"),
         "the roster lists the other teammate too",
+    );
+}
+
+#[test]
+fn a_brief_defaults_to_the_commander_who_fans_orders_out() {
+    // The hub-and-spoke acceptance (issue #27): a brief reaches the commander by
+    // default, and the commander issues orders to specialists.
+    let broker = TestBroker::start();
+    broker.register("commander", &[]);
+    broker.register("backend", &["api/"]);
+
+    let mut commander = broker.client("commander");
+    let mut backend = broker.client("backend");
+
+    // The General briefs the crew without naming a target: the shared rule resolves it
+    // to the commander's channel, and only the commander receives it.
+    let default_channel = Channel::resolve(None, None, &RoleId::new("commander"))
+        .expect("an unaddressed brief resolves to the commander")
+        .name();
+    assert_eq!(default_channel.as_str(), "@commander");
+    broker.general_note(default_channel.as_str(), "ship the login flow");
+
+    let briefed = commander.inbox().unwrap();
+    assert_eq!(briefed.len(), 1, "the commander receives the brief");
+    assert_eq!(briefed[0].from, "general");
+    assert_eq!(briefed[0].channel, "@commander");
+    assert_eq!(briefed[0].body, "ship the login flow");
+    assert!(
+        backend.inbox().unwrap().is_empty(),
+        "a specialist does not receive the General's brief to the commander",
+    );
+
+    // The commander fans the work out: it orders the backend a scoped task.
+    commander
+        .order(
+            "backend",
+            "build the login endpoint",
+            "POST /login only",
+            &["api/".to_owned()],
+            "tests green, no clippy warnings",
+            "coordinate the token shape with frontend",
+        )
+        .unwrap();
+
+    let ordered = backend.inbox().unwrap();
+    assert_eq!(ordered.len(), 1, "the specialist receives the order");
+    let order = &ordered[0];
+    assert_eq!(order.from, "commander");
+    assert_eq!(order.channel, "@backend");
+    assert_eq!(order.kind, "order", "it arrives as an order, not a note");
+    assert!(
+        order.detail.contains("build the login endpoint"),
+        "the order carries its title so the specialist reads the task",
+    );
+    assert!(
+        order.detail.contains("acceptance: tests green"),
+        "the order carries its acceptance bar",
+    );
+    assert_eq!(order.body, "coordinate the token shape with frontend");
+
+    // The commander does not receive its own order back.
+    assert!(
+        commander.inbox().unwrap().is_empty(),
+        "the commander never sees its own order echoed",
     );
 }

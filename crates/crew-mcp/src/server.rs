@@ -107,6 +107,20 @@ impl Server {
                     body,
                 )
             }
+            "crew_order" => {
+                let to =
+                    str_arg(arguments, "to").ok_or("crew_order requires a `to` role to order")?;
+                let title = str_arg(arguments, "title")
+                    .ok_or("crew_order requires a `title` for the task")?;
+                self.broker.order(
+                    to,
+                    title,
+                    str_arg(arguments, "scope").unwrap_or_default(),
+                    &str_list_arg(arguments, "owned_paths"),
+                    str_arg(arguments, "acceptance").unwrap_or_default(),
+                    str_arg(arguments, "body").unwrap_or_default(),
+                )
+            }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
             "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
             other => Err(format!("unknown tool `{other}`")),
@@ -134,11 +148,13 @@ fn tool_catalog() -> Value {
         {
             "name": "crew_send",
             "description": "Send a message to a teammate or a channel, as your role. \
-                By default it goes to the commander. Set `to` to direct-message one role \
-                (for example `to: \"backend\"` reaches only backend). Set `channel` to post \
-                to a named channel: `all-units` reaches the whole unit, and a pair like \
+                By default it goes to the commander (the unit's router), so an unaddressed \
+                note reaches the lead. Set `to` to direct-message one role (for example \
+                `to: \"backend\"` reaches only backend). Set `channel` to post to a named \
+                channel: `all-units` reaches the whole unit, and a pair like \
                 `frontend+backend` reaches just those two. Give at most one of `to` or \
-                `channel`; give neither to reach the commander. `body` is the message text.",
+                `channel`; give neither to reach the commander. Use crew_order, not this, to \
+                assign a scoped task. `body` is the message text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -147,6 +163,31 @@ fn tool_catalog() -> Value {
                     "body": { "type": "string", "description": "The message text (markdown)." }
                 },
                 "required": ["body"]
+            }
+        },
+        {
+            "name": "crew_order",
+            "description": "Issue an order: assign a scoped task to one specialist, as your \
+                role. This is the commander's fan-out handle for decomposing the General's \
+                brief into work. It direct-messages `to` an `order` the specialist can act \
+                on: `title` names the task, `scope` says what is in and out, `owned_paths` \
+                are the paths it owns while working, and `acceptance` is how it is judged \
+                done. `body` adds any freeform detail. Use crew_send for a plain message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "The specialist role to order (its @role channel)." },
+                    "title": { "type": "string", "description": "A short title for the task." },
+                    "scope": { "type": "string", "description": "What is in and out of scope." },
+                    "owned_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "The paths the role owns while working the task."
+                    },
+                    "acceptance": { "type": "string", "description": "How the task is judged done." },
+                    "body": { "type": "string", "description": "Optional freeform detail (markdown)." }
+                },
+                "required": ["to", "title"]
             }
         },
         {
@@ -195,6 +236,23 @@ fn str_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+/// A string-array argument as owned strings, dropping blanks; empty if absent.
+fn str_list_arg(arguments: &Value, key: &str) -> Vec<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Renders the inbox items an agent reads.
 fn render_inbox(items: &[InboxItem]) -> String {
     if items.is_empty() {
@@ -203,9 +261,15 @@ fn render_inbox(items: &[InboxItem]) -> String {
     let lines: Vec<String> = items
         .iter()
         .map(|item| {
+            // Lead with the structured detail (an order's task); fall back to the body.
+            let content = match (item.detail.as_str(), item.body.as_str()) {
+                ("", body) => body.to_owned(),
+                (detail, "") => detail.to_owned(),
+                (detail, body) => format!("{detail}. {body}"),
+            };
             format!(
                 "- {} on {} ({}): {}",
-                item.from, item.channel, item.kind, item.body
+                item.from, item.channel, item.kind, content
             )
         })
         .collect();
@@ -241,7 +305,11 @@ mod tests {
 
     /// A server whose broker points nowhere; the protocol paths under test never call it.
     fn server() -> Server {
-        Server::new(Broker::new("http://127.0.0.1:1", RoleId::new("backend")))
+        Server::new(Broker::new(
+            "http://127.0.0.1:1",
+            RoleId::new("backend"),
+            RoleId::new("commander"),
+        ))
     }
 
     fn handle(server: &mut Server, message: &Value) -> Option<Value> {
@@ -269,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_offers_the_three_crew_tools() {
+    fn tools_list_offers_the_crew_tools() {
         let response = handle(
             &mut server(),
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
@@ -277,7 +345,10 @@ mod tests {
         .unwrap();
         let tools = response["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["crew_send", "crew_inbox", "crew_roster"]);
+        assert_eq!(
+            names,
+            ["crew_send", "crew_order", "crew_inbox", "crew_roster"]
+        );
         // Each tool documents itself and its arguments.
         for tool in tools {
             assert!(
@@ -286,9 +357,11 @@ mod tests {
             );
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
-        // crew_send requires a body.
+        // crew_send requires a body; crew_order requires a role and a title.
         let send = tools.iter().find(|t| t["name"] == "crew_send").unwrap();
         assert_eq!(send["inputSchema"]["required"], json!(["body"]));
+        let order = tools.iter().find(|t| t["name"] == "crew_order").unwrap();
+        assert_eq!(order["inputSchema"]["required"], json!(["to", "title"]));
     }
 
     #[test]
@@ -330,6 +403,22 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("body"));
+    }
+
+    #[test]
+    fn crew_order_without_a_target_is_a_tool_error_not_a_broker_call() {
+        // A missing `to` fails before the broker is touched, so the bogus base is fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": { "name": "crew_order", "arguments": { "title": "do it" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("to"));
     }
 
     #[test]

@@ -109,8 +109,10 @@ impl CrewConfig {
 
     /// Produces one [`RoleCard`] per role, reaching the broker at `broker`.
     ///
-    /// The config is broker-agnostic; the broker address (where `crewd` listens) is
-    /// supplied here, so the same config drives any broker.
+    /// Each card names the crew's [`commander`](CrewConfig::commander), so every agent
+    /// boots knowing where an unaddressed message goes and whether it is the commander
+    /// itself. The config is broker-agnostic; the broker address (where `crewd`
+    /// listens) is supplied here, so the same config drives any broker.
     #[must_use]
     pub fn to_cards(&self, broker: &BrokerEndpoint) -> Vec<RoleCard> {
         self.roles
@@ -122,6 +124,7 @@ impl CrewConfig {
                     spec.acceptance.clone(),
                     broker.clone(),
                 )
+                .with_commander(self.commander.clone())
             })
             .collect()
     }
@@ -452,6 +455,23 @@ mod tests {
             .unwrap();
         assert_eq!(backend.owned_paths, ["api/", "db/"]);
         assert_eq!(backend.broker.base_url(), "http://127.0.0.1:2739");
+
+        // Every card names the crew's commander, so each agent boots knowing the hub.
+        assert!(
+            cards
+                .iter()
+                .all(|c| c.commander == RoleId::new("commander")),
+            "each card carries the crew's commander",
+        );
+        let commander = cards
+            .iter()
+            .find(|c| c.role == RoleId::new("commander"))
+            .unwrap();
+        assert!(
+            commander.is_commander(),
+            "the commander card knows it leads"
+        );
+        assert!(!backend.is_commander(), "a specialist card does not");
     }
 
     #[test]
