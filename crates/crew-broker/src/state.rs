@@ -27,7 +27,7 @@ impl AppState {
     pub fn new(config: Config) -> Self {
         Self {
             config: Arc::new(config),
-            storage: Arc::new(MemoryStore),
+            storage: Arc::new(MemoryStore::default()),
             router: Arc::new(ChannelRouter),
         }
     }

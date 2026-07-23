@@ -59,40 +59,74 @@ pub enum EventKind {
     Activity(Activity),
 }
 
-/// An inter-agent message: a typed intent plus a markdown body.
+/// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
 ///
 /// The [`kind`](Message::kind) lets a front-end render an order differently from a
-/// status ping and lets the commander arbitrate (see `docs/communication.md`).
+/// status ping and lets the commander arbitrate (see `docs/communication.md`). The
+/// kind and its structured fields are flattened onto the message, so an order
+/// serializes as `{"id":..,"kind":"order","title":..,"body":..}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// The message's unique id, referenced when an `answer` replies to a `question`.
     pub id: MessageId,
-    /// The typed intent.
+    /// The typed intent and its per-kind structured fields.
+    #[serde(flatten)]
     pub kind: MessageKind,
-    /// The markdown body.
+    /// The markdown body: freeform detail alongside the structured fields.
+    #[serde(default)]
     pub body: String,
 }
 
-/// The typed intent of a [`Message`] (see `docs/communication.md`).
-///
-/// The per-kind structured fields (an order's scope and acceptance, a question's
-/// options) are deliberately not modeled yet: the schema calls them illustrative,
-/// so for now the [`body`](Message::body) carries the detail as markdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The typed intent of a [`Message`] and its per-kind structured fields
+/// (see `docs/communication.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageKind {
     /// Gives a task to a role.
-    Order,
-    /// Asks for a decision.
-    Question,
+    Order {
+        /// A short title for the task.
+        title: String,
+        /// What is in and out of scope.
+        scope: String,
+        /// The paths the role owns while working the task.
+        owned_paths: Vec<String>,
+        /// How the task is judged done.
+        acceptance: String,
+    },
+    /// Asks for a decision, with optional suggested options.
+    Question {
+        /// Suggested options for the answer, if any.
+        #[serde(default)]
+        options: Vec<String>,
+    },
     /// Responds to a question.
     Answer,
     /// Reports progress without asking anything.
     Status,
     /// References a produced thing: a branch, a PR, a file, or a route.
-    Artifact,
+    Artifact {
+        /// The reference to the produced thing (a branch name, a PR URL, a file
+        /// path, or a route).
+        reference: String,
+        /// What kind of artifact the reference points to.
+        artifact_kind: ArtifactKind,
+    },
     /// Freeform prose for anything the other kinds do not cover.
     Note,
+}
+
+/// What a [`MessageKind::Artifact`] reference points to (see `docs/communication.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    /// A git branch.
+    Branch,
+    /// A pull request.
+    PullRequest,
+    /// A file.
+    File,
+    /// A route: a URL path the crew produced or touched.
+    Route,
 }
 
 /// An agent's supervised lifecycle state (see `docs/observability.md`).
@@ -136,7 +170,7 @@ pub enum Activity {
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, Event, EventKind, Lifecycle, Message, MessageKind};
+    use super::{Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind};
     use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
     use crate::time::Timestamp;
 
@@ -149,22 +183,35 @@ mod tests {
             task: Some(TaskId::new()),
             kind,
         };
+        let message = |kind| {
+            EventKind::Message(Message {
+                id: MessageId::new(),
+                kind,
+                body: "detail as markdown".to_owned(),
+            })
+        };
         vec![
             Event {
                 from: Sender::Role(RoleId::new("commander")),
                 channel: ChannelId::new("@backend"),
                 task: None,
-                ..envelope(EventKind::Message(Message {
-                    id: MessageId::new(),
-                    kind: MessageKind::Order,
-                    body: "scaffold the broker".to_owned(),
+                ..envelope(message(MessageKind::Order {
+                    title: "Scaffold the broker".to_owned(),
+                    scope: "crew-broker only".to_owned(),
+                    owned_paths: vec!["crates/crew-broker".to_owned()],
+                    acceptance: "crewd serves /health".to_owned(),
                 }))
             },
-            envelope(EventKind::Message(Message {
-                id: MessageId::new(),
-                kind: MessageKind::Question,
-                body: "SQLite or in-memory?".to_owned(),
+            envelope(message(MessageKind::Question {
+                options: vec!["SQLite".to_owned(), "in-memory".to_owned()],
             })),
+            envelope(message(MessageKind::Answer)),
+            envelope(message(MessageKind::Status)),
+            envelope(message(MessageKind::Artifact {
+                reference: "https://github.com/JalapenoLabs/crew/pull/8".to_owned(),
+                artifact_kind: ArtifactKind::PullRequest,
+            })),
+            envelope(message(MessageKind::Note)),
             envelope(EventKind::Lifecycle(Lifecycle::Started)),
             envelope(EventKind::Lifecycle(Lifecycle::Died)),
             envelope(EventKind::Activity(Activity::TurnStarted)),
@@ -193,6 +240,27 @@ mod tests {
             json,
             serde_json::json!({ "kind": "lifecycle", "data": "idle" })
         );
+    }
+
+    #[test]
+    fn message_kind_and_fields_flatten_onto_the_message() {
+        let message = Message {
+            id: MessageId::new(),
+            kind: MessageKind::Order {
+                title: "Ship it".to_owned(),
+                scope: "here".to_owned(),
+                owned_paths: vec!["src".to_owned()],
+                acceptance: "green".to_owned(),
+            },
+            body: "the detail".to_owned(),
+        };
+        let json = serde_json::to_value(&message).unwrap();
+        // The kind discriminant and its fields sit alongside id and body, not nested.
+        assert_eq!(json["kind"], "order");
+        assert_eq!(json["title"], "Ship it");
+        assert_eq!(json["owned_paths"], serde_json::json!(["src"]));
+        assert_eq!(json["body"], "the detail");
+        assert!(json.get("data").is_none());
     }
 
     #[test]
