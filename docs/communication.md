@@ -40,6 +40,14 @@ channel directly when they want.
 - pair channels (for example `frontend+backend`) scope a tight two-party thread,
   such as negotiating an interface, without waking the rest of the unit.
 
+The `crew-core` `Channel` model (issue #11) is the canonical form of these three
+names and their membership: it parses a channel name, resolves which roles it
+reaches, and canonicalizes a pair so `frontend+backend` and `backend+frontend` are
+one channel with one name. An unrecognized name reaches no one, so a misaddressed
+message wakes nobody rather than everybody. Routing filters a roster of live roles
+through that membership test; self-echo (a sender receiving its own message) is
+removed at delivery, not in the routing itself.
+
 ## Message schema
 
 Messages are typed so a front-end can render them and the broker can route them.
