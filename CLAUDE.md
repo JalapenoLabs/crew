@@ -209,6 +209,18 @@ through the `Channel` membership test. The live roster that feeds routing is sti
 scaffold waiting for the phased build in `docs/roadmap.md`. Verify with `cargo build`
 and `cargo test` at the root.
 
+The event-stamping guarantee is enforced at the source, so observability is never a
+retrofit (issue #29). `ts` / `from` / `channel` / `kind` are mandatory in
+`crew_core::Event`, and every event, whatever its kind, enters the store and stream
+through the one `AppState::publish` choke point, which asserts `Event::is_well_formed`
+(a present, non-blank channel and role sender); the HTTP handlers validate untrusted
+input first, so no event reaches the store or stream missing a required field. Task
+correlation rides the same envelope: a message carries the `task` its sender threads
+(the broker preserves it), and a lifecycle event carries the task the supervisor is
+working via `RosterClient::with_task` (a role fully leaving the unit is not
+task-scoped). Activity events thread the task the same way once the stream-json parser
+lands. See `docs/observability.md`.
+
 `crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
