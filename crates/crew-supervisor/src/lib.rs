@@ -1,23 +1,28 @@
 //! The crew process supervisor.
 //!
-//! Spawns one agent process per role (each a `claude -p --output-format
-//! stream-json` child with its role card), wires it to the broker, parses its
-//! stream into per-agent activity events, and manages its lifecycle: lazy start,
-//! idle-stop, and restart on death. Built on the types in [`crew_core`].
+//! Turns a set of resolved [`RoleCard`]s into running, connected agents: it spawns
+//! one `claude -p` process per role with its role card and the crew MCP server, wires
+//! each to the broker roster, and captures each process's output for the activity
+//! parser. Built on the types in [`crew_core`].
 //!
-//! Process spawning and lifecycle land in a later phase (see `docs/architecture.md`
-//! and `docs/observability.md`). What exists today is the boot half of "spawn one
-//! agent per role with its role card":
+//! The pieces, in the order a bring-up uses them:
 //!
+//! - [`register_server`] auto-registers the crew MCP server at user scope so a
+//!   spawned agent gets the crew tools with no per-task approval (issue #20), and
+//!   [`agent_turn_argv`] builds the `bypassPermissions` turn that loads it silently.
 //! - [`provision`] writes a role's card where the agent can read it and returns the
 //!   [`Launch`] the child process starts from. The standalone flow (the `crew-mcp`
 //!   binary) reads the very same card, so both paths share one loader in
 //!   [`crew_core`].
-//! - [`register_server`] auto-registers the crew MCP server at user scope so a
-//!   spawned agent gets the crew tools with no per-task approval (issue #20), and
-//!   [`agent_turn_argv`] builds the `bypassPermissions` turn that loads it silently.
+//! - [`Supervisor::up`] runs the whole flow (issue #21): it spawns one process per
+//!   role, registers each on the roster on start and deregisters on exit, and
+//!   captures stdout and stderr, returning a running [`Crew`].
+//!
+//! Idle-stop and restart-on-death land in a later phase (see `docs/architecture.md`).
 
 mod mcp;
+mod roster;
+mod spawn;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,6 +31,10 @@ use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
 
 pub use mcp::{agent_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
+pub use roster::RosterClient;
+pub use spawn::{
+    agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
+};
 
 /// The file name a provisioned role card is written under, in the agent's directory.
 const CARD_FILE_NAME: &str = "role-card.toml";

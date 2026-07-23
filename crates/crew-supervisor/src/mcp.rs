@@ -27,7 +27,7 @@ use eyre::{eyre, Result, WrapErr};
 pub const MCP_SERVER_NAME: &str = "crew";
 
 /// The Claude Code CLI, resolved from `PATH`, that owns the MCP registry.
-const CLAUDE_BIN: &str = "claude";
+pub(crate) const CLAUDE_BIN: &str = "claude";
 
 /// The crew MCP server binary's base name (the platform executable suffix is added).
 const SERVER_BINARY: &str = "crew-mcp";

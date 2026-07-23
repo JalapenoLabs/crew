@@ -77,6 +77,18 @@ command, so it is a one-time, unit-wide step, not per-agent: each agent's broker
 address, role, and lane ride the `CREW_ROLE_CARD` environment its `claude` process
 is launched with, which the `crew-mcp` child inherits.
 
+`crew_supervisor::Supervisor::up` ties this together into the auto-spawn flow (issue
+#21): register the MCP server, then for each resolved role card provision the card,
+register the role on the broker roster, and spawn a `claude -p` process wired to the
+broker. The supervisor owns lifecycle, so it is the authority on liveness: it
+registers a role on start and deregisters it on exit, so `GET /roster` always
+reflects the live unit. Each process's stdout and stderr are captured and streamed as
+`Captured` lines for the activity parser (issue #24). The set of roles comes from the
+crew config (issue #25); the supervisor consumes resolved role cards, so the two
+compose without either owning the other's job. Shutting the crew down kills the
+processes and deregisters every role; a dropped crew still kills its processes so
+none leaks.
+
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.
 
