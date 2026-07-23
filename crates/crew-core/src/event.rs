@@ -146,6 +146,8 @@ pub enum EventKind {
     Lifecycle(Lifecycle),
     /// An agent's own work, parsed from its `claude -p` stream-json.
     Activity(Activity),
+    /// A role reaching outside its owned lane (issue #46).
+    Boundary(BoundaryEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -288,6 +290,22 @@ pub enum Activity {
         /// The output text.
         text: String,
     },
+}
+
+/// A role reaching outside its owned lane: a boundary crossing (issue #46).
+///
+/// Lane enforcement (`docs/roles.md`, ownership model) warns or blocks a role editing a
+/// path outside its owned boundaries, and records the crossing here so the operator sees
+/// it on the stream. A genuine cross-lane need should go through the commander, not a
+/// silent edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryEvent {
+    /// The role that reached outside its lane.
+    pub role: RoleId,
+    /// The out-of-lane path it reached for.
+    pub path: String,
+    /// Whether the crew's policy blocked the edit (`true`) or only warned (`false`).
+    pub blocked: bool,
 }
 
 #[cfg(test)]

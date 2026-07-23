@@ -17,6 +17,7 @@ commander = "commander"   # the lead and router the General briefs
 idle_stop = "10m"         # how long a role may be quiet before it is stopped
 repos = ["api", "web"]    # the repos in scope
 worktrees = true          # give each role its own git worktree (issue #43)
+lane_enforcement = "warn" # what happens on an out-of-lane edit (issue #46)
 
 [[roles]]
 role = "commander"
@@ -51,6 +52,12 @@ Every field is optional and takes a default:
   each role its own git worktree of those repos (on a `crew/<role>` branch), so
   parallel roles never clobber each other's edits (issue #43). An unchanged worktree is
   cleaned up on stand-down; one with uncommitted changes is kept for integration (#48).
+- `lane_enforcement` defaults to `warn`. It sets what happens when a role reaches
+  outside its owned paths (issue #46): `warn` reports the crossing to the unit and lets
+  the role proceed, `block` reports and refuses the out-of-lane edit, and `off` disables
+  the check. The policy is crew-wide and rides each role card; a role checks a path with
+  the `crew_lane` tool before editing outside its lane. See `docs/roles.md` (lane
+  enforcement) and `docs/observability.md` (the `boundary` event).
 
 An empty config document (`""`) therefore resolves to the default crew, so `crew up`
 with no config still brings a full unit online.

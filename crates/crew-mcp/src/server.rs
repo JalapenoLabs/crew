@@ -8,6 +8,7 @@
 
 use std::io::{BufRead, Write};
 
+use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
 use crate::broker::{Broker, InboxItem, RosterSnapshot, Standing};
@@ -22,13 +23,26 @@ const SERVER_NAME: &str = "crew-mcp";
 #[derive(Debug)]
 pub struct Server {
     broker: Broker,
+    /// The role's owned lane, for `crew_lane` (issue #46).
+    owned_paths: Vec<String>,
+    /// How the crew enforces this role's lane.
+    lane_enforcement: LaneEnforcement,
 }
 
 impl Server {
-    /// Builds a server that dispatches tool calls to `broker`.
+    /// Builds a server that dispatches tool calls to `broker`, enforcing the role's
+    /// lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
     #[must_use]
-    pub fn new(broker: Broker) -> Self {
-        Self { broker }
+    pub fn new(
+        broker: Broker,
+        owned_paths: Vec<String>,
+        lane_enforcement: LaneEnforcement,
+    ) -> Self {
+        Self {
+            broker,
+            owned_paths,
+            lane_enforcement,
+        }
     }
 
     /// Runs the stdio JSON-RPC loop, reading requests and writing responses, until
@@ -123,6 +137,12 @@ impl Server {
             }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
             "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
+            "crew_lane" => {
+                let path =
+                    str_arg(arguments, "path").ok_or("crew_lane requires a `path` to check")?;
+                self.broker
+                    .check_lane(&self.owned_paths, self.lane_enforcement, path)
+            }
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -204,6 +224,21 @@ fn tool_catalog() -> Value {
                 and whether it is working, idle, stopped, or dead. Use it to see who is on the \
                 team and what they own before sending or claiming work.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crew_lane",
+            "description": "Check whether a file `path` is inside your owned lane before you \
+                edit it, so you do not wander into a teammate's lane. An in-lane path is yours: \
+                proceed. An out-of-lane path is reported to the unit; do not edit it silently, \
+                route the change through the commander (crew_send) instead. Under a blocking \
+                policy the edit is refused. Call it before editing outside your obvious lane.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "The repo-relative file path you are about to edit." }
+                },
+                "required": ["path"]
+            }
         }
     ])
 }
@@ -323,11 +358,15 @@ mod tests {
 
     /// A server whose broker points nowhere; the protocol paths under test never call it.
     fn server() -> Server {
-        Server::new(Broker::new(
-            "http://127.0.0.1:1",
-            RoleId::new("backend"),
-            RoleId::new("commander"),
-        ))
+        Server::new(
+            Broker::new(
+                "http://127.0.0.1:1",
+                RoleId::new("backend"),
+                RoleId::new("commander"),
+            ),
+            vec!["api/".to_owned()],
+            crew_core::LaneEnforcement::Warn,
+        )
     }
 
     fn handle(server: &mut Server, message: &Value) -> Option<Value> {
@@ -393,7 +432,13 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["crew_send", "crew_order", "crew_inbox", "crew_roster"]
+            [
+                "crew_send",
+                "crew_order",
+                "crew_inbox",
+                "crew_roster",
+                "crew_lane"
+            ]
         );
         // Each tool documents itself and its arguments.
         for tool in tools {

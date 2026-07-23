@@ -8,7 +8,9 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use crew_core::{Channel, Event, EventKind, MessageKind, RoleId, Sender};
+use crew_core::{
+    path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageKind, RoleId, Sender,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -168,6 +170,68 @@ impl Broker {
         let payload = json!({
             "role": self.role.as_str(),
             "owned_paths": owned_paths,
+        });
+        match self
+            .agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&payload.to_string())
+        {
+            Ok(_) => Ok(()),
+            Err(err) => Err(self.explain(err)),
+        }
+    }
+
+    /// Checks whether `path` is in the role's lane, warning or blocking per `enforcement`
+    /// when it is not (issue #46).
+    ///
+    /// An in-lane path proceeds untouched. An out-of-lane path is reported on the stream
+    /// (a `boundary` event) so the operator sees it, and the role is told to route the
+    /// change through the commander rather than editing it silently. Under
+    /// [`Block`](LaneEnforcement::Block) the edit is refused (an error); under
+    /// [`Warn`](LaneEnforcement::Warn) the role may proceed after being warned.
+    ///
+    /// # Errors
+    /// Returns a message if the path is out of lane and enforcement is `block`, or the
+    /// broker cannot be reached to record the crossing.
+    pub fn check_lane(
+        &self,
+        owned_paths: &[String],
+        enforcement: LaneEnforcement,
+        path: &str,
+    ) -> Result<String, String> {
+        if path_in_lane(owned_paths, path) {
+            return Ok(format!("`{path}` is in your lane; proceed."));
+        }
+        match enforcement {
+            LaneEnforcement::Off => Ok(format!(
+                "`{path}` is outside your lane, but lane enforcement is off; proceed with care."
+            )),
+            LaneEnforcement::Warn => {
+                self.report_boundary(path, false)?;
+                Ok(format!(
+                    "`{path}` is OUTSIDE your lane. This is reported to the unit. Do not edit it \
+                     silently: route the change through the commander (crew_send) unless it is \
+                     genuinely yours."
+                ))
+            }
+            LaneEnforcement::Block => {
+                self.report_boundary(path, true)?;
+                Err(format!(
+                    "`{path}` is OUTSIDE your lane and edits there are blocked. Route the change \
+                     through the commander (crew_send) instead of editing it."
+                ))
+            }
+        }
+    }
+
+    /// Records a lane crossing on the stream, so the operator sees it (issue #46).
+    fn report_boundary(&self, path: &str, blocked: bool) -> Result<(), String> {
+        let url = format!("{}/boundary", self.base);
+        let payload = json!({
+            "role": self.role.as_str(),
+            "path": path,
+            "blocked": blocked,
         });
         match self
             .agent

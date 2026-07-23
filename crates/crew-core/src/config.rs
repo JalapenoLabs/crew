@@ -17,10 +17,24 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::card::{BrokerEndpoint, RoleCard};
 use crate::id::RoleId;
+
+/// How the crew enforces lane ownership when a role edits outside its owned paths
+/// (issue #46).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneEnforcement {
+    /// Off: out-of-lane edits are not checked.
+    Off,
+    /// Warn: an out-of-lane edit is reported on the stream, but the role may proceed.
+    #[default]
+    Warn,
+    /// Block: an out-of-lane edit is refused; the role routes through the commander.
+    Block,
+}
 
 /// The default model a role runs, an alias Claude Code resolves to the current build.
 const DEFAULT_MODEL: &str = "opus";
@@ -61,6 +75,9 @@ pub struct CrewConfig {
     /// parallel roles never clobber each other's edits (issue #43). Off by default;
     /// opt a crew in with `worktrees = true`.
     pub worktrees: bool,
+    /// How the crew enforces lane ownership when a role edits outside its lane (issue
+    /// #46). Defaults to `warn`.
+    pub lane_enforcement: LaneEnforcement,
 }
 
 /// One role in a crew: its name, its lane, its acceptance bar, and its model.
@@ -89,6 +106,7 @@ impl Default for CrewConfig {
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
             worktrees: false,
+            lane_enforcement: LaneEnforcement::default(),
         }
     }
 }
@@ -130,6 +148,7 @@ impl CrewConfig {
                     broker.clone(),
                 )
                 .with_commander(self.commander.clone())
+                .with_lane_enforcement(self.lane_enforcement)
             })
             .collect()
     }
@@ -285,6 +304,7 @@ struct RawConfig {
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
     worktrees: Option<bool>,
+    lane_enforcement: Option<LaneEnforcement>,
     roles: Option<Vec<RawRole>>,
 }
 
@@ -321,6 +341,7 @@ impl RawConfig {
             idle_stop,
             repos: self.repos.unwrap_or_default(),
             worktrees: self.worktrees.unwrap_or(false),
+            lane_enforcement: self.lane_enforcement.unwrap_or_default(),
         })
     }
 }
@@ -421,6 +442,7 @@ mod tests {
         idle_stop = "10m"
         repos = ["api", "web"]
         worktrees = true
+        lane_enforcement = "block"
 
         [[roles]]
         role = "commander"
@@ -450,6 +472,7 @@ mod tests {
         assert_eq!(config.idle_stop.as_secs(), 10 * 60);
         assert_eq!(config.repos, ["api", "web"]);
         assert!(config.worktrees, "worktree isolation is opted in");
+        assert_eq!(config.lane_enforcement, super::LaneEnforcement::Block);
 
         // A per-role model overrides the crew default; others fall back to it.
         assert_eq!(config.model_for(&RoleId::new("backend")), "haiku");
@@ -499,6 +522,11 @@ mod tests {
         assert_eq!(config.idle_stop.as_secs(), 5 * 60);
         assert!(config.repos.is_empty());
         assert!(!config.worktrees, "worktree isolation is off by default");
+        assert_eq!(
+            config.lane_enforcement,
+            super::LaneEnforcement::Warn,
+            "lane enforcement defaults to warn"
+        );
         // The default crew round-trips through validation via an empty config document.
         assert_eq!(CrewConfig::from_toml("").unwrap(), config);
     }
