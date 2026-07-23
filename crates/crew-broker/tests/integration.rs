@@ -141,9 +141,15 @@ impl TestBroker {
         }
     }
 
-    /// Subscribes to the whole live event feed, live from now.
-    async fn stream(&self) -> Inbox {
-        let response = self.client.get(self.url("/stream")).send().await.unwrap();
+    /// Subscribes to the aggregate live stream with a query (e.g. `?role=backend`),
+    /// or the whole firehose when the query is empty.
+    async fn stream(&self, query: &str) -> Inbox {
+        let response = self
+            .client
+            .get(self.url(&format!("/stream{query}")))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "the stream should open");
         Inbox {
             response,
@@ -255,7 +261,7 @@ async fn a_subscriber_sees_the_live_count_update_as_agents_transition() {
     // The live agent count (issue #32): a subscriber on the stream sees a roster-change
     // event on every transition, and `GET /roster` reports the current live count.
     let broker = TestBroker::in_memory().await;
-    let mut stream = broker.stream().await;
+    let mut stream = broker.stream("").await;
 
     // Two agents start: each emits `started`, and the live count climbs to 2.
     broker.register("backend", None).await;
@@ -307,7 +313,7 @@ async fn a_consumer_renders_the_unit_from_the_stream_alone() {
     // one live stream a viz like Runewood renders agents, messages, and the live count,
     // with no crew-specific capture. Each event carries the whole envelope it needs.
     let broker = TestBroker::in_memory().await;
-    let mut stream = broker.stream().await; // subscribe before anything happens
+    let mut stream = broker.stream("").await; // the whole firehose, before anything happens
 
     // An agent appearing is a `started` lifecycle event: a consumer spawns an entity for
     // the role, and every event carries its typed, timestamped, addressed envelope.
@@ -420,6 +426,44 @@ async fn a_role_s_timeline_is_retrievable_as_history_and_live() {
     assert_eq!(bodies(&history), vec!["sent", "received"]);
     let sent_only = broker.get_json("/history?role=backend").await;
     assert_eq!(bodies(&sent_only), vec!["sent"]);
+
+    broker.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_aggregate_view_is_filterable_live_and_historically() {
+    // The aggregate activity log (issue #31): the whole unit's stream, the same filter
+    // applied live and historically so the two views agree.
+    let broker = TestBroker::in_memory().await;
+
+    // A filtered live subscription: only backend's events, opened before any post.
+    let mut backend_only = broker.stream("?role=backend").await;
+
+    broker.post_note("all-units", role("backend"), "b1").await; // seq 0, backend
+    broker.post_note("all-units", role("frontend"), "f1").await; // seq 1, frontend
+    broker.post_note("@qa", role("backend"), "b2").await; // seq 2, backend
+
+    // Live: only backend's events arrive, in order; frontend's is filtered out.
+    assert_eq!(body_of(&backend_only.recv(EXPECTED).await.unwrap()), "b1");
+    assert_eq!(body_of(&backend_only.recv(EXPECTED).await.unwrap()), "b2");
+    assert!(
+        backend_only.recv(ABSENT).await.is_none(),
+        "an event from another role is filtered out of the live stream",
+    );
+
+    // Historically: the same filter over `/history` returns the same set, time-ordered.
+    let history = broker.get_json("/history?role=backend").await;
+    assert_eq!(
+        bodies(&history),
+        vec!["b1", "b2"],
+        "history and the live stream agree under one filter",
+    );
+
+    // Unfiltered, the aggregate view is the whole firehose, time-ordered.
+    assert_eq!(
+        bodies(&broker.get_json("/history").await),
+        vec!["b1", "f1", "b2"],
+    );
 
     broker.stop().await;
 }

@@ -29,6 +29,7 @@ mod config;
 mod control;
 mod error;
 mod events;
+mod filter;
 mod gate;
 mod history;
 mod inbox;

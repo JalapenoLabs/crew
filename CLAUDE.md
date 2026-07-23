@@ -241,7 +241,7 @@ reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
 `ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
 masks configured secret values out of the event, persists it, and fans it to every
-subscriber. Subscribers read either `GET /stream`, the whole live feed, or
+subscriber. Subscribers read either `GET /stream`, the live aggregate feed, or
 `GET /inbox?role=<role>`, a role's live events filtered to its direct, pair, and
 `all-units` channels with its own messages dropped at the source and resumable from
 a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
@@ -259,7 +259,11 @@ by `crew_core::Event::in_timeline_of`. `GET /history?agent=<role>` reads it as h
 and `GET /activity?agent=<role>` streams it live over SSE (the inbox's replay-and-live
 engine, shared via one per-event predicate); unlike the inbox the timeline is not
 self-filtered, and unlike the sender-only `role` filter it also carries what the role
-received. The
+received. The **aggregate activity log** takes the same filter both ways (issue #31):
+`GET /stream` accepts the same `channel` / `role` / `agent` / `kind` / `task` / `since`
+params as `/history` (the shared `FilterQuery`, applied live with the very same
+`EventFilter::matches`), so a filtered live subscription and a filtered history read
+agree; with no filter `/stream` is the firehose. The
 `/roster` endpoints expose who is in the unit (issue
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with
