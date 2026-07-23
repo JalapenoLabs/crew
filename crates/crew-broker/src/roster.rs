@@ -13,7 +13,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
-use crew_core::{ChannelId, Event, EventKind, Lifecycle, RoleId, Sender, Timestamp, ALL_UNITS};
+use crew_core::{
+    ChannelId, Event, EventKind, Lifecycle, RoleId, Sender, TaskId, Timestamp, ALL_UNITS,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -70,6 +72,10 @@ struct Register {
     owned_paths: Option<Vec<String>>,
     /// The role's liveness; defaults to `working`.
     liveness: Option<Liveness>,
+    /// The task this transition belongs to, when the supervisor threads one (issue
+    /// #29), so the lifecycle event correlates to the task the role is working.
+    #[serde(default)]
+    task: Option<TaskId>,
 }
 
 /// `GET /roster`: list the registered roles, their owned paths, and their liveness.
@@ -110,7 +116,11 @@ async fn register(
         },
     );
     let prior_liveness = prior.as_ref().map(|status| status.liveness);
-    state.publish(roster_event(&role, lifecycle_for(liveness, prior_liveness)));
+    state.publish(roster_event(
+        &role,
+        lifecycle_for(liveness, prior_liveness),
+        request.task,
+    ));
 
     let code = if prior.is_some() {
         StatusCode::OK
@@ -134,7 +144,8 @@ async fn deregister(
             "role `{role}` is not registered"
         )));
     }
-    state.publish(roster_event(&role, Lifecycle::Stopped));
+    // A role leaving the unit is not scoped to a task, so its `stopped` carries none.
+    state.publish(roster_event(&role, Lifecycle::Stopped, None));
     Ok(Json(RosterView::of(&state.storage.roster())))
 }
 
@@ -166,13 +177,14 @@ fn lifecycle_for(liveness: Liveness, prior: Option<Liveness>) -> Lifecycle {
 }
 
 /// A roster change as a first-class stream event: the role's lifecycle transition,
-/// addressed to `all-units` so the whole unit sees who is live.
-fn roster_event(role: &RoleId, lifecycle: Lifecycle) -> Event {
+/// addressed to `all-units` so the whole unit sees who is live, correlated to `task`
+/// when the supervisor threads one (issue #29).
+fn roster_event(role: &RoleId, lifecycle: Lifecycle, task: Option<TaskId>) -> Event {
     Event {
         ts: Timestamp::now(),
         from: Sender::Role(role.clone()),
         channel: ChannelId::new(ALL_UNITS),
-        task: None,
+        task,
         kind: EventKind::Lifecycle(lifecycle),
     }
 }
@@ -380,6 +392,40 @@ mod tests {
             event.kind,
             EventKind::Lifecycle(Lifecycle::Restarted)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_threaded_task_correlates_the_lifecycle_event() {
+        let state = AppState::new(Config::default());
+        let mut stream = state.broadcast.subscribe();
+        let task = crew_core::TaskId::new();
+
+        // The supervisor threads the task on the registration; `started` carries it.
+        let (status, _) = register(
+            &state,
+            json!({ "role": "backend", "owned_paths": ["api/"], "task": task.to_string() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let started = stream.recv().await.unwrap().event;
+        assert!(matches!(
+            started.kind,
+            EventKind::Lifecycle(Lifecycle::Started)
+        ));
+        assert_eq!(
+            started.task,
+            Some(task),
+            "the lifecycle event correlates to the threaded task",
+        );
+
+        // A role leaving the unit is not task-scoped, so `stopped` carries no task.
+        deregister(&state, "backend").await;
+        let stopped = stream.recv().await.unwrap().event;
+        assert!(matches!(
+            stopped.kind,
+            EventKind::Lifecycle(Lifecycle::Stopped)
+        ));
+        assert_eq!(stopped.task, None, "a role leaving carries no task");
     }
 
     #[tokio::test]

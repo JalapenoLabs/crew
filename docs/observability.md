@@ -119,3 +119,25 @@ supervisor must, from day one:
 - expose the stream over SSE for live consumers and a paginated history endpoint
   for catch-up (with the `summary=true` compaction from `communication.md`)
 - treat the roster and liveness as part of the same event stream, not a side API
+
+### How the guarantee is enforced (issue #29)
+
+The stamp is not left to each emitter's discipline. `ts`, `from`, `channel`, and
+`kind` are mandatory in the `crew_core::Event` type, so an event cannot be
+constructed without them, and the broker stamps them **at the source**: a posted
+message takes its `ts` and `id` from the broker and its `channel` from the path
+(a client that sends any of those is rejected, not trusted), and a roster change
+becomes a lifecycle event stamped the same way. Every event, whatever its kind,
+enters the store and the stream through one choke point, `AppState::publish`, which
+asserts `Event::is_well_formed` (a present, non-blank channel and role sender). So
+no event reaches the store or stream missing a required field, and a future emitter
+cannot regress the invariant without tripping the assertion in every test run.
+
+Task correlation rides the same envelope. A message carries the `task` its sender
+threads (the broker preserves it). A lifecycle event carries the task the
+supervisor is working: `RosterClient::with_task` sets the task context, and every
+registration and liveness mark it publishes correlates to that task, so `started`,
+`idle`, and `restarted` all carry it (a role fully leaving the unit is not
+task-scoped, so its `stopped` carries none). Activity events, when the stream-json
+parser lands, thread the task the same way through the `Event.task` field. An event
+produced outside any task carries no id, which serializes to an omitted field.

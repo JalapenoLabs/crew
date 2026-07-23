@@ -8,10 +8,10 @@
 
 use std::time::Duration;
 
-use crew_core::RoleId;
+use crew_core::{RoleId, TaskId};
 use eyre::{eyre, Result};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// A role's liveness, as the broker roster labels it.
 ///
@@ -58,6 +58,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct RosterClient {
     base: String,
     agent: ureq::Agent,
+    /// The task this supervisor is working, threaded onto every lifecycle transition
+    /// so its events correlate to the task (issue #29). `None` outside a task context.
+    task: Option<TaskId>,
 }
 
 impl RosterClient {
@@ -71,7 +74,20 @@ impl RosterClient {
         Self {
             base: base.into(),
             agent,
+            task: None,
         }
+    }
+
+    /// Sets the task context, so every lifecycle transition this client publishes
+    /// carries the task id (issue #29).
+    ///
+    /// The supervisor threads the task it is working, so the roster's `started` /
+    /// `idle` / `restarted` events correlate to it; the clone shares the connection
+    /// pool, so a per-agent monitor keeps the same task context.
+    #[must_use]
+    pub fn with_task(mut self, task: TaskId) -> Self {
+        self.task = Some(task);
+        self
     }
 
     /// Registers `role` with the lane it owns, marking it working (`POST /roster`).
@@ -80,7 +96,8 @@ impl RosterClient {
     /// Returns an error if the broker rejects the registration or cannot be reached.
     pub fn register(&self, role: &RoleId, owned_paths: &[String]) -> Result<()> {
         let url = format!("{}/roster", self.base);
-        let body = json!({ "role": role.as_str(), "owned_paths": owned_paths });
+        let mut body = json!({ "role": role.as_str(), "owned_paths": owned_paths });
+        self.attach_task(&mut body);
         self.agent
             .post(&url)
             .set("content-type", "application/json")
@@ -99,13 +116,21 @@ impl RosterClient {
     /// Returns an error if the broker rejects the update or cannot be reached.
     pub fn mark(&self, role: &RoleId, liveness: Liveness) -> Result<()> {
         let url = format!("{}/roster", self.base);
-        let body = json!({ "role": role.as_str(), "liveness": liveness.wire() });
+        let mut body = json!({ "role": role.as_str(), "liveness": liveness.wire() });
+        self.attach_task(&mut body);
         self.agent
             .post(&url)
             .set("content-type", "application/json")
             .send_string(&body.to_string())
             .map(|_response| ())
             .map_err(|err| eyre!("could not mark role `{role}` as {}: {err}", liveness.wire()))
+    }
+
+    /// Adds the task id to a roster request body when a task context is set.
+    fn attach_task(&self, body: &mut Value) {
+        if let (Some(task), Value::Object(fields)) = (self.task, body) {
+            fields.insert("task".to_owned(), json!(task));
+        }
     }
 
     /// Deregisters `role` on exit (`DELETE /roster/{role}`).

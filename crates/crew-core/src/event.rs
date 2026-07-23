@@ -44,6 +44,46 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+impl Event {
+    /// Whether the event carries the fields every projection needs, non-degenerate.
+    ///
+    /// `ts`, `from`, `channel`, and `kind` are mandatory in the type, so they are
+    /// always present; this additionally rejects the two ways a present field can
+    /// still be useless to a projection: a blank channel or a blank role sender. The
+    /// broker asserts it at the one point every event enters the store and stream (its
+    /// `publish` path), so a malformed event is never persisted or streamed (issue #29).
+    ///
+    /// This is the invariant behind "no event reaches the store or stream missing a
+    /// required field" (see `docs/observability.md`).
+    ///
+    /// # Examples
+    /// ```
+    /// use crew_core::{Activity, ChannelId, Event, EventKind, RoleId, Sender, Timestamp};
+    ///
+    /// let event = Event {
+    ///     ts: Timestamp::now(),
+    ///     from: Sender::Role(RoleId::new("backend")),
+    ///     channel: ChannelId::new("all-units"),
+    ///     task: None,
+    ///     kind: EventKind::Activity(Activity::TurnStarted),
+    /// };
+    /// assert!(event.is_well_formed());
+    /// assert!(!Event { channel: ChannelId::new(" "), ..event.clone() }.is_well_formed());
+    /// ```
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        if self.channel.as_str().trim().is_empty() {
+            return false;
+        }
+        if let Sender::Role(role) = &self.from {
+            if role.as_str().trim().is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// The three kinds of item on the event stream (see `docs/observability.md`).
 ///
 /// `message` is inter-agent communication, `lifecycle` is a supervised state
@@ -264,6 +304,42 @@ mod tests {
         assert_eq!(json["owned_paths"], serde_json::json!(["src"]));
         assert_eq!(json["body"], "the detail");
         assert!(json.get("data").is_none());
+    }
+
+    #[test]
+    fn well_formed_requires_a_channel_and_a_named_sender() {
+        let base = Event {
+            ts: Timestamp::now(),
+            from: Sender::Role(RoleId::new("backend")),
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind: EventKind::Activity(Activity::TurnStarted),
+        };
+        assert!(base.is_well_formed(), "a stamped event is well formed");
+        assert!(
+            Event {
+                from: Sender::General,
+                ..base.clone()
+            }
+            .is_well_formed(),
+            "the General is a valid sender",
+        );
+        assert!(
+            !Event {
+                channel: ChannelId::new("  "),
+                ..base.clone()
+            }
+            .is_well_formed(),
+            "a blank channel is not well formed",
+        );
+        assert!(
+            !Event {
+                from: Sender::Role(RoleId::new("")),
+                ..base
+            }
+            .is_well_formed(),
+            "a blank role sender is not well formed",
+        );
     }
 
     #[test]
