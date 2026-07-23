@@ -2,13 +2,15 @@
 //!
 //! A `POST /channels/{channel}/messages` stamps the event server-side, masks any
 //! configured secret out of it, persists it, and fans it to every subscriber. A
-//! `GET /events` reads the stored log, and a `GET /stream` subscribes to the live
-//! feed as Server-Sent Events. The self-filtered per-role streams come later.
+//! `GET /events` reads the stored log, and `GET /stream` subscribes to the live
+//! aggregate feed over Server-Sent Events, optionally narrowed by the shared
+//! [`FilterQuery`](crate::filter::FilterQuery) so the live view matches the filtered
+//! `GET /history` (issue #31). The per-role, self-filtered stream is `GET /inbox`.
 
 use std::convert::Infallible;
 
 use axum::body::Bytes;
-use axum::extract::{FromRequest, Path, Request, State};
+use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
@@ -17,11 +19,11 @@ use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, Se
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::error::ApiError;
+use crate::filter::FilterQuery;
 use crate::state::{AppState, Sequenced};
 
 /// The message routes: post to a channel, read the log, and subscribe to the feed.
@@ -173,26 +175,45 @@ async fn list_events(State(state): State<AppState>) -> Json<EventLog> {
     })
 }
 
-/// `GET /stream`: subscribe to the whole live event feed as Server-Sent Events.
+/// `GET /stream`: subscribe to the live event feed as Server-Sent Events.
+///
+/// This is the aggregate activity log's live view (issue #31): the whole unit's
+/// stream, optionally narrowed by the shared [`FilterQuery`] (`channel`, `role`,
+/// `kind`, `task`, `since`). With no filter it is the firehose; with a filter it
+/// delivers only matching events, using the very same filter test
+/// ([`EventFilter::matches`](crate::store::EventFilter::matches)) the history query
+/// applies, so the live and historical views agree. `GET /inbox` is the
+/// per-role, self-filtered delivery view instead.
 ///
 /// Each event arrives already scrubbed and carries its log sequence as the SSE `id`.
 /// A subscriber that lags past the channel's buffer skips the dropped events rather
-/// than closing the stream, so a slow reader still receives everything after the gap.
-/// This is the unfiltered firehose; `GET /inbox?role=<role>` is the per-role,
-/// self-filtered view.
+/// than closing the stream, so a slow reader still receives everything after the gap;
+/// it catches up on the gap through `GET /history` with the same filter.
+///
+/// # Errors
+/// Returns a 400 [`ApiError`] if a filter parameter is malformed.
 async fn stream(
     State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    Query(filter): Query<FilterQuery>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let filter = filter.to_filter()?;
     let receiver = state.broadcast.subscribe();
-    let events = BroadcastStream::new(receiver).filter_map(|result| match result {
-        Ok(Sequenced { seq, event }) => SseEvent::default()
+    let events = BroadcastStream::new(receiver).filter_map(move |result| {
+        // A lagged receiver skips the gap; the firehose is live-only, and a consumer
+        // catches up through `/history` with the same filter.
+        let Ok(Sequenced { seq, event }) = result else {
+            return None;
+        };
+        if !filter.matches(&event) {
+            return None;
+        }
+        SseEvent::default()
             .id(seq.to_string())
             .json_data(&event)
             .ok()
-            .map(Ok),
-        Err(BroadcastStreamRecvError::Lagged(_)) => None,
+            .map(Ok)
     });
-    Sse::new(events).keep_alive(KeepAlive::default())
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]
@@ -412,7 +433,8 @@ mod tests {
             | EventKind::Verification(_)
             | EventKind::Board(_)
             | EventKind::Budget(_)
-            | EventKind::Telemetry(_) => {
+            | EventKind::Telemetry(_)
+            | EventKind::Usage(_) => {
                 panic!("expected a message")
             }
         };
@@ -449,6 +471,29 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/event-stream"),
         );
+    }
+
+    #[tokio::test]
+    async fn the_stream_accepts_a_filter_and_rejects_a_malformed_one() {
+        let state = AppState::new(Config::default());
+        // A well-formed filter opens the stream.
+        let ok = Request::builder()
+            .uri("/stream?role=backend&kind=lifecycle")
+            .body(Body::empty())
+            .unwrap();
+        let response = api::build(state.clone()).oneshot(ok).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "a valid filter opens it");
+
+        // A malformed filter is a typed 400 before the stream opens.
+        let bad = Request::builder()
+            .uri("/stream?kind=bogus")
+            .body(Body::empty())
+            .unwrap();
+        let response = api::build(state).oneshot(bad).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.get("error").is_some(), "typed error body: {value}");
     }
 
     #[tokio::test]

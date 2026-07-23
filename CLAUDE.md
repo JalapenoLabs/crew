@@ -115,7 +115,10 @@ not a reimplementation of the agent.
   never a silent overrun); auto-idle on quiet with cost and token telemetry (issue #55,
   done: the lifecycle machine idle-stops a quiet role, and per-turn `telemetry` events plus
   the roles' `lifecycle` events feed a `GET /stats` rollup of tokens, cost, and working time
-  per role and in aggregate); and subscription usage awareness.
+  per role and in aggregate); and subscription usage awareness (issue #56, done: one shared
+  usage gauge across the crew auto-pauses new work when a reading crosses
+  `CREW_BROKER_USAGE_THRESHOLD`, lifts lazily at the window reset, and lets the operator
+  resume early with `crew resume`, distinct from the manual pause).
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -146,9 +149,10 @@ The full design is in `docs/architecture.md`. In short:
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew submit` / `crew verdict` / `crew gate` /
   `crew board` / `crew record`) for a
-  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live, and
+  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
   `crew notify` to push a native notification on each actionable moment (a question, a
-  death, a stand-down) over that same stream.
+  death, a stand-down) over that same stream, and `crew usage` to read the shared-subscription
+  usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -224,7 +228,7 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Boundary`,
-`Verification`, `Board`, `Budget`, `Telemetry`) stream
+`Verification`, `Board`, `Budget`, `Telemetry`, `Usage`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -239,7 +243,7 @@ reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
 `ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
 masks configured secret values out of the event, persists it, and fans it to every
-subscriber. Subscribers read either `GET /stream`, the whole live feed, or
+subscriber. Subscribers read either `GET /stream`, the live aggregate feed, or
 `GET /inbox?role=<role>`, a role's live events filtered to its direct, pair, and
 `all-units` channels with its own messages dropped at the source and resumable from
 a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
@@ -257,7 +261,11 @@ by `crew_core::Event::in_timeline_of`. `GET /history?agent=<role>` reads it as h
 and `GET /activity?agent=<role>` streams it live over SSE (the inbox's replay-and-live
 engine, shared via one per-event predicate); unlike the inbox the timeline is not
 self-filtered, and unlike the sender-only `role` filter it also carries what the role
-received. The
+received. The **aggregate activity log** takes the same filter both ways (issue #31):
+`GET /stream` accepts the same `channel` / `role` / `agent` / `kind` / `task` / `since`
+params as `/history` (the shared `FilterQuery`, applied live with the very same
+`EventFilter::matches`), so a filtered live subscription and a filtered history read
+agree; with no filter `/stream` is the firehose. The
 `/roster` endpoints expose who is in the unit (issue
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with
@@ -315,9 +323,16 @@ teammate's work as an independent skeptic, and read the gate; issue #47), the
 situation-board pair `crew_board` / `crew_record` (read the crew's durable memory, and
 record or retract a decision, interface, or gotcha; issue #49), and `crew_briefing` (the
 bounded new-role briefing packet: the board plus a lane-scoped rolling summary, size-capped;
-issue #50). A tool failure returns as an `isError` result, not a protocol error. The
-roadmap step is `crew_inbox` push over the per-role SSE stream instead of the current
-history read.
+issue #50). A tool failure returns as an `isError` result, not a protocol error.
+
+`crew_inbox` has a push path (issue #76): `Broker::subscribe` opens the broker's per-role
+SSE inbox (`GET /inbox?role=<role>`) at boot, seeds the backlog from history once (a fresh
+stream starts at the live tail), and a background thread buffers events as they arrive,
+resuming from a `Last-Event-ID` cursor across reconnects and deduplicating the seed overlap
+by message id. A read drains the buffered batch (`InboxStream`) instead of refetching the
+whole message history, so it is O(new) not O(total) per call. The pull-based history read
+stays the fallback when the stream cannot be opened (a runtime without streaming); surfacing
+native MCP notifications as events arrive is the remaining refinement.
 
 `crew-core` also carries the role card (issue #18): `RoleCard` is the thin bootstrap
 an agent boots from, a TOML document naming the role, its owned lane, its acceptance
@@ -515,6 +530,19 @@ the budget (issue #24); working time needs no feed. This is the data the `crew t
 (issue #51) and the Seraphim per-role stats render. See `docs/observability.md` (cost,
 tokens, and time telemetry).
 
+Subscription usage awareness keeps a crew from exhausting the shared window (issue #56). The
+crew shares one subscription, so the broker keeps one `Usage` gauge across the crew (in
+`AppState`, distinct from the manual pause `Control`). `POST /usage` records a reading (the
+window percent plus its reset); at or above `CREW_BROKER_USAGE_THRESHOLD` (default 90) it
+auto-pauses new work, publishing a `usage` event with the reset time so the pause is never
+silent. `is_role_paused` folds in the usage auto-pause, so every role is gated (one shared
+subscription). The gate lifts lazily at the reset instant, so work auto-resumes; `crew
+resume` (which now also clears a usage pause) is the escape hatch to resume early. `GET
+/usage` and `crew usage` read the gauge. The usage signal is the supervisor's to detect from
+the agents' rate-limit output (the stream-json parser, issue #24) and report via
+`RosterClient::report_usage`; the auto-pause mechanism is exercised through `POST /usage`
+directly until then. See `docs/observability.md` (subscription usage auto-pause).
+
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config
 (`--config`, else `./crew.toml`, else the default crew), resolves the broker address,
@@ -568,9 +596,10 @@ classifier when their events land. See `docs/observability.md` (push notificatio
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
-`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`), and
+`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`),
 `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
-out of every message before storing or streaming it).
+out of every message before storing or streaming it), and `CREW_BROKER_USAGE_THRESHOLD`
+(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56).
 Binding a non-loopback address is refused unless the non-local flag is set, so the
 broker never exposes itself to the network by accident.
 

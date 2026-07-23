@@ -29,6 +29,7 @@ mod config;
 mod control;
 mod error;
 mod events;
+mod filter;
 mod gate;
 mod history;
 mod inbox;
@@ -40,6 +41,7 @@ mod state;
 mod stats;
 mod store;
 mod summary;
+mod usage;
 
 pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
 pub use error::ApiError;

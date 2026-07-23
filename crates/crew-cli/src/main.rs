@@ -38,6 +38,7 @@ mod paths;
 mod pause;
 mod shim;
 mod up;
+mod usage;
 
 /// mimalloc as the global allocator (M-MIMALLOC-APPS).
 #[global_allocator]
@@ -139,6 +140,12 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Show the shared-subscription usage gauge: the reading, threshold, and any auto-pause.
+    Usage {
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// List the unit's roster: every role, its lane, and its liveness.
     Roster,
     /// Check whether a file path is in this role's lane before editing it.
@@ -232,6 +239,7 @@ fn main() -> Result<()> {
         Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
+        Command::Usage { broker } => usage::usage(broker.as_deref()),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
         Command::Submit {

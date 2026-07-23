@@ -219,8 +219,13 @@ the shim, so it appears on the roster and the stream like any other role. The pa
 and its gaps (a stateless inbox with no per-session cursor, no push, operator-launched
 rather than supervisor-spawned) are in `docs/codex.md`.
 
-The roadmap step is `crew_inbox` push: subscribing to the broker's per-role SSE
-stream for native notifications instead of the current history read on each call.
+`crew_inbox` has a push path (issue #76): the server subscribes to the broker's per-role
+SSE inbox (`GET /inbox?role=<role>`) at boot, seeding the backlog from history once and
+then buffering events on a background thread, resuming from a `Last-Event-ID` cursor across
+reconnects. A read drains the buffered batch instead of refetching the whole history, so it
+is O(new) rather than O(total) per call. The pull-based history read stays the fallback for
+a runtime without streaming. Surfacing native MCP notifications as events arrive, rather
+than only on a read, is the remaining refinement.
 
 ### CLI (`crew`, human front-end)
 
