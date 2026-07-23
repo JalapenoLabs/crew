@@ -140,6 +140,36 @@ impl TestBroker {
             buffer: String::new(),
         }
     }
+
+    /// Subscribes to the whole live event feed, live from now.
+    async fn stream(&self) -> Inbox {
+        let response = self.client.get(self.url("/stream")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "the stream should open");
+        Inbox {
+            response,
+            buffer: String::new(),
+        }
+    }
+
+    /// Registers `role` on the roster (`POST /roster`) with an optional liveness,
+    /// so the transition publishes its lifecycle event.
+    async fn register(&self, role: &str, liveness: Option<&str>) {
+        let mut body = json!({ "role": role });
+        if let Some(liveness) = liveness {
+            body["liveness"] = json!(liveness);
+        }
+        let response = self
+            .client
+            .post(self.url("/roster"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "register {role} should succeed"
+        );
+    }
 }
 
 /// A live Server-Sent-Events subscription, reading one event at a time.
@@ -190,6 +220,16 @@ fn channel_of(event: &Value) -> &str {
     event["channel"].as_str().unwrap_or_default()
 }
 
+/// The lifecycle transition a lifecycle event carries (started / idle / died / ...).
+fn lifecycle_of(event: &Value) -> &str {
+    event["kind"]["data"].as_str().unwrap_or_default()
+}
+
+/// The live agent count reported by a `GET /roster` body.
+fn live_count(roster: &Value) -> u64 {
+    roster["count"]["live"].as_u64().unwrap()
+}
+
 /// The message body of an event.
 fn body_of(event: &Value) -> &str {
     event["kind"]["data"]["body"].as_str().unwrap_or_default()
@@ -208,6 +248,57 @@ fn bodies(page: &Value) -> Vec<String> {
         .iter()
         .map(|event| body_of(event).to_owned())
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscriber_sees_the_live_count_update_as_agents_transition() {
+    // The live agent count (issue #32): a subscriber on the stream sees a roster-change
+    // event on every transition, and `GET /roster` reports the current live count.
+    let broker = TestBroker::in_memory().await;
+    let mut stream = broker.stream().await;
+
+    // Two agents start: each emits `started`, and the live count climbs to 2.
+    broker.register("backend", None).await;
+    assert_eq!(
+        lifecycle_of(&stream.recv(EXPECTED).await.unwrap()),
+        "started"
+    );
+    assert_eq!(live_count(&broker.get_json("/roster").await), 1);
+
+    broker.register("qa", None).await;
+    assert_eq!(
+        lifecycle_of(&stream.recv(EXPECTED).await.unwrap()),
+        "started"
+    );
+    assert_eq!(live_count(&broker.get_json("/roster").await), 2);
+
+    // backend idles: an `idle` event, still live, so the count holds at 2.
+    broker.register("backend", Some("idle")).await;
+    assert_eq!(lifecycle_of(&stream.recv(EXPECTED).await.unwrap()), "idle");
+    let roster = broker.get_json("/roster").await;
+    assert_eq!(live_count(&roster), 2, "an idle agent is still live");
+    assert_eq!(roster["count"]["idle"], 1);
+
+    // backend dies: a `died` event, and the count drops to 1.
+    broker.register("backend", Some("dead")).await;
+    assert_eq!(lifecycle_of(&stream.recv(EXPECTED).await.unwrap()), "died");
+    assert_eq!(live_count(&broker.get_json("/roster").await), 1);
+
+    // qa stops: a `stopped` event, and the count drops to 0.
+    broker.register("qa", Some("stopped")).await;
+    assert_eq!(
+        lifecycle_of(&stream.recv(EXPECTED).await.unwrap()),
+        "stopped"
+    );
+    let roster = broker.get_json("/roster").await;
+    assert_eq!(live_count(&roster), 0, "no agents remain live");
+    assert_eq!(
+        roster["roles"].as_array().unwrap().len(),
+        2,
+        "the dead and stopped roles are still listed, just not counted live",
+    );
+
+    broker.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

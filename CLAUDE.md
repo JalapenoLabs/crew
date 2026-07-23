@@ -214,7 +214,12 @@ received. The
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with
 `DELETE /roster/{role}`, and every change publishes a `lifecycle` event to
-`all-units`, so it rides history, `/stream`, and each inbox. Its `ChannelRouter`
+`all-units`, so it rides history, `/stream`, and each inbox. `GET /roster` also
+reports the **live agent count** (issue #32): a `count` with the headline `live`
+number (roles `working` or `idle`, present and up or resumable) and the per-liveness
+breakdown, so a UI reads it once and keeps it current from the lifecycle events on
+the stream, showing the count update as agents start, idle, stop, and die with no
+polling. Its `ChannelRouter`
 resolves a channel to the roles it reaches (issue #11), filtering a supplied roster
 through the `Channel` membership test. The live roster that feeds routing is still a
 scaffold waiting for the phased build in `docs/roadmap.md`. Verify with `cargo build`
