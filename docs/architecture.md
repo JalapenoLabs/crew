@@ -159,7 +159,11 @@ stream for native notifications instead of the current history read on each call
 
 ### CLI (`crew`, human front-end)
 
-- `crew up` brings a crew online from a config (roles, owned paths, model).
+- `crew up` brings a crew online from a config (`crew_core::CrewConfig`, issue #25):
+  the roles and their owned paths, the model, the repos in scope, the idle-stop
+  timeout, and the commander. The config validates itself and resolves the default
+  crew when omitted (see `docs/config.md`); it produces the role cards the supervisor
+  spawns.
 - `crew send` posts a message as the General, to the commander by default.
 - `crew watch` tails the conversation with routing visible.
 - `crew down` stands the crew down.
