@@ -75,10 +75,17 @@ fallback for a runtime without MCP.
 
 ### CLI (`crew`, human front-end)
 
-- `crew up` brings a crew online from a config (roles, owned paths, model).
-- `crew send` posts a message as the General, to the commander by default.
-- `crew watch` tails the conversation with routing visible.
-- `crew down` stands the crew down.
+- `crew send` posts a message as the General to `POST /channels/{channel}/messages`:
+  the commander (`@commander`) by default, `--to <role>` for a role's direct channel,
+  or `--channel <name>` for a named channel (issue #15).
+- `crew watch` tails the conversation with routing visible, rendering each event
+  from the broker's SSE feed as `from -> channel (kind) body`. It reads the whole
+  firehose (`/stream`) by default, or one role's self-filtered inbox with
+  `--role <role>` (issue #15).
+- Both read the broker address from `--broker`, else `CREW_BROKER_HOST`/`PORT`, else
+  the loopback default.
+- `crew up` brings a crew online from a config, and `crew down` stands it down; the
+  supervisor front-end comes in a later phase.
 
 ### Observability
 

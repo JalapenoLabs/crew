@@ -197,8 +197,15 @@ under concurrent writes; `summary=true` is reserved (a `501` hook) for the Phase
 compaction (issue #12). Its `ChannelRouter` resolves a channel to the roles it
 reaches (issue #11), filtering a supplied roster through the `Channel` membership
 test. The live roster that feeds routing and the rolling-summary history are still
-scaffolds waiting for the phased build in `docs/roadmap.md`. Verify with `cargo
-build` and `cargo test` at the root.
+scaffolds waiting for the phased build in `docs/roadmap.md`.
+
+The `crew` CLI is the General's terminal front-end (issue #15): `crew send` posts a
+message as the General (to `@commander` by default, `--to <role>`, or `--channel
+<name>`), and `crew watch` tails the conversation live with routing visible (the
+`/stream` firehose, or a role's inbox with `--role <role>`). Both read the broker
+address from `--broker` or the `CREW_BROKER_*` environment. `crew up` / `crew down`
+(the supervisor front-end) come in a later phase. Verify with `cargo build` and
+`cargo test` at the root.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

@@ -28,3 +28,11 @@ tracing.workspace = true
 # themselves land in later phases; this fixes the consumer direction now.
 crew-broker.workspace = true
 crew-supervisor.workspace = true
+# The command surface (issue #15): argument parsing, a synchronous HTTP client to
+# the broker, JSON for the message body and event stream, the shared event types,
+# and timestamp formatting for `crew watch`.
+crew-core.workspace = true
+clap.workspace = true
+ureq.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

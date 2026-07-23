@@ -42,6 +42,11 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 # Adapt a broadcast receiver into a Stream for axum's SSE fan-out.
 tokio-stream = { version = "0.1", features = ["sync"] }
+# The CLI front-end: argument parsing and a synchronous HTTP client. `ureq` is
+# http-only (no TLS backend) since the broker is localhost, so a fresh clone builds
+# without a system OpenSSL (M-OOBE).
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "2", default-features = false }
 # Internal crates. The domain graph flows toward crew-core; crew-cli is a consumer
 # only, never a dependency. crew-telemetry is a standalone infrastructure crate the
 # binaries call to initialize logging.
