@@ -299,23 +299,32 @@ impl RosterClient {
     }
 
     /// Reads the events at or after `since`, oldest first, following the
-    /// history pages.
+    /// history pages, keeping only the given `kinds`.
     ///
     /// The coordination-stall monitor (issue #48) reads a recent window of the
-    /// stream to look for a crew stuck waiting on itself. Events are
-    /// returned as raw JSON so the supervisor reads the broker's stable
-    /// stream contract rather than coupling to `crew_core::EventKind`,
-    /// which lets an event kind it does not model pass through.
+    /// stream to look for a crew stuck waiting on itself. It passes the kinds
+    /// it actually inspects (`message`, `ledger`, `verification`) so the
+    /// broker filters server-side and a busy crew's high-volume `activity`
+    /// events never ride the wire each scan (issue #125); an empty `kinds`
+    /// fetches every kind. Events are returned as raw JSON so the
+    /// supervisor reads the broker's stable stream contract rather than
+    /// coupling to `crew_core::EventKind`, which lets an event kind it does
+    /// not model pass through.
     ///
     /// # Errors
     /// Returns an error if the broker cannot be reached or a page is malformed.
-    pub fn history_since(&self, since: Timestamp) -> Result<Vec<Value>> {
+    pub fn history_since(&self, since: Timestamp, kinds: &[&str]) -> Result<Vec<Value>> {
         let url = format!("{}/history", self.base);
         let since = since.to_string();
+        // The broker accepts a comma-separated set of kinds (issue #125).
+        let kind = kinds.join(",");
         let mut events = Vec::new();
         let mut after: Option<String> = None;
         loop {
             let mut request = self.agent.get(&url).query("since", &since);
+            if !kind.is_empty() {
+                request = request.query("kind", &kind);
+            }
             if let Some(cursor) = &after {
                 request = request.query("after", cursor);
             }

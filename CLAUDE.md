@@ -261,7 +261,9 @@ broadcast (its buffer overruns the capacity under load) logs a `broker.inbox.lag
 event with the role and skipped count, so the gap is visible to the operator rather
 than silent; the client still recovers it from the cursor on reconnect (issue #116).
 `GET /history` reads past events
-filtered by `channel`, `role` (sent by), `agent` (a role's activity timeline), `kind`,
+filtered by `channel`, `role` (sent by), `agent` (a role's activity timeline), `kind`
+(a comma-separated set keeps several kinds in one query, e.g.
+`kind=message,ledger,verification`, issue #125),
 `task`, and `since`, ordered by `ts` then log
 position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
 under concurrent writes (issue #12); `summary=true` returns the rolling-summary
@@ -516,7 +518,9 @@ a quiet agent parks rather than being force-recovered. (Unifying the eager `Crew
 The defibrillator also catches a crew stuck waiting on itself, not just a dead agent
 (issue #48, `crew_supervisor::stall`). A fleet-wide **stall monitor** thread reads a
 recent window of the event stream (`RosterClient::history_since`, over the stable stream
-contract rather than `crew_core::EventKind`, so a kind it does not model passes through)
+contract rather than `crew_core::EventKind`, so a kind it does not model passes through;
+it fetches only the `message` / `ledger` / `verification` kinds it inspects, so a busy
+crew's high-volume `activity` events never ride the wire each scan, issue #125)
 on the `stall_scan_interval` and runs `detect_stalls`, a pure function that finds three
 shapes past the `stall_timeout` (ten minutes by default, below the process heartbeat): a
 **deadlock** (a cycle of unanswered questions), an **unanswered question** (a one-sided

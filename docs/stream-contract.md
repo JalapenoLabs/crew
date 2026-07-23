@@ -166,7 +166,10 @@ stable cursor:
   `agent` (a role's full activity timeline: what it sent and received), `kind`
   (`message` / `lifecycle` / `activity` / `ledger` / `boundary` / `verification` /
   `board` / `budget` / `telemetry` / `usage` / `stall`), `task`, `since` (an RFC 3339
-  instant).
+  instant). `kind` accepts a comma-separated set to keep several kinds in one query
+  (e.g. `kind=message,ledger,verification`), so a consumer narrows to a subset
+  server-side rather than fetching everything and filtering client-side. The same
+  filters narrow `GET /stream`.
 - Ordering is deterministic: by `ts`, then log position.
 - Pagination: pass `limit` (default 100, max 1000) and `after=<cursor>`. `next_cursor`
   is the position to resume from; it is **omitted** on the last page.

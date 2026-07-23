@@ -41,6 +41,15 @@ use tracing::{event, Level};
 
 use crate::roster::RosterClient;
 
+/// The event kinds [`detect_stalls`] inspects, so a scan fetches only these
+/// from the broker instead of the whole window (issue #125).
+///
+/// A stall is read from the wait graph of `message` questions and answers, and
+/// from held `ledger` claims and unverified `verification` submissions; every
+/// other kind, notably a busy crew's high-volume `activity` events, is
+/// irrelevant, so filtering server-side keeps each scan's fetch small.
+const STALL_EVENT_KINDS: &[&str] = &["message", "ledger", "verification"];
+
 /// A detected coordination stall: the crew stuck waiting on itself, not one
 /// dead agent.
 ///
@@ -611,7 +620,10 @@ impl StallMonitor {
     /// One scan: read the recent history, detect stalls, and surface the ones
     /// that newly appeared or have since resolved.
     fn scan(&self, reported: &mut BTreeMap<String, Stall>) {
-        let events = match self.roster.history_since(self.lookback_start()) {
+        let events = match self
+            .roster
+            .history_since(self.lookback_start(), STALL_EVENT_KINDS)
+        {
             Ok(events) => events,
             // A transient broker read failure is not fatal: skip this scan and retry.
             Err(err) => {
