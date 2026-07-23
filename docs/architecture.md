@@ -168,8 +168,9 @@ The `crew-mcp` crate ships the `crew-mcp` binary: a JSON-RPC 2.0 server over
 newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one of
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
-config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes sixteen tools (issues #17,
+config. It registers the role on the roster at boot and dispatches each tool to a
+`crew_client::Broker`, the shared thin HTTP client (issue #129); it never touches
+the store. It exposes sixteen tools (issues #17,
 #27, #45, #46, #47, #49, #50, #121, #123):
 
 - `crew_send` sends a note as the role to a channel or a teammate. With
@@ -345,9 +346,9 @@ supervisor library) that both front-ends depend on, published under the
 **JalapenoLabs** org.
 
 The substrate is packaged as one **umbrella crate**, `crew-substrate` (issue #34),
-that re-exports the public API of the four library crates it is built from
-(`crew-core`, `crew-broker`, `crew-supervisor`, `crew-mcp`) as the modules `core`,
-`broker`, `supervisor`, and `mcp`. A front-end takes a single dependency on
+that re-exports the public API of the five library crates it is built from
+(`crew-core`, `crew-broker`, `crew-client`, `crew-supervisor`, `crew-mcp`) as the
+modules `core`, `broker`, `client`, `supervisor`, and `mcp`. A front-end takes a single dependency on
 `crew-substrate` and reaches every part through it, never the individual crates; the
 CLI is the first such consumer. The umbrella adds no logic and follows
 `M-DONT-LEAK-TYPES` (footnote 2: an umbrella may leak its siblings' types), documenting

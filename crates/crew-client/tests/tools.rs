@@ -15,8 +15,8 @@ use std::{
 };
 
 use crew_broker::{AppState, Config};
+use crew_client::Broker;
 use crew_core::{Channel, RoleId};
-use crew_mcp::Broker;
 
 /// A broker serving on an ephemeral loopback port, driven over HTTP.
 ///

@@ -1,0 +1,27 @@
+[package]
+name = "crew-client"
+description = "The synchronous broker client an agent (or the CLI shim) sends and reads its inbox through."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The shared vocabulary: the event and channel types the client sends and reads.
+crew-core.workspace = true
+# The wire types and a synchronous, http-only HTTP client to the localhost broker
+# (no system TLS needed, so a fresh clone builds without OpenSSL, M-OOBE).
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+# Run a real broker in-process for the end-to-end client tests: the broker service
+# and a tokio runtime to serve it on a background thread.
+crew-broker.workspace = true
+tokio = { workspace = true }

@@ -1,9 +1,20 @@
-//! The broker client behind the MCP tools.
+//! The synchronous broker client an agent talks to the crew through.
 //!
-//! A thin synchronous client over the broker's localhost HTTP + SSE API; the
-//! MCP server never touches the store directly. It acts as one role (the agent
-//! it serves): `send` posts as that role, `inbox` reads the messages addressed
-//! to it (self-filtered), and `roster` lists the unit.
+//! A thin synchronous client over the broker's localhost HTTP + SSE API; it
+//! never touches the store directly. Both agent-facing front-ends share it: the
+//! MCP server ([`crew_mcp`]) dispatches its tools to a [`Broker`], and the CLI
+//! shim ([the `crew` binary]) reuses the same client so a runtime without MCP,
+//! such as Codex, maps its I/O onto the broker identically (issue #129).
+//!
+//! A client acts as one role (the agent it serves): [`send`](Broker::send)
+//! posts as that role, [`inbox`](Broker::inbox) reads the messages addressed to
+//! it (self-filtered), and [`roster`](Broker::roster) lists the unit. The
+//! [`Broker`] is the entry point; the view structs it returns
+//! ([`InboxItem`], [`RoleEntry`], [`LedgerItem`], and friends) shape one broker
+//! response each for a front-end to render.
+//!
+//! [`crew_mcp`]: https://docs.rs/crew-mcp
+//! [the `crew` binary]: https://docs.rs/crew-cli
 //!
 //! `inbox` has two paths (issue #76). With [`subscribe`](Broker::subscribe) it
 //! holds a background subscription to the broker's per-role SSE inbox (`GET

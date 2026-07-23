@@ -275,6 +275,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crew-client"
+version = "0.1.0"
+dependencies = [
+ "crew-broker",
+ "crew-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "crew-core"
 version = "0.1.0"
 dependencies = [
@@ -290,13 +302,11 @@ name = "crew-mcp"
 version = "0.1.0"
 dependencies = [
  "crew-broker",
+ "crew-client",
  "crew-core",
  "eyre",
  "mimalloc",
- "serde",
  "serde_json",
- "tokio",
- "ureq",
 ]
 
 [[package]]
@@ -304,6 +314,7 @@ name = "crew-substrate"
 version = "0.1.0"
 dependencies = [
  "crew-broker",
+ "crew-client",
  "crew-core",
  "crew-mcp",
  "crew-supervisor",

@@ -206,9 +206,10 @@ docs/
 crates/
   crew-core          shared types + the event model (the dependency-graph root)
   crew-broker        the localhost broker service + the `crewd` binary
+  crew-client        the shared broker client (send/inbox/roster), used by MCP + shim
   crew-supervisor    process management: spawn/wire/lifecycle of role agents
   crew-mcp           the agent-facing MCP surface (crew_send, crew_inbox, ...)
-  crew-substrate     the umbrella crate: re-exports the four above as one dependency
+  crew-substrate     the umbrella crate: re-exports the five above as one dependency
   crew-cli           the human front-end binary (`crew`)
   crew-telemetry     shared structured-logging (tracing) init + secret redaction
 skills/
@@ -220,9 +221,13 @@ the dependency direction flows toward `crew-core`, and nothing depends on
 `crew-cli` (the CLI is a consumer only). `crew-telemetry` is a standalone
 infrastructure crate the binaries call to initialize logging, so the library
 crates never pull a subscriber. `crew-core` holds the domain types and event
-model (issue #6). `crew-substrate` is the umbrella (issue #34): it re-exports the
-four substrate crates (`crew-core`, `crew-broker`, `crew-supervisor`, `crew-mcp`) as
-the modules `core` / `broker` / `supervisor` / `mcp`, so a front-end takes one
+model (issue #6). `crew-client` holds the thin synchronous broker client
+(`Broker`, `InboxItem`, `RoleEntry`, and the view types) both agent-facing
+front-ends send and read their inbox through, so neither the MCP server nor the
+CLI shim owns it and the shim needs no dependency on `crew-mcp` (issue #129).
+`crew-substrate` is the umbrella (issue #34): it re-exports the
+five substrate crates (`crew-core`, `crew-broker`, `crew-client`, `crew-supervisor`, `crew-mcp`) as
+the modules `core` / `broker` / `client` / `supervisor` / `mcp`, so a front-end takes one
 dependency and depends only on the substrate's public API. External consumers (the
 CLI, later Seraphim) use `crew-substrate`; a substrate crate's own binary (`crewd`,
 `crew-mcp`) uses its siblings directly, since routing through the umbrella would be a
@@ -324,8 +329,9 @@ lands. See `docs/observability.md`.
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
-the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes sixteen
+the roster at boot, and dispatches each tool to a `crew_client::Broker`, the shared
+thin synchronous client (`ureq`) over the broker's HTTP API (issue #129); it never
+touches the store. It exposes sixteen
 tools with self-documenting schemas: `crew_send` (post a note as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
@@ -648,7 +654,8 @@ situation-board pair `crew board` / `crew record` (issue #49), and `crew briefin
 as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
 shim's `crew_lane`, issue #46). Each boots from the same role context
 the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`
-config) and reuses the same `crew_mcp::Broker` client, so a shim agent's I/O maps onto
+config) and reuses the same `crew_client::Broker` the MCP server dispatches to (issue
+#129), so a shim agent's I/O maps onto
 the broker identically to the MCP path: it registers on boot (appearing on the roster
 and stream) and sends and reads the same way. The shim is stateless (a short-lived
 process per call), so `crew inbox` reports every message currently addressed to the

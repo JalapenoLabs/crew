@@ -60,6 +60,9 @@ clap = { version = "4", features = ["derive"] }
 # depends on it, not on the individual crates.
 crew-core = { path = "crates/crew-core" }
 crew-broker = { path = "crates/crew-broker" }
+# The shared broker client (issue #129): both agent-facing front-ends, the MCP
+# server and the CLI shim, send and read their inbox through it, so neither owns it.
+crew-client = { path = "crates/crew-client" }
 crew-supervisor = { path = "crates/crew-supervisor" }
 crew-mcp = { path = "crates/crew-mcp" }
 crew-telemetry = { path = "crates/crew-telemetry" }

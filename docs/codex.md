@@ -12,9 +12,11 @@ surface, such as Codex, cannot load those tools. The CLI shim is the fallback: t
 same operations as `crew` subcommands the agent shells out to.
 
 The shim is thin on purpose. Each command uses the very same `Broker` client the MCP
-server uses (`crew_mcp::Broker`), so a shim agent's I/O lands on the broker
-identically to the MCP path: same registration, same message shape, same self-filtered
-inbox. Parity comes from sharing the client, not from re-implementing it.
+server dispatches to (`crew_client::Broker`, the shared client crate, issue #129), so a
+shim agent's I/O lands on the broker identically to the MCP path: same registration,
+same message shape, same self-filtered inbox. Parity comes from sharing the client, not
+from re-implementing it. The client lives in its own crate, so the shim no longer
+depends on `crew-mcp` for it, and MCP-specific churn leaves the shim untouched.
 
 ## The commands
 

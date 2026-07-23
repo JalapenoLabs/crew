@@ -29,10 +29,12 @@
 //!   agent processes: [`supervisor::Supervisor`] brings a crew up,
 //!   [`supervisor::Fleet`] drives each agent's lifecycle, and
 //!   [`supervisor::RosterClient`] wires liveness to the broker roster.
+//! - [`client`] ([`crew_client`]) is the thin synchronous broker client an
+//!   agent (or the CLI shim) uses to send, read its inbox, and list the roster:
+//!   [`client::Broker`] acts as one role over the broker's HTTP + SSE API.
 //! - [`mcp`] ([`crew_mcp`]) is the agent-facing surface: [`mcp::Server`] speaks
-//!   the Model Context Protocol over stdio, and [`mcp::Broker`] is the thin
-//!   HTTP client an agent (or the CLI shim) uses to send, read its inbox, and
-//!   list the roster.
+//!   the Model Context Protocol over stdio, dispatching each tool to a
+//!   [`client::Broker`].
 //!
 //! The one event stream these emit is documented as a stable public contract in
 //! `docs/stream-contract.md`, so an external consumer (such as Runewood)
@@ -95,6 +97,8 @@
 
 #[doc(inline)]
 pub use crew_broker as broker;
+#[doc(inline)]
+pub use crew_client as client;
 #[doc(inline)]
 pub use crew_core as core;
 #[doc(inline)]

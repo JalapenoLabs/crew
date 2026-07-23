@@ -16,8 +16,8 @@ use std::{
 };
 
 use crew_broker::{AppState, Config};
+use crew_client::Broker;
 use crew_core::RoleCard;
-use crew_mcp::Broker;
 
 /// Starts a broker over a fresh in-memory store, returning the address it
 /// serves on.

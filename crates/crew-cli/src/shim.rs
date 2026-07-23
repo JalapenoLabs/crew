@@ -3,9 +3,9 @@
 //! A Claude Code agent gets the crew tools over MCP (`crew_send`, `crew_inbox`,
 //! ...). A runtime without MCP, such as Codex, reaches the same broker through
 //! these `crew` subcommands instead. Each maps one-to-one onto an MCP tool and,
-//! crucially, uses the very same [`crew_substrate::mcp::Broker`] client the MCP
-//! server uses, so a shim agent's I/O lands on the broker identically to the
-//! MCP path (see `docs/codex.md`).
+//! crucially, uses the very same [`crew_substrate::client::Broker`] the MCP
+//! server dispatches to (issue #129), so a shim agent's I/O lands on the broker
+//! identically to the MCP path (see `docs/codex.md`).
 //!
 //! Every command boots from the same role context the `crew-mcp` binary does:
 //! the role card at `CREW_ROLE_CARD`, or `CREW_ROLE` plus the broker's own
@@ -22,8 +22,10 @@ use std::path::PathBuf;
 
 use crew_substrate::{
     broker::Config as BrokerConfig,
+    client::{
+        BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing,
+    },
     core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV},
-    mcp::{BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing},
 };
 use eyre::{eyre, Result, WrapErr};
 

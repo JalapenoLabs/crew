@@ -27,7 +27,7 @@ tracing.workspace = true
 clap.workspace = true
 # The substrate, as one dependency (issue #34): `crew up`/`down` drive the supervisor
 # and the in-process broker through `crew_substrate::{broker, supervisor}`, the agent
-# CLI shim (issue #28) reuses `crew_substrate::mcp::Broker` so a runtime without MCP
+# CLI shim (issue #28) reuses `crew_substrate::client::Broker` so a runtime without MCP
 # maps its I/O onto the broker identically to the MCP path, and `crew watch` (issue #15)
 # tails the broker's SSE stream, rendering `crew_substrate::core` event types. The CLI
 # depends only on the substrate's public API, not the individual crates.

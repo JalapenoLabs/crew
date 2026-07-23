@@ -3,18 +3,17 @@
 //! Speaks the Model Context Protocol over newline-delimited stdio so a Claude
 //! Code (or Codex) agent can call [`crew_send`], [`crew_inbox`], and
 //! [`crew_roster`]. It handles the `initialize` handshake, `tools/list`, and
-//! `tools/call`, dispatching a call to the [`Broker`](crate::Broker) client.
-//! The tool docs are written for the agent to get the call right the first try.
+//! `tools/call`, dispatching a call to the [`crew_client::Broker`] client. The
+//! tool docs are written for the agent to get the call right the first try.
 
 use std::io::{BufRead, Write};
 
-use crew_core::LaneEnforcement;
-use serde_json::{json, Value};
-
-use crate::broker::{
+use crew_client::{
     BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot,
     Standing,
 };
+use crew_core::LaneEnforcement;
+use serde_json::{json, Value};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -760,11 +759,11 @@ fn render_briefing(packet: &BriefingPacket) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crew_client::Broker;
     use crew_core::RoleId;
     use serde_json::{json, Value};
 
     use super::Server;
-    use crate::broker::Broker;
 
     /// A server whose broker points nowhere; the protocol paths under test
     /// never call it.
@@ -786,8 +785,9 @@ mod tests {
 
     #[test]
     fn render_inbox_flags_a_general_directive_to_honor_at_once() {
+        use crew_client::InboxItem;
+
         use super::render_inbox;
-        use crate::broker::InboxItem;
 
         let item = |kind: &str, directive: bool| InboxItem {
             id: "11111111-1111-1111-1111-111111111111".to_owned(),

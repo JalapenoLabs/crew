@@ -25,18 +25,12 @@
 //!   lane-scoped rolling summary, so a fresh role catches up without reading
 //!   the whole log).
 //!
-//! The server is a thin client over the broker's HTTP + SSE API
-//! ([`crew_broker`]); it never touches the store. It acts as one role,
-//! configured when the supervisor spawns it. Run it with the `crew-mcp` binary,
-//! or drive it as a library through [`Server`].
-//!
-//! [`crew_broker`]: crew_broker
+//! The server dispatches each tool to a [`crew_client::Broker`], the shared
+//! thin client over the broker's HTTP + SSE API (issue #129); it never touches
+//! the store. It acts as one role, configured when the supervisor spawns it.
+//! Run it with the `crew-mcp` binary, or drive it as a library through
+//! [`Server`].
 
-mod broker;
 mod server;
 
-pub use broker::{
-    BoardEntryView, BoardSnapshot, BriefingPacket, Broker, GateSnapshot, GateTask, InboxItem,
-    LedgerItem, RoleEntry, RosterSnapshot, Standing,
-};
 pub use server::Server;

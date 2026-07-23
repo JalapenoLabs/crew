@@ -20,5 +20,6 @@ workspace = true
 [dependencies]
 crew-core.workspace = true
 crew-broker.workspace = true
+crew-client.workspace = true
 crew-supervisor.workspace = true
 crew-mcp.workspace = true
