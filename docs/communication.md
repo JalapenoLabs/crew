@@ -130,6 +130,22 @@ the "act immediately" contract is the agent's, and delivery is the broker's.
 These are the General's directives, distinct from the commander's `crew_order` fan-out:
 the commander decomposes and assigns; the General interjects to steer.
 
+### Direct override
+
+The General can bypass the commander to command a specialist directly, without breaking the
+chain of command (issue #42). **`crew command <role> "<order>"`** posts an `order` from the
+General straight to the role's `@role` channel, so the specialist gets the task, and then a
+note to the commander's feed announcing the direct order. The commander is informed rather
+than bypassed silently: it sees the override on its inbox and adjusts its plan around it,
+instead of the work vanishing behind its back. Ordering the commander itself carries no
+notice, since it is the addressee. `--scope` and `--acceptance` fill the order's fields, and
+`--commander` names the commander to inform (default `commander`).
+
+This is the deliberate override, not the default: briefing the commander (`Channel::resolve`
+above) is unchanged, and `crew command` is the explicit way to reach past it. Reassigning an
+in-flight task from one role to another, updating the work ledger, is the override's other
+half; it lands once the work ledger (issue #46) exists to reassign against.
+
 ## Secret scrubbing
 
 A crew agent may echo a token it was handed into a message. The broker masks a

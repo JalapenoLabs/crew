@@ -83,7 +83,10 @@ not a reimplementation of the agent.
   (push, merge, delete, spend, external post) behind rules-of-engagement
   approval, pause and resume per role and crew-wide plus an emergency stand-down
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
-  commander to command a specialist directly.
+  commander to command a specialist directly (`crew command <role>`, issue #42: the
+  General orders a role itself, bypassing the commander, and the commander is informed
+  rather than bypassed silently; reassigning an in-flight task against the work ledger
+  awaits issue #46).
 - **Coordination robustness.** Parallel roles work in isolated git worktrees
   (`worktrees` in the crew config, issue #43) and integrate through a deliberate step;
   a commander-maintained work ledger with claims prevents collisions (`crew_claim` /
@@ -147,7 +150,8 @@ The full design is in `docs/architecture.md`. In short:
 - **CLI (`crew`):** the operator front-end (`crew up` / `crew down`, and the
   `crew pause` / `crew resume` / `crew standdown` brake and kill switch), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
-  mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
+  mid-task, and `crew command` to order a role directly, bypassing the commander while
+  keeping it informed, issue #42), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
@@ -581,6 +585,19 @@ process per call), so `crew inbox` reports every message currently addressed to 
 role, not only those since a previous call; that and the other parity gaps (no push,
 operator-launched rather than supervisor-spawned) are in `docs/codex.md`. The General's
 own `crew send` / `crew watch` front-end follows.
+
+`crew command` is the General's direct override (issue #42): it commands a specialist itself,
+bypassing the commander's fan-out, without breaking the chain of command. It posts an `order`
+from the General to the role's `@role` channel (with `--scope` / `--acceptance` filling the
+order's fields), then a note to the commander's feed announcing the direct order, so the
+commander is informed rather than bypassed silently and adjusts its plan around it; ordering
+the commander itself carries no notice. Briefing the commander (`Channel::resolve`) stays the
+default and the override is explicit, so the chain of command is intact, not broken. Built on
+the same General front-end path as `crew redirect` / `crew belay` (posting as the General, no
+role card), it needs no broker change: the direct order and the commander notice are two posts
+to the ordinary message endpoint. The override's other half, reassigning an in-flight task
+from one role to another and updating the work ledger, awaits the work ledger (issue #46) to
+reassign against. See `docs/communication.md` (direct override) and `docs/roles.md`.
 
 `crew notify` lets the General walk away and be pulled back only when it matters (issue
 #52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
