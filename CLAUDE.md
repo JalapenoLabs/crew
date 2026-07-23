@@ -148,6 +148,7 @@ docs/
   architecture.md    the substrate: broker, supervisor, MCP surface, distribution
   communication.md   topology, channels, message schema, context management
   observability.md   one event stream: task history, activity logs, live count
+  stream-contract.md the public stream contract an external viz (Runewood) consumes
   roles.md           the roster and the ownership model
   config.md          the declarative crew config `crew up` reads
   codex.md           the Codex adapter: the agent CLI shim and its MCP parity
@@ -224,6 +225,15 @@ resolves a channel to the roles it reaches (issue #11), filtering a supplied ros
 through the `Channel` membership test. The live roster that feeds routing is still a
 scaffold waiting for the phased build in `docs/roadmap.md`. Verify with `cargo build`
 and `cargo test` at the root.
+
+This whole surface is a stable public contract an external visualization (Runewood)
+consumes with no crew-specific capture (issue #33): `docs/stream-contract.md` documents
+the event envelope and every payload, `/stream` (live SSE, `id` = the log sequence that
+bridges to the `/history` cursor), catch-up via `/history` and its `summary` compaction,
+and the `/roster` snapshot with the live count, plus a minimal subscribe example and the
+additive-only stability promise. An integration test
+(`a_consumer_renders_the_unit_from_the_stream_alone`) proves a consumer renders agents,
+messages, and the live count from the stream alone.
 
 The event-stamping guarantee is enforced at the source, so observability is never a
 retrofit (issue #29). `ts` / `from` / `channel` / `kind` are mandatory in

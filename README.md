@@ -30,7 +30,8 @@ coordinate with real tools. A human drives it from a CLI now, and from Seraphim
 later.
 
 See [`docs/`](docs/) for the design: [architecture](docs/architecture.md),
-[communication](docs/communication.md), [roles](docs/roles.md), and the
+[communication](docs/communication.md), [roles](docs/roles.md), the
+[stream contract](docs/stream-contract.md) for external consumers, and the
 [roadmap](docs/roadmap.md).
 
 ## Layout

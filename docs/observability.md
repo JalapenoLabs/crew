@@ -130,6 +130,14 @@ count sits on screen. Because the stream is already typed, timestamped, and
 addressed, no crew-specific capture is needed; Runewood subscribes and renders.
 It is a consumer, not a dependency; the stream stands on its own.
 
+The consumer contract is the stable surface a viz builds against (issue #33):
+`docs/stream-contract.md` documents the event envelope and every payload, the live
+SSE feed (`GET /stream`), catch-up (`GET /history`, with the `summary` compaction),
+the roster snapshot and live count (`GET /roster`), and how the stream's `id`
+bridges to the history cursor for reconnect. It carries a minimal subscribe example
+and the additive-only stability promise, so a consumer renders the unit from the
+stream alone.
+
 ## What the substrate must guarantee
 
 For all of the above to be projections rather than rebuilds, the broker and
