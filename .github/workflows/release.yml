@@ -1,0 +1,35 @@
+name: Release
+
+# Cut a GitHub Release when a `v<version>` tag is pushed. Distribution is a private
+# Git dependency (issue #35; see docs/distribution.md): a release is a tag a consumer
+# pins with `crew-substrate = { git = "...", tag = "v<version>" }`. There is no
+# registry publish, so this validates the tagged commit and records the release.
+on:
+  push:
+    tags: ["v*"]
+
+# Creating the Release needs write access to repository contents; nothing else does.
+permissions:
+  contents: write
+
+# Never cancel a release mid-flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # A pinned version must build, so validate the tagged commit before publishing.
+      - name: Build the tagged commit
+        run: cargo build --workspace --all-features
+      - name: Cut the GitHub Release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

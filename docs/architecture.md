@@ -267,9 +267,9 @@ choice below.
 
 **Constraint:** GitHub Packages does not host cargo registries (it serves npm,
 Maven, NuGet, RubyGems, and Docker, not Rust). So "publish under JalapenoLabs"
-has three realistic shapes:
+had three realistic shapes:
 
-1. **Private Git dependency** (current lean). Consumers depend on the crate via
+1. **Private Git dependency** (the decision). Consumers depend on the crate via
    `git = "ssh://git@github.com/JalapenoLabs/crew"` pinned to a tag. No registry
    to run, private by default, works today. The cost is no semantic-version
    resolution and no `cargo publish` ergonomics.
@@ -280,9 +280,17 @@ has three realistic shapes:
    the sparse registry protocol). True org-private packages with `cargo publish`
    and version resolution. The cost is a service to run or pay for.
 
-The crate split (`M-SMALLER-CRATES`) keeps this clean: publish the substrate
-crate, keep the CLI and any Seraphim glue as consumers. Which registry to use is
-tracked in `roadmap.md`.
+**Decision (issue #35): the private Git dependency, pinned to a release tag.** It
+works today with zero infrastructure and is private by the repository's own access
+control, which matters while the substrate is org-internal. crates.io wants a stable
+API before opening to the world, and the substrate is pre-1.0 and still moving, so it
+is deferred to the 1.0 line; a private cargo registry adds a service to run or pay
+for, unjustified for one internal crate. The choice is fully reversible: migrating to
+a registry later is a re-point of the dependency, not a redesign. The crate split
+(`M-SMALLER-CRATES`) keeps this clean: a consumer takes the one `crew-substrate`
+umbrella, and the CLI and any Seraphim glue are consumers. The operational contract,
+the consumer's `Cargo.toml` snippet, the versioning scheme, and how a release tag is
+cut, is in `docs/distribution.md`.
 
 ## What this deliberately is not
 

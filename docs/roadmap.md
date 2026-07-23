@@ -47,9 +47,13 @@ CLI and Seraphim depend on the same versioned crate.
 - Split the substrate into one consumable crate, CLI and glue as consumers (issue
   #34, done): the `crew-substrate` umbrella re-exports the four substrate crates and
   defines the public API; the CLI depends only on it.
-- Wire the chosen distribution path (see the open decision below), flipping
-  `publish = false` when the registry is picked.
-- CI publishes on tag.
+- Distribute it as a private Git dependency pinned to a release tag (issue #35,
+  decided): a consumer takes `crew-substrate` via `git` + `tag`, no registry to run,
+  private by the repository's access control. crates.io is deferred to the 1.0 line;
+  see `docs/distribution.md` and `docs/architecture.md`. `publish = false` stays,
+  since a Git dependency does not publish to a registry.
+- A release is a `v<version>` tag on `main`; `release.yml` builds the tagged commit
+  and cuts a GitHub Release so a consumer can pin it.
 
 ## Phase 5: Seraphim integration
 
@@ -91,11 +95,6 @@ soon as Phase 1's broker is usable.
 
 ## Open decisions that gate later phases
 
-- **Distribution registry.** GitHub Packages has no cargo registry, so the choice
-  is: a private Git dependency (simplest, private, no infra; the current lean), a
-  crates.io publish (public, real versioning), or a private cargo registry
-  (org-private with `cargo publish`, but a service to run or pay for). See
-  `docs/architecture.md` for the full tradeoff.
 - **Persistence backend** for the standalone broker (in-memory plus log vs
   SQLite).
 - **Codex parity.** A Codex agent joins a crew through the CLI shim (issue #28):
