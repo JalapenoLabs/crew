@@ -15,8 +15,9 @@
 
 use std::io::{stdin, stdout, BufReader};
 
+use crew_client::Broker;
 use crew_core::{BrokerEndpoint, RoleCard, RoleId, ROLE_CARD_ENV};
-use crew_mcp::{Broker, Server};
+use crew_mcp::Server;
 use eyre::{eyre, Result, WrapErr};
 use mimalloc::MiMalloc;
 

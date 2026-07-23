@@ -36,7 +36,7 @@ crew-substrate = { git = "ssh://git@github.com/JalapenoLabs/crew.git", tag = "v0
   records the exact commit in the consumer's `Cargo.lock`, so the build is
   reproducible.
 - Only `crew-substrate` is named. Its sibling crates (`crew-core`, `crew-broker`,
-  `crew-supervisor`, `crew-mcp`) are path dependencies inside the repository, so
+  `crew-client`, `crew-supervisor`, `crew-mcp`) are path dependencies inside the repository, so
   cargo resolves them from the same checkout automatically; a consumer never lists
   them.
 - To track an unreleased fix, pin a commit instead: `rev = "<sha>"`. Pinning a
