@@ -340,6 +340,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_message_posted_within_a_task_carries_its_id() {
+        let state = AppState::new(Config::default());
+        let task = crew_core::TaskId::new();
+
+        // A client threads the task on the message; the broker preserves it.
+        let (status, value) = post(
+            &state,
+            "@backend",
+            json!({ "from": { "kind": "role", "id": "commander" }, "kind": "note",
+                    "body": "work the parser", "task": task.to_string() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let event: Event = serde_json::from_value(value).unwrap();
+        assert_eq!(event.task, Some(task), "the response carries the task id");
+        assert_eq!(
+            stored_events(&state).await[0].task,
+            Some(task),
+            "the stored event correlates to the task",
+        );
+    }
+
+    #[tokio::test]
     async fn a_posted_message_reaches_a_subscriber_with_secrets_masked() {
         let secret = "sk-ant-supersecrettoken";
         let config = Config {

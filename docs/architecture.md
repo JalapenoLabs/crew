@@ -137,15 +137,21 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes three tools (issue #17):
+broker's HTTP API; it never touches the store. It exposes four tools (issues #17,
+#27):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
   messages one role, `channel: "all-units"` reaches the unit, and a pair like
-  `frontend+backend` reaches just those two.
+  `frontend+backend` reaches just those two. The target follows one shared rule,
+  `crew_core::Channel::resolve` (issue #27).
+- `crew_order` issues an order as the role to one specialist: a scoped task with a
+  title, scope, owned paths, and acceptance bar (a `MessageKind::Order`). It is the
+  commander's fan-out handle for turning the General's brief into work (issue #27).
 - `crew_inbox` reads the messages addressed to the role since the last call (its
   direct `@role` channel, any pair it belongs to, and `all-units`), with its own
-  messages filtered out. It tracks a per-session cursor over the broker's history.
+  messages filtered out. It tracks a per-session cursor over the broker's history,
+  and surfaces an order's structured fields so a specialist reads the task.
 - `crew_roster` lists every registered teammate, the paths it owns, and its
   liveness (working / idle / stopped / dead).
 

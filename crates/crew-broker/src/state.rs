@@ -91,7 +91,19 @@ impl AppState {
     /// appends and broadcasts under one lock, so events reach subscribers in the same
     /// order they are stored and every `Last-Event-ID` cursor stays monotonic. A send
     /// with no live subscribers is not an error: the event is stored for a later reader.
+    ///
+    /// This is the single point every event enters the store and the stream, so it is
+    /// where the stamping guarantee is enforced (issue #29): the event must carry the
+    /// fields every projection needs ([`Event::is_well_formed`]). The public HTTP
+    /// handlers validate untrusted input before they reach here; the assertion guards
+    /// against any internal emitter regressing the invariant.
+    ///
+    /// [`Event::is_well_formed`]: crew_core::Event::is_well_formed
     pub fn publish(&self, mut event: Event) -> Sequenced {
+        debug_assert!(
+            event.is_well_formed(),
+            "an event must be stamped before it reaches the store or stream: {event:?}",
+        );
         // Mask before either sink, so the persisted log and every live stream carry
         // the same scrubbed event.
         self.scrubber.scrub_event(&mut event);
@@ -107,5 +119,85 @@ impl AppState {
         // Err(_) only means no subscribers are listening right now, which is fine.
         let _ = self.broadcast.send(sequenced.clone());
         sequenced
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crew_core::{
+        Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId,
+        Sender, TaskId, Timestamp,
+    };
+
+    use super::AppState;
+    use crate::config::Config;
+
+    /// An event of `kind`, from a role on `all-units`, optionally within `task`.
+    fn event(kind: EventKind, task: Option<TaskId>) -> Event {
+        Event {
+            ts: Timestamp::now(),
+            from: Sender::Role(RoleId::new("backend")),
+            channel: ChannelId::new("all-units"),
+            task,
+            kind,
+        }
+    }
+
+    #[test]
+    fn publish_stamps_and_correlates_every_event_kind() {
+        // publish is the single choke point, so proving the invariant here proves it
+        // for a message, a lifecycle transition, and an activity event alike (issue #29).
+        let state = AppState::new(Config::default());
+        let mut stream = state.broadcast.subscribe();
+        let task = TaskId::new();
+
+        let message = event(
+            EventKind::Message(Message {
+                id: MessageId::new(),
+                kind: MessageKind::Note,
+                body: "work item".to_owned(),
+            }),
+            Some(task),
+        );
+        let lifecycle = event(EventKind::Lifecycle(Lifecycle::Started), Some(task));
+        let activity = event(EventKind::Activity(Activity::TurnStarted), None);
+
+        for event in [message.clone(), lifecycle.clone(), activity.clone()] {
+            state.publish(event);
+        }
+
+        // No event reaches the store missing a required field.
+        let stored = state.storage.events();
+        assert_eq!(stored.len(), 3, "every event is stored");
+        assert!(
+            stored.iter().all(Event::is_well_formed),
+            "no stored event misses a required field",
+        );
+
+        // The stream carries the same well-formed events, in order.
+        for expected in [&message, &lifecycle, &activity] {
+            let streamed = stream
+                .try_recv()
+                .expect("the event reaches the stream")
+                .event;
+            assert!(
+                streamed.is_well_formed(),
+                "no streamed event misses a field"
+            );
+            assert_eq!(&streamed, expected, "the stream carries the event intact");
+        }
+
+        // Events produced within a task carry its id; one produced outside carries none.
+        assert_eq!(
+            stored[0].task,
+            Some(task),
+            "the message correlates to its task"
+        );
+        assert_eq!(
+            stored[1].task,
+            Some(task),
+            "the lifecycle event correlates too"
+        );
+        assert_eq!(stored[2].task, None, "an event outside a task carries none");
     }
 }

@@ -212,26 +212,52 @@ through the `Channel` membership test. The live roster that feeds routing is sti
 scaffold waiting for the phased build in `docs/roadmap.md`. Verify with `cargo build`
 and `cargo test` at the root.
 
+The event-stamping guarantee is enforced at the source, so observability is never a
+retrofit (issue #29). `ts` / `from` / `channel` / `kind` are mandatory in
+`crew_core::Event`, and every event, whatever its kind, enters the store and stream
+through the one `AppState::publish` choke point, which asserts `Event::is_well_formed`
+(a present, non-blank channel and role sender); the HTTP handlers validate untrusted
+input first, so no event reaches the store or stream missing a required field. Task
+correlation rides the same envelope: a message carries the `task` its sender threads
+(the broker preserves it), and a lifecycle event carries the task the supervisor is
+working via `RosterClient::with_task` (a role fully leaving the unit is not
+task-scoped). Activity events thread the task the same way once the stream-json parser
+lands. See `docs/observability.md`.
+
 `crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes three
+API; it never touches the store. It exposes four
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
-teammate, defaulting to the commander), `crew_inbox` (read the messages addressed to
-the role since the last call, self-filtered, over a per-session history cursor), and
-`crew_roster` (list registered teammates, their owned paths, and liveness). A tool
-failure returns as an `isError` result, not a protocol error. The roadmap step is
-`crew_inbox` push over the per-role SSE stream instead of the current history read.
+teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
+with a title, scope, owned paths, and acceptance, to one specialist; the commander's
+fan-out handle, issue #27), `crew_inbox` (read the messages addressed to the role
+since the last call, self-filtered, over a per-session history cursor, surfacing an
+order's structured fields), and `crew_roster` (list registered teammates, their owned
+paths, and liveness). A tool failure returns as an `isError` result, not a protocol
+error. The roadmap step is `crew_inbox` push over the per-role SSE stream instead of
+the current history read.
 
 `crew-core` also carries the role card (issue #18): `RoleCard` is the thin bootstrap
 an agent boots from, a TOML document naming the role, its owned lane, its acceptance
-bar, and the broker address (`BrokerEndpoint`), with `from_toml` / `to_toml` the
-loader and `briefing()` rendering the boot prompt (the shape the `coworker` skill
-shrinks to). One loader serves both paths: `crew_supervisor::provision` writes a
-role's card and returns the `CREW_ROLE_CARD` environment plus its briefing, and the
-`crew-mcp` binary reads the same card to boot and register. See `docs/roles.md`.
+bar, the crew's `commander`, and the broker address (`BrokerEndpoint`), with
+`from_toml` / `to_toml` the loader and `briefing()` rendering the boot prompt (the
+shape the `coworker` skill shrinks to). One loader serves both paths:
+`crew_supervisor::provision` writes a role's card and returns the `CREW_ROLE_CARD`
+environment plus its briefing, and the `crew-mcp` binary reads the same card to boot
+and register. See `docs/roles.md`.
+
+The card names the crew's commander so the hub-and-spoke topology is live (issue #27).
+`RoleCard::is_commander` tells a role whether it leads, and `briefing()` renders
+accordingly: the commander's card states its duties (decompose the brief, issue orders
+with `crew_order`, arbitrate, report to the General), and a specialist's names its
+commander and the default addressing. The one addressing rule, `Channel::resolve`
+(a named role wins, else a named channel, else the commander), is shared by the
+General's front-end and an agent's `crew_send`, so an unaddressed brief reaches the
+commander everywhere. `to_cards` stamps every card with the config's commander. See
+`docs/communication.md`.
 
 `crew-core` also carries the crew config (issue #25): `CrewConfig` is the declarative
 description `crew up` reads, a TOML document naming the roles and the lane each owns,

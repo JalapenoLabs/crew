@@ -71,6 +71,7 @@ A card is a TOML document, chosen so a human can read and author one at a glance
 role = "backend"
 owned_paths = ["api/", "db/"]
 acceptance = "Tests green, migrations reversible, no clippy warnings."
+commander = "commander"
 
 [broker]
 host = "127.0.0.1"
@@ -78,8 +79,16 @@ port = 2739
 ```
 
 `role` and `[broker]` are required; `owned_paths` and `acceptance` default to
-empty. Only the four per-agent facts live here. The channels, the message schema,
-and the chain of command are common to the crew and stay in crew.
+empty, and `commander` defaults to `commander`. Only these per-agent facts live
+here. The channels, the message schema, and the chain of command are common to the
+crew and stay in crew.
+
+The `commander` names the unit's hub (issue #27), so every card carries it. From
+it a role knows two things: where an unaddressed message goes (to the commander)
+and whether it is itself the commander. The briefing reflects that: the commander's
+card states its duties (decompose the brief, issue orders with `crew_order`,
+arbitrate at lane boundaries, report to the General), and a specialist's card names
+its commander and says an unaddressed `crew_send` reaches it.
 
 ### Loader
 
