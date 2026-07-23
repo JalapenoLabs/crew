@@ -49,6 +49,9 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   passed, or failed) with the acceptance claimed or the specific failure.
 - `board` a change to the shared situation board (issue #49): an entry recorded or
   retracted, with its key, section (decision / interface / gotcha), author, and content.
+- `budget` a token-spend report against the crew budget (issue #54): the role, its
+  cumulative spend and cap, the crew's cumulative spend and budget, and any cap the spend
+  hit (role or crew).
 
 ## The views
 
@@ -253,6 +256,33 @@ Two further moments in the notification scope wait on their events reaching the 
 approval pending (the approval gates of issue #40) and a role stalled (the stall monitor
 above, once it surfaces a stall on the stream). Both light up here for free when their
 events land, since the classifier is one match over the event kinds.
+
+## Token budget
+
+A crew should not quietly burn a fortune (issue #54). A crew sets a crew-wide **token
+budget** and optional per-role **caps** in its config (see `docs/config.md`), and the
+supervisor holds the crew's [`Budget`](../crates/crew-core/src/budget.rs): a spend
+accountant modeled on the Workflow budget pattern (a total, the spend so far, and the
+remaining headroom, with the cap a hard bound).
+
+As the supervisor records each turn's token usage, it charges the spend to the role and the
+crew and does two things:
+
+- **Surfaces it.** Every record publishes a `budget` event (spend against budget) to
+  `all-units`, so a UI reads spend off the stream and a cap hit is never silent. It rides
+  `/stream`, `/history?kind=budget`, and each inbox like any event.
+- **Enforces it.** When a role's spend reaches its cap, the supervisor idle-stops that role;
+  when the crew's total reaches the crew budget, it idle-stops every role. The role keeps
+  its roster entry (marked stopped) and is restartable once the General raises the cap, so
+  the crew is bounded, not overrun. A ceiling fires its stop and its event once, not on
+  every later spend.
+
+The token feed is the one deferred piece: the supervisor's `Fleet::record_spend` seam is
+driven by each turn's usage once the stream-json activity parser lands (issue #24). Until
+then the accounting, enforcement, and reporting are exercised against spend fed to the seam
+directly. An unbounded crew (no budget and no caps) records nothing, so a crew that opts out
+pays no overhead. A live `GET /budget` snapshot for the cockpit is a natural next step once
+the cockpit (issue #51) lands; the spend already rides the stream in the meantime.
 
 ## Runewood
 

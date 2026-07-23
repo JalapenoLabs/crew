@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use crew_core::{RoleId, TaskId, Timestamp};
+use crew_core::{BudgetEvent, RoleId, TaskId, Timestamp};
 use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -124,6 +124,26 @@ impl RosterClient {
             .send_string(&body.to_string())
             .map(|_response| ())
             .map_err(|err| eyre!("could not mark role `{role}` as {}: {err}", liveness.wire()))
+    }
+
+    /// Reports a role's token spend against the crew budget (`POST /budget`, issue #54).
+    ///
+    /// The broker records it as a `budget` event on the stream, so spend against budget is
+    /// visible and a cap hit is never silent. The supervisor computes the totals from the
+    /// crew [`Budget`](crew_core::Budget); this only surfaces them.
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_budget(&self, event: &BudgetEvent) -> Result<()> {
+        let url = format!("{}/budget", self.base);
+        let body = serde_json::to_string(event)
+            .map_err(|err| eyre!("could not encode the budget report: {err}"))?;
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not report budget for role `{}`: {err}", event.role))
     }
 
     /// Adds the task id to a roster request body when a task context is set.

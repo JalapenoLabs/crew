@@ -13,8 +13,8 @@ use std::io::{BufRead, BufReader};
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{
-    Activity, BoardEvent, BrokerEndpoint, Event, EventKind, MessageKind, Sender, Verdict,
-    VerificationEvent,
+    Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind, MessageKind,
+    Sender, Verdict, VerificationEvent,
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -149,6 +149,26 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         ),
         EventKind::Verification(verification) => ("verification", verification_body(verification)),
         EventKind::Board(board) => ("board", board_body(board)),
+        EventKind::Budget(budget) => ("budget", budget_body(budget)),
+    }
+}
+
+/// A short description of a token-spend report against the crew budget (issue #54).
+fn budget_body(budget: &BudgetEvent) -> String {
+    let spend = |spent: u64, cap: Option<u64>| match cap {
+        Some(cap) => format!("{spent}/{cap}"),
+        None => format!("{spent}"),
+    };
+    let role = format!(
+        "{} spent {} tokens",
+        budget.role,
+        spend(budget.role_spent, budget.role_cap)
+    );
+    let crew = format!("crew {}", spend(budget.crew_spent, budget.crew_budget));
+    match budget.breach {
+        Some(BudgetScope::Role) => format!("{role} (cap reached, idle-stopped); {crew}"),
+        Some(BudgetScope::Crew) => format!("{role}; {crew} (budget reached, crew idle-stopped)"),
+        None => format!("{role}; {crew}"),
     }
 }
 

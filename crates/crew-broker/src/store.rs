@@ -182,6 +182,8 @@ pub enum EventKindTag {
     Verification,
     /// A change to the shared situation board (issue #49).
     Board,
+    /// A token-spend report against the crew budget (issue #54).
+    Budget,
 }
 
 impl EventKindTag {
@@ -195,6 +197,7 @@ impl EventKindTag {
             "boundary" => Some(Self::Boundary),
             "verification" => Some(Self::Verification),
             "board" => Some(Self::Board),
+            "budget" => Some(Self::Budget),
             _ => None,
         }
     }
@@ -209,6 +212,7 @@ impl EventKindTag {
                 | (Self::Boundary, EventKind::Boundary(_))
                 | (Self::Verification, EventKind::Verification(_))
                 | (Self::Board, EventKind::Board(_))
+                | (Self::Budget, EventKind::Budget(_))
         )
     }
 }

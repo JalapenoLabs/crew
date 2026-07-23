@@ -96,8 +96,11 @@ it.
   push notifications on the actionable moments (`crew notify`, issue #52, done: a native
   notification when a question is asked, a role dies, or the crew stands down, configurable
   per moment and quiet on routine chatter, over the same event stream).
-- **Economy.** Model per role, a shared token budget with per-role caps,
-  auto-idle with cost telemetry, and subscription usage awareness.
+- **Economy.** Model per role; a shared token budget with per-role caps (issue #54, done: a
+  crew-wide `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the
+  crew at a cap and surfaced as a `budget` event over the stream, with the live token feed
+  awaiting the stream-json activity parser, issue #24); auto-idle with cost telemetry; and
+  subscription usage awareness.
 
 ## Parallel track: coworker skill transport upgrade (done)
 
