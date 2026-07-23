@@ -200,6 +200,8 @@ pub enum EventKindTag {
     Telemetry,
     /// A shared-subscription usage reading and its auto-pause (issue #56).
     Usage,
+    /// A coordination stall the monitor detected or resolved (issue #48, #120).
+    Stall,
 }
 
 impl EventKindTag {
@@ -217,6 +219,7 @@ impl EventKindTag {
             "budget" => Some(Self::Budget),
             "telemetry" => Some(Self::Telemetry),
             "usage" => Some(Self::Usage),
+            "stall" => Some(Self::Stall),
             _ => None,
         }
     }
@@ -235,6 +238,7 @@ impl EventKindTag {
                 | (Self::Budget, EventKind::Budget(_))
                 | (Self::Telemetry, EventKind::Telemetry(_))
                 | (Self::Usage, EventKind::Usage(_))
+                | (Self::Stall, EventKind::Stall(_))
         )
     }
 }

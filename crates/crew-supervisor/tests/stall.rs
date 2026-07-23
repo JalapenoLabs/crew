@@ -1,20 +1,35 @@
-//! End-to-end test of coordination-stall detection (issue #48).
+//! End-to-end test of coordination-stall detection (issue #48) and its
+//! surfacing on the stream (issue #120).
 //!
 //! It proves the acceptance against a real broker: a mutual-wait deadlock and a
 //! stalled task (a done-gate submission with no verdict, the on-`main` shape of
 //! "a ledger with no forward motion") are read off the live stream and detected
 //! with a precise cause, while an answered exchange is not. Detection runs over
 //! the same `history_since` fetch the fleet's stall monitor uses, so this
-//! exercises the wire path, not just the pure logic.
+//! exercises the wire path, not just the pure logic. It also proves the
+//! monitor's `report_stall` surfaces a detected or resolved stall as a
+//! first-class `stall` event, filterable by `kind=stall`.
 
 mod common;
 
 use std::time::Duration;
 
 use common::start_broker;
-use crew_core::{MessageId, RoleId, Timestamp};
-use crew_supervisor::{detect_stalls, RosterClient, StallKind};
-use serde_json::json;
+use crew_core::{MessageId, RoleId, StallEvent, StallKind, StallStatus, Timestamp};
+use crew_supervisor::{detect_stalls, RosterClient};
+use serde_json::{json, Value};
+
+/// The `stall` events on the broker log, oldest first, read over the
+/// `kind=stall` history filter.
+fn stall_events(base: &str) -> Vec<Value> {
+    let text = ureq::get(&format!("{base}/history?kind=stall"))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    value["events"].as_array().cloned().unwrap_or_default()
+}
 
 /// The crew whose members can wait on each other.
 fn roster() -> Vec<RoleId> {
@@ -110,4 +125,50 @@ fn a_submitted_task_with_no_verdict_is_a_stalled_ledger() {
         "names the stalled task and why: {}",
         stalls[0].detail,
     );
+}
+
+#[test]
+fn a_detected_stall_is_surfaced_on_the_stream() {
+    let base = start_broker();
+    let roster_client = RosterClient::new(base.clone());
+
+    // The monitor found a deadlock; publishing it makes it a first-class `stall`
+    // event a watcher (crew notify, crew top) reads off the stream (issue #120).
+    roster_client
+        .report_stall(&StallEvent {
+            kind: StallKind::Deadlock,
+            status: StallStatus::Detected,
+            roles: roster(),
+            detail: "deadlock: backend waits on frontend, and frontend waits on backend".to_owned(),
+        })
+        .unwrap();
+
+    let events = stall_events(&base);
+    assert_eq!(events.len(), 1, "one stall event: {events:?}");
+    let data = &events[0]["kind"]["data"];
+    assert_eq!(data["kind"], "deadlock");
+    assert_eq!(data["status"], "detected");
+    assert_eq!(data["roles"], json!(["backend", "frontend"]));
+    // A crew-level finding rides from the General to the whole unit.
+    assert_eq!(events[0]["from"]["kind"], "general");
+    assert_eq!(events[0]["channel"], "all-units");
+}
+
+#[test]
+fn a_resolved_stall_is_surfaced_and_filterable() {
+    let base = start_broker();
+    let roster_client = RosterClient::new(base.clone());
+
+    roster_client
+        .report_stall(&StallEvent {
+            kind: StallKind::LedgerStall,
+            status: StallStatus::Resolved,
+            roles: vec![RoleId::new("backend")],
+            detail: "ledger task `login` moved forward".to_owned(),
+        })
+        .unwrap();
+
+    let events = stall_events(&base);
+    assert_eq!(events.len(), 1, "the resolved stall is on the stream");
+    assert_eq!(events[0]["kind"]["data"]["status"], "resolved");
 }
