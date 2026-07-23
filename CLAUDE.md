@@ -644,16 +644,23 @@ reassign against. See `docs/communication.md` (direct override) and `docs/roles.
 #52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
 sharing the `broker::tail_events` read half, so there is no separate signal path, and it
 auto-reconnects on a dropped connection along with `crew watch`, issue #117) and
-pushes a native notification on each **actionable moment**: a question asked
+pushes a native notification on each **actionable moment**: a General-facing question asked
 (`message`/`question`), a role dead (`lifecycle`/`died`), the crew stood down
 (`lifecycle`/`stood_down`), the crew stalled (a `stall`/`detected` event, issue #120; a
 `resolved` stall stays quiet), or the mission complete (a `lifecycle`/`mission_complete`
 event, issue #121: the crew's graceful finish, reported through `crew_complete`, distinct
-from the stand-down that used to approximate it). Routine chatter (status, notes, orders,
-answers, artifacts, ordinary lifecycle, activity, board, boundary, verification) stays
-quiet by default. A pure classifier, `notification_for`, decides per event, so the policy
-is fully unit-tested; `--mute <moments>` (`question,died,stood-down,stalled,complete`)
-narrows the set and `--no-sound` drops the terminal bell. Each push prints a log line (the durable record), sounds the bell
+from the stand-down that used to approximate it). A question is General-facing only when it
+is broadcast to `all-units` or addressed to a role that is not a live agent (issue #119); a
+directed question to a live teammate is peer coordination the crew resolves itself and stays
+quiet, mirroring the stall monitor's rule (issue #48). To scope it, the notifier tracks
+roster liveness by folding the `lifecycle` events on the same stream (a role is live while
+working or idle); the firehose is live-only, so an addressee not yet known to be live is
+treated as General-facing, and a real question is never dropped. Other routine chatter
+(status, notes, orders, answers, artifacts, ordinary lifecycle, activity, board, boundary,
+verification) stays quiet by default. The classifier, `notification_for` over the
+liveness-tracking `Roster`, decides per event, so the policy is fully unit-tested; `--mute
+<moments>` (`question,died,stood-down,stalled,complete`) narrows the set and `--no-sound`
+drops the terminal bell. Each push prints a log line (the durable record), sounds the bell
 (mirroring Seraphim's notification sound), and calls the platform desktop notifier
 (`notify-send` on Linux, `osascript` on macOS), degrading quietly when no notifier is
 present. An approval pending (issue #40) plugs into the same classifier when its event
