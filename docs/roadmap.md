@@ -86,12 +86,14 @@ it.
 - **Economy.** Model per role, a shared token budget with per-role caps,
   auto-idle with cost telemetry, and subscription usage awareness.
 
-## Parallel track: coworker skill transport upgrade
+## Parallel track: coworker skill transport upgrade (done)
 
-Independent of the phases above. Upgrade the `coworker` skill to use a broker
-instead of the shared file plus `tail -F` monitor, so existing users get routing,
-no self-echo, and bounded context without waiting on all of crew. Can land as
-soon as Phase 1's broker is usable.
+Independent of the phases above. The `coworker` skill uses the broker instead of the
+shared file plus `tail -F` monitor, so existing users get routing, no self-echo, and
+bounded context without waiting on all of crew (issue #37). crew ships the upgraded
+skill at `skills/coworker/`: it sends with `crew send`, watches its self-filtered inbox
+with `crew watch --role <role>`, and shrinks to a role-card bootstrap, with a graceful
+message when no broker is reachable. See `docs/communication.md`.
 
 ## Open decisions that gate later phases
 
