@@ -118,6 +118,26 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Command a role directly, bypassing the commander: order a specialist yourself, and
+    /// the commander is informed rather than bypassed silently (issue #42).
+    Override {
+        /// The role to command (its `@role` channel).
+        role: String,
+        /// The order: what you want the role to do (its title).
+        order: String,
+        /// What is in and out of scope for the order.
+        #[arg(long)]
+        scope: Option<String>,
+        /// How the order is judged done.
+        #[arg(long)]
+        acceptance: Option<String>,
+        /// The crew's commander to inform. Defaults to `commander`.
+        #[arg(long, value_name = "ROLE")]
+        commander: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// Pause a role, or the whole crew: it pulls no new work until resumed.
     Pause {
         /// The role to pause; omit to pause the whole crew.
@@ -264,6 +284,21 @@ fn main() -> Result<()> {
             order,
             broker,
         } => control::belay(broker.as_deref(), &role, &order),
+        Command::Override {
+            role,
+            order,
+            scope,
+            acceptance,
+            commander,
+            broker,
+        } => control::command(
+            broker.as_deref(),
+            &role,
+            &order,
+            scope.as_deref(),
+            acceptance.as_deref(),
+            commander.as_deref(),
+        ),
         Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
