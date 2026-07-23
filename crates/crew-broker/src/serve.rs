@@ -47,8 +47,17 @@ pub async fn run(config: Config) -> Result<()> {
     serve(listener, state, shutdown_signal()).await
 }
 
-/// Serves the HTTP surface on `listener` until `shutdown` resolves.
-async fn serve(
+/// Serves the broker's HTTP surface on `listener` until `shutdown` resolves.
+///
+/// The building block behind [`run`]: an embedder (or an integration test) binds its
+/// own listener and supplies a custom [`AppState`], for example to serve on an
+/// ephemeral port or over a specific [`Storage`](crate::Storage) backend, and drives
+/// shutdown with its own future.
+///
+/// # Errors
+/// Returns an error if the listener has no local address or the server exits with an
+/// error.
+pub async fn serve(
     listener: TcpListener,
     state: AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,

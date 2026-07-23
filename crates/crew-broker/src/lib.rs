@@ -36,7 +36,7 @@ pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
 pub use error::ApiError;
 pub use router::ChannelRouter;
 pub use secrets::{mask, Scrubber};
-pub use serve::run;
+pub use serve::{run, serve};
 pub use state::{AppState, Sequenced};
 pub use store::{
     EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, Liveness, LogStore,
