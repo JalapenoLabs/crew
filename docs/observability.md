@@ -220,6 +220,40 @@ escalated once and a resolved-then-recurring one afresh. Because the monitor rea
 stable stream contract rather than the in-memory ledger, it needs no new event kind, and
 surfacing a stall on the stream for the cockpit is a later refinement.
 
+## Push notifications
+
+The General should be able to walk away and be pulled back only when it matters (issue
+#52). `crew notify` subscribes to the firehose (`GET /stream`, the same event stream every
+reader consumes, so there is no separate signal path) and pushes a native notification on
+each **actionable moment**, a moment that changes what the General would do next. Routine
+chatter passes silently, so the General is not drowned in status pings.
+
+The actionable moments are the ones the stream carries today:
+
+- **A question is asked** (a `message` of kind `question`): a role wants a decision.
+- **A role dies** (a `lifecycle` `died`): a role crashed or hung past recovery.
+- **The crew stands down** (a `lifecycle` `stood_down`): every role halts and the mission
+  is on hold.
+
+Everything else, status and notes, orders, answers and artifacts, ordinary lifecycle such
+as `started` or `idle`, activity, board, boundary, and verification events, is routine and
+never notifies. The policy is configurable per moment: `--mute question,died,stood-down`
+suppresses any subset (for a General who does not want peer questions, say), and
+`--no-sound` drops the terminal bell while keeping the desktop notification and the log
+line.
+
+Each push does three things, so it lands whatever the environment: it prints a log line
+(the durable record, shown even on a headless server), sounds the terminal bell (the
+audible pull, mirroring Seraphim's notification sound), and shows a desktop notification
+through the platform notifier (`notify-send` on Linux, `osascript` on macOS). A missing or
+failing notifier is not an error: the printed line and the bell already carry the alert, so
+delivery degrades quietly.
+
+Two further moments in the notification scope wait on their events reaching the stream: an
+approval pending (the approval gates of issue #40) and a role stalled (the stall monitor
+above, once it surfaces a stall on the stream). Both light up here for free when their
+events land, since the classifier is one match over the event kinds.
+
 ## Runewood
 
 Runewood (the Gource-style WebGL visualization spun off from Seraphim's watch

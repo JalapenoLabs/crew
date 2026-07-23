@@ -141,7 +141,9 @@ The full design is in `docs/architecture.md`. In short:
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew submit` / `crew verdict` / `crew gate` /
   `crew board` / `crew record`) for a
-  runtime without MCP, and `crew watch` to tail a role's self-filtered inbox stream live.
+  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live, and
+  `crew notify` to push a native notification on each actionable moment (a question, a
+  death, a stand-down) over that same stream.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -513,6 +515,21 @@ process per call), so `crew inbox` reports every message currently addressed to 
 role, not only those since a previous call; that and the other parity gaps (no push,
 operator-launched rather than supervisor-spawned) are in `docs/codex.md`. The General's
 own `crew send` / `crew watch` front-end follows.
+
+`crew notify` lets the General walk away and be pulled back only when it matters (issue
+#52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
+sharing the `broker::tail_events` read half, so there is no separate signal path) and
+pushes a native notification on each **actionable moment**: a question asked
+(`message`/`question`), a role dead (`lifecycle`/`died`), or the crew stood down
+(`lifecycle`/`stood_down`). Routine chatter (status, notes, orders, answers, artifacts,
+ordinary lifecycle, activity, board, boundary, verification) stays quiet by default. A
+pure classifier, `notification_for`, decides per event, so the policy is fully unit-tested;
+`--mute <moments>` narrows the set and `--no-sound` drops the terminal bell. Each push
+prints a log line (the durable record), sounds the bell (mirroring Seraphim's notification
+sound), and calls the platform desktop notifier (`notify-send` on Linux, `osascript` on
+macOS), degrading quietly when no notifier is present. An approval pending (issue #40) and
+a role stalled (once the stall monitor surfaces on the stream) plug into the same
+classifier when their events land. See `docs/observability.md` (push notifications).
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

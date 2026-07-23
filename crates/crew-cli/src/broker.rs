@@ -35,9 +35,11 @@ pub fn watch(broker: Option<&str>, role: Option<&str>) -> Result<()> {
 
 /// The broker base URL: the `--broker` value if given, else the broker's environment.
 ///
+/// Shared by every stream reader (`crew watch`, `crew notify`).
+///
 /// # Errors
 /// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but invalid.
-fn resolve_base(flag: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
     if let Some(url) = flag {
         return Ok(normalize_base(url));
     }
@@ -68,22 +70,34 @@ fn watch_path(role: Option<&str>) -> String {
 /// # Errors
 /// Returns an error if the broker cannot be reached or refuses the stream.
 fn tail(base: &str, path: &str) -> Result<()> {
+    tail_events(base, path, |event| println!("{}", render_event(event)))
+}
+
+/// Tails `path` (an SSE endpoint) on `base`, invoking `on_event` for each event.
+///
+/// This is the shared read half behind `crew watch` and `crew notify`: it opens the
+/// stream, parses each SSE `data:` line into an [`Event`], and hands it to `on_event`.
+/// The tail runs until the connection ends or the caller interrupts.
+///
+/// # Errors
+/// Returns an error if the broker cannot be reached or refuses the stream.
+pub(crate) fn tail_events(base: &str, path: &str, mut on_event: impl FnMut(&Event)) -> Result<()> {
     let url = format!("{base}{path}");
     let response = ureq::get(&url).call().map_err(|err| match err {
-        ureq::Error::Status(code, _) => eyre!("the broker refused the watch: HTTP {code}"),
+        ureq::Error::Status(code, _) => eyre!("the broker refused the stream: HTTP {code}"),
         ureq::Error::Transport(transport) => {
             eyre!("could not reach the broker at {base}; is `crewd` running? ({transport})")
         }
     })?;
-    event!(name: "cli.watch.connected", Level::DEBUG, url = %url, "watching {{url}}");
+    event!(name: "cli.stream.connected", Level::DEBUG, url = %url, "streaming {{url}}");
 
     // Read the SSE body line by line as events arrive; the tail runs until the
-    // connection ends or the user interrupts.
+    // connection ends or the caller interrupts.
     let reader = BufReader::new(response.into_reader());
     for line in reader.lines() {
-        let line = line.wrap_err("the watch stream ended unexpectedly")?;
+        let line = line.wrap_err("the event stream ended unexpectedly")?;
         if let Some(event) = parse_data_line(&line) {
-            println!("{}", render_event(&event));
+            on_event(&event);
         }
     }
     Ok(())
