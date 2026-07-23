@@ -178,6 +178,8 @@ pub enum EventKindTag {
     Activity,
     /// A lane boundary crossing (issue #46).
     Boundary,
+    /// A done-gate step: a submission or a verdict (issue #47).
+    Verification,
 }
 
 impl EventKindTag {
@@ -189,6 +191,7 @@ impl EventKindTag {
             "lifecycle" => Some(Self::Lifecycle),
             "activity" => Some(Self::Activity),
             "boundary" => Some(Self::Boundary),
+            "verification" => Some(Self::Verification),
             _ => None,
         }
     }
@@ -201,6 +204,7 @@ impl EventKindTag {
                 | (Self::Lifecycle, EventKind::Lifecycle(_))
                 | (Self::Activity, EventKind::Activity(_))
                 | (Self::Boundary, EventKind::Boundary(_))
+                | (Self::Verification, EventKind::Verification(_))
         )
     }
 }

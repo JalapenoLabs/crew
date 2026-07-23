@@ -1,9 +1,9 @@
 //! The broker's shared application state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crew_core::{Event, RoleId};
+use crew_core::{Event, RoleId, Verdict};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -37,6 +37,60 @@ pub enum Standing {
 struct Control {
     standing: Standing,
     paused_roles: BTreeSet<RoleId>,
+}
+
+/// A task's live standing in the adversarial done-gate (issue #47).
+///
+/// It records who submitted the work and owns any rework, the independent role that
+/// returned the latest verdict (if any), where the task stands, and the acceptance being
+/// claimed or the failure on a handback. See [`AppState::record_verdict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateEntry {
+    /// The role that submitted the work and owns any rework.
+    pub owner: RoleId,
+    /// The independent role that returned the latest verdict, absent until one lands.
+    pub verifier: Option<RoleId>,
+    /// Where the task stands: submitted, passed, or failed.
+    pub verdict: Verdict,
+    /// The acceptance being claimed (while submitted) or the failure (on a handback).
+    pub detail: String,
+}
+
+/// The adversarial done-gate: every task under verification, keyed by its title.
+///
+/// A task title is a human label (the order's title), so the operator and the crew name
+/// the same work the same way. The broker holds this in memory as the live authority and
+/// records every transition as a `verification` event in the durable log.
+#[derive(Debug, Default)]
+struct Gate {
+    tasks: BTreeMap<String, GateEntry>,
+}
+
+/// Why the broker refused a verdict on a task (issue #47).
+///
+/// The done-gate refuses a verdict that would let confident-but-wrong work through: one
+/// from the task's own owner, or one on a task that is not awaiting verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictError {
+    /// No such task was submitted for verification.
+    UnknownTask,
+    /// A role cannot verify its own work; an independent role must try to break it.
+    SelfVerification,
+    /// The task is not awaiting a verdict: it already carries this one.
+    NotAwaitingVerification(Verdict),
+}
+
+/// The result of recording a verdict, for the endpoint to publish and route (issue #47).
+#[derive(Debug, Clone)]
+pub struct VerdictOutcome {
+    /// The role whose work was judged, and to hand back to on a failure.
+    pub owner: RoleId,
+    /// The independent role that returned the verdict.
+    pub verifier: RoleId,
+    /// The resulting standing: [`Passed`](Verdict::Passed) or [`Failed`](Verdict::Failed).
+    pub verdict: Verdict,
+    /// The failure detail on a handback; empty on a pass.
+    pub detail: String,
 }
 
 /// How many events a subscriber may fall behind before the broker drops the oldest
@@ -85,6 +139,9 @@ pub struct AppState {
     /// live recoverable authority, and every pause change is also recorded as a
     /// `lifecycle` event in the durable log.
     control: Arc<Mutex<Control>>,
+    /// The adversarial done-gate: tasks under verification (issue #47). In memory like
+    /// the control state, with every transition also recorded as a `verification` event.
+    gate: Arc<Mutex<Gate>>,
 }
 
 impl AppState {
@@ -114,6 +171,7 @@ impl AppState {
             broadcast,
             publish_order: Arc::new(Mutex::new(())),
             control: Arc::new(Mutex::new(Control::default())),
+            gate: Arc::new(Mutex::new(Gate::default())),
         }
     }
 
@@ -169,6 +227,80 @@ impl AppState {
     /// another handler must not wedge the brake).
     fn control(&self) -> std::sync::MutexGuard<'_, Control> {
         self.control.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Submits `task` for verification as `owner`, claiming the acceptance it holds to
+    /// (issue #47).
+    ///
+    /// Records the task as [`Submitted`](Verdict::Submitted) and awaiting an independent
+    /// verifier, replacing any prior standing so a fixed task can be resubmitted and
+    /// re-verified. Submitting does not mark the work done: only an independent
+    /// [`Passed`](Verdict::Passed) verdict does.
+    pub fn submit_for_verification(&self, task: String, owner: RoleId, acceptance: String) {
+        self.gate().tasks.insert(
+            task,
+            GateEntry {
+                owner,
+                verifier: None,
+                verdict: Verdict::Submitted,
+                detail: acceptance,
+            },
+        );
+    }
+
+    /// Records `verifier`'s verdict on `task`, enforcing the done-gate (issue #47).
+    ///
+    /// The gate refuses a verdict that would let confident-but-wrong work through: the
+    /// task must have been submitted and still awaiting a verdict, and the verifier must
+    /// not be its owner, so a task reaches [`Passed`](Verdict::Passed) only when a role
+    /// other than the owner could not break it. A `pass` marks it done; otherwise it is
+    /// handed back with `failure`. The lock is held across the check and the update, so
+    /// two racing verdicts cannot both win.
+    ///
+    /// # Errors
+    /// Returns a [`VerdictError`] if the task was never submitted, is not awaiting a
+    /// verdict, or the verifier is the owner.
+    pub fn record_verdict(
+        &self,
+        task: &str,
+        verifier: RoleId,
+        pass: bool,
+        failure: String,
+    ) -> Result<VerdictOutcome, VerdictError> {
+        let mut gate = self.gate();
+        let entry = gate.tasks.get_mut(task).ok_or(VerdictError::UnknownTask)?;
+        if entry.verdict != Verdict::Submitted {
+            return Err(VerdictError::NotAwaitingVerification(entry.verdict));
+        }
+        if entry.owner == verifier {
+            return Err(VerdictError::SelfVerification);
+        }
+        entry.verifier = Some(verifier.clone());
+        if pass {
+            entry.verdict = Verdict::Passed;
+            entry.detail = String::new();
+        } else {
+            entry.verdict = Verdict::Failed;
+            entry.detail = failure;
+        }
+        Ok(VerdictOutcome {
+            owner: entry.owner.clone(),
+            verifier,
+            verdict: entry.verdict,
+            detail: entry.detail.clone(),
+        })
+    }
+
+    /// A snapshot of the done-gate: every task under verification and its standing.
+    #[must_use]
+    pub fn gate_snapshot(&self) -> BTreeMap<String, GateEntry> {
+        self.gate().tasks.clone()
+    }
+
+    /// The gate state behind its lock, recovering from a poisoned mutex (a panic in
+    /// another handler must not wedge the done-gate).
+    fn gate(&self) -> std::sync::MutexGuard<'_, Gate> {
+        self.gate.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Scrubs an event of secrets, appends it to the log, and fans it to subscribers.

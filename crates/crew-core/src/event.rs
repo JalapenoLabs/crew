@@ -133,10 +133,12 @@ impl Event {
     }
 }
 
-/// The three kinds of item on the event stream (see `docs/observability.md`).
+/// A typed item on the crew event stream (see `docs/observability.md`).
 ///
-/// `message` is inter-agent communication, `lifecycle` is a supervised state
-/// change, and `activity` is an agent's own work parsed from its stream-json.
+/// `message` is inter-agent communication, `lifecycle` is a supervised state change,
+/// `activity` is an agent's own work parsed from its stream-json, `boundary` is a lane
+/// crossing (issue #46), and `verification` is a step through the adversarial done-gate
+/// (issue #47).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -148,6 +150,8 @@ pub enum EventKind {
     Activity(Activity),
     /// A role reaching outside its owned lane (issue #46).
     Boundary(BoundaryEvent),
+    /// A step through the adversarial done-gate: a submission or a verdict (issue #47).
+    Verification(VerificationEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -308,9 +312,54 @@ pub struct BoundaryEvent {
     pub blocked: bool,
 }
 
+/// A step through the adversarial done-gate: a submission, and the verdict on it
+/// (issue #47).
+///
+/// "Done" is verified, not asserted. When a role believes its task meets the acceptance
+/// criteria it submits the work rather than declaring it done; an independent role then
+/// tries to break it against those criteria and returns a [`Verdict`]. Only a
+/// [`Passed`](Verdict::Passed) verdict from a role other than the owner marks the task
+/// done, and a [`Failed`](Verdict::Failed) verdict carries the specific failure back to
+/// the owner as an actionable handback (see `docs/roles.md`, the done-gate).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationEvent {
+    /// The task under the gate, named by its title (the order's title).
+    pub task: String,
+    /// The role whose work is under verification: the one that submitted it.
+    pub owner: RoleId,
+    /// The independent role that returned the verdict; absent on the submission itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<RoleId>,
+    /// Where the task stands in the gate.
+    pub verdict: Verdict,
+    /// The acceptance criteria being claimed (on a submission) or the specific failure
+    /// (on a failed verdict); empty when there is none.
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// A task's standing in the adversarial done-gate (issue #47).
+///
+/// It moves from [`Submitted`](Self::Submitted) to either [`Passed`](Self::Passed), when
+/// an independent verifier could not break it (the task is done), or
+/// [`Failed`](Self::Failed), when a verifier broke it (the work returns to the owner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// The owner submitted the work; it awaits an independent verifier.
+    Submitted,
+    /// An independent verifier could not break it against the acceptance criteria: done.
+    Passed,
+    /// A verifier broke it; the work returns to the owner with the specific failure.
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind};
+    use super::{
+        Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind, Verdict,
+        VerificationEvent,
+    };
     use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
     use crate::time::Timestamp;
 
@@ -365,6 +414,27 @@ mod tests {
             })),
             envelope(EventKind::Activity(Activity::Output {
                 text: "build succeeded".to_owned(),
+            })),
+            envelope(EventKind::Verification(VerificationEvent {
+                task: "Scaffold the broker".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: None,
+                verdict: Verdict::Submitted,
+                detail: "crewd serves /health".to_owned(),
+            })),
+            envelope(EventKind::Verification(VerificationEvent {
+                task: "Scaffold the broker".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: Some(RoleId::new("qa")),
+                verdict: Verdict::Passed,
+                detail: String::new(),
+            })),
+            envelope(EventKind::Verification(VerificationEvent {
+                task: "Scaffold the broker".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: Some(RoleId::new("qa")),
+                verdict: Verdict::Failed,
+                detail: "/health returns 500 under load".to_owned(),
             })),
         ]
     }

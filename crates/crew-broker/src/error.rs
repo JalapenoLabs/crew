@@ -15,6 +15,9 @@ pub enum ApiError {
     BadRequest(String),
     /// The requested resource does not exist (HTTP 404).
     NotFound(String),
+    /// The request conflicts with the current state, such as verifying one's own work
+    /// or a task that is not awaiting verification (HTTP 409).
+    Conflict(String),
     /// The request is valid but the feature is not built yet (HTTP 501).
     NotImplemented(String),
 }
@@ -30,6 +33,12 @@ impl ApiError {
     #[must_use]
     pub fn not_found(message: impl std::fmt::Display) -> Self {
         Self::NotFound(message.to_string())
+    }
+
+    /// Builds a [`ApiError::Conflict`] from anything that renders as a string.
+    #[must_use]
+    pub fn conflict(message: impl std::fmt::Display) -> Self {
+        Self::Conflict(message.to_string())
     }
 
     /// Builds a [`ApiError::NotImplemented`] from anything that renders as a string.
@@ -50,6 +59,7 @@ impl IntoResponse for ApiError {
         let (status, error) = match self {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::NotImplemented(message) => (StatusCode::NOT_IMPLEMENTED, message),
         };
         (status, Json(ErrorBody { error })).into_response()
