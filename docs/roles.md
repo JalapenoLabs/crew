@@ -10,6 +10,11 @@ ownership rules change.
 The commander directs; it does not take the field. Below the commander are the
 specialists, each owning a lane of the codebase.
 
+You brief the commander by default, but command stays yours: you can steer any role
+mid-task without standing the crew down, with `crew redirect <role>` (adjust course,
+keep the task) and `crew belay <role>` (halt and re-task). The role honors the
+directive at once (see `docs/communication.md`, command and control).
+
 ## The ownership model
 
 A role owns a boundary that **already exists in the tree**. Most repos hand you

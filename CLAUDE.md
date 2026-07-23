@@ -119,9 +119,11 @@ The full design is in `docs/architecture.md`. In short:
 - **Supervisor:** spawns one agent process per role with its role card, wires
   each to the broker, and manages lifecycle (start, idle-stop, restart).
 - **MCP server:** the agent-facing surface (`crew_send`, `crew_inbox`, ...).
-- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`) plus the agent
-  CLI shim (`crew register` / `crew send` / `crew inbox` / `crew roster`) for a runtime
-  without MCP, and `crew watch` to tail a role's self-filtered inbox stream live.
+- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`), the General's
+  command-and-control directives (`crew redirect` / `crew belay` to steer a role
+  mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
+  `crew roster`) for a runtime without MCP, and `crew watch` to tail a role's
+  self-filtered inbox stream live.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is

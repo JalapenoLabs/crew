@@ -129,6 +129,8 @@ fn message_kind(kind: &MessageKind) -> &'static str {
         MessageKind::Status => "status",
         MessageKind::Artifact { .. } => "artifact",
         MessageKind::Note => "note",
+        MessageKind::Redirect => "redirect",
+        MessageKind::Belay => "belay",
     }
 }
 

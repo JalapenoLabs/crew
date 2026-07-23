@@ -33,11 +33,12 @@ clap.workspace = true
 # depends only on the substrate's public API, not the individual crates.
 crew-substrate.workspace = true
 # `crew up` runs the broker in-process (async) and waits on a shutdown signal; ureq
-# probes an already-running broker's health before starting one, and tails the SSE
-# stream for `crew watch`.
+# probes an already-running broker's health before starting one, tails the SSE stream
+# for `crew watch`, and posts the General's `crew redirect` / `crew belay` directives.
 tokio.workspace = true
 ureq.workspace = true
-# `crew watch` parses the SSE event JSON and formats each event's timestamp; the shim
-# integration test also inspects the broker's JSON.
+# `crew watch` parses the SSE event JSON and formats each event's timestamp, the
+# directive commands build their JSON body, and the shim integration test inspects the
+# broker's JSON.
 serde_json.workspace = true
 chrono.workspace = true

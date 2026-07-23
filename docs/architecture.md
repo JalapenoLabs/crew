@@ -199,6 +199,11 @@ subcommand tree.
   shim (issue #28): they act as the role the environment names (`CREW_ROLE_CARD`, or
   `CREW_ROLE` plus the broker config) and reach the broker through the same client the
   MCP tools use, so a runtime without MCP coordinates the same way. See `docs/codex.md`.
+- `crew redirect <role> "..."` and `crew belay <role> "..."` are the General's
+  command-and-control directives (issue #38): they post from the General to a role's
+  direct channel a `redirect` (steer, keep the task) or a `belay` (halt and re-task),
+  which the role honors at its next tool boundary. They need no role card, resolving the
+  broker from `--broker` or the `CREW_BROKER_*` environment. See `docs/communication.md`.
 - `crew watch` tails the conversation live with routing visible (issue #15),
   rendering each event from the broker's SSE feed as `from -> channel (kind) body`. It
   reads the whole firehose (`/stream`) by default, or one role's self-filtered inbox

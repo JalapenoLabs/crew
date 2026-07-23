@@ -277,6 +277,16 @@ mod tests {
                 "all-units",
                 json!({ "from": { "kind": "general" }, "kind": "note", "body": "fyi" }),
             ),
+            (
+                "@backend",
+                json!({ "from": { "kind": "general" }, "kind": "redirect",
+                    "body": "prefer the async path" }),
+            ),
+            (
+                "@backend",
+                json!({ "from": { "kind": "general" }, "kind": "belay",
+                    "body": "stop; switch to the login bug" }),
+            ),
         ]
     }
 

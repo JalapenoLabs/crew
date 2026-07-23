@@ -229,6 +229,7 @@ impl Broker {
             kind: message_kind_label(&message.kind).to_owned(),
             detail: kind_detail(&message.kind),
             body: message.body.clone(),
+            directive: message.kind.is_directive(),
         })
     }
 
@@ -275,6 +276,9 @@ pub struct InboxItem {
     pub detail: String,
     /// The message body.
     pub body: String,
+    /// Whether this is a General directive (a `redirect` or `belay`) the role must
+    /// honor at once, so the inbox render can flag it (see `docs/communication.md`).
+    pub directive: bool,
 }
 
 /// One roster entry from `GET /roster`.
@@ -326,6 +330,8 @@ fn message_kind_label(kind: &MessageKind) -> &'static str {
         MessageKind::Status => "status",
         MessageKind::Artifact { .. } => "artifact",
         MessageKind::Note => "note",
+        MessageKind::Redirect => "redirect",
+        MessageKind::Belay => "belay",
     }
 }
 

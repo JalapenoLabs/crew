@@ -77,6 +77,10 @@ posts to the channel named in the path, and `GET /events` reads the log.
   - `artifact` references a produced thing (a reference plus its kind: a branch, a
     PR, a file, or a route).
   - `note` is freeform prose for anything the above do not cover.
+  - `redirect` steers a role mid-task without stopping it (the General's directive,
+    honored at once; see Command and control below).
+  - `belay` halts a role's current work and re-tasks it with a new order (the General's
+    directive).
 - `body` (markdown), plus the per-kind structured fields above, flattened onto the
   message on the wire.
 
@@ -101,6 +105,28 @@ tail, so a dropped connection loses nothing. A fresh connection with no cursor
 starts at the live tail rather than replaying the whole history (that catch-up is
 the rolling summary's job, below). The canonical channel model and membership are
 issue #11.
+
+## Command and control
+
+The General steers a running agent without tearing the crew down, the core "I am in
+command" gesture (issue #38). Two directives:
+
+- **`crew redirect <role> "..."`** injects a steering message. The role honors it at
+  its next tool boundary, keeps its current task, and adjusts course.
+- **`crew belay <role> "..."`** halts the role's current work and re-tasks it: the role
+  stops what it is doing and takes the message as its new order.
+
+Both are `MessageKind` variants (`redirect`, `belay`) posted from the General to the
+role's direct `@role` channel, so they ride the ordinary delivery path above: the
+broker stamps and stores them and fans them to the role's self-filtered inbox stream.
+Delivery is the same whether the role is mid-turn or idle. A mid-turn injection lands
+at the next tool boundary, never by killing the process: the message waits on the
+inbox, and the agent reads it between tool calls. The role card briefs every agent to
+honor a redirect or belay at once, and the inbox flags a directive (`[honor now]`), so
+the "act immediately" contract is the agent's, and delivery is the broker's.
+
+These are the General's directives, distinct from the commander's `crew_order` fan-out:
+the commander decomposes and assigns; the General interjects to steer.
 
 ## Secret scrubbing
 

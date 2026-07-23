@@ -197,6 +197,14 @@ impl RoleCard {
         );
 
         out.push('\n');
+        out.push_str(
+            "A redirect or belay in your inbox is a command from the General: honor it at your \
+             very next tool boundary, not when your current step finishes. A redirect steers you: \
+             keep your task and adjust course. A belay overrides you: stop your current work and \
+             take its message as your new order.\n",
+        );
+
+        out.push('\n');
         out.push_str(&self.topology_briefing());
         out
     }
@@ -410,6 +418,14 @@ mod tests {
             "gives the broker address"
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
+        assert!(
+            briefing.contains("redirect") && briefing.contains("belay"),
+            "tells the role to honor the General's redirect and belay"
+        );
+        assert!(
+            briefing.contains("next tool boundary"),
+            "says when to honor a directive"
+        );
     }
 
     #[test]
