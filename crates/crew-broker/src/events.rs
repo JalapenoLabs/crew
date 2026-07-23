@@ -409,7 +409,8 @@ mod tests {
             EventKind::Lifecycle(_)
             | EventKind::Activity(_)
             | EventKind::Ledger(_)
-            | EventKind::Boundary(_) => {
+            | EventKind::Boundary(_)
+            | EventKind::Verification(_) => {
                 panic!("expected a message")
             }
         };

@@ -180,6 +180,8 @@ pub enum EventKindTag {
     Ledger,
     /// A lane boundary crossing (issue #46).
     Boundary,
+    /// A done-gate step: a submission or a verdict (issue #47).
+    Verification,
 }
 
 impl EventKindTag {
@@ -192,6 +194,7 @@ impl EventKindTag {
             "activity" => Some(Self::Activity),
             "ledger" => Some(Self::Ledger),
             "boundary" => Some(Self::Boundary),
+            "verification" => Some(Self::Verification),
             _ => None,
         }
     }
@@ -205,6 +208,7 @@ impl EventKindTag {
                 | (Self::Activity, EventKind::Activity(_))
                 | (Self::Ledger, EventKind::Ledger(_))
                 | (Self::Boundary, EventKind::Boundary(_))
+                | (Self::Verification, EventKind::Verification(_))
         )
     }
 }

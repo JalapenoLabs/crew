@@ -264,12 +264,73 @@ impl Broker {
 
     /// Records a lane crossing on the stream, so the operator sees it (issue #46).
     fn report_boundary(&self, path: &str, blocked: bool) -> Result<(), String> {
-        let url = format!("{}/boundary", self.base);
         let payload = json!({
             "role": self.role.as_str(),
             "path": path,
             "blocked": blocked,
         });
+        self.post_json("/boundary", &payload)
+    }
+
+    /// Submits this role's finished work for adversarial verification (issue #47).
+    ///
+    /// Announces the task on the stream and, when `to` names a reviewer, asks it to
+    /// verify. Submitting does not mark the work done: an independent role must pass it
+    /// first, so confident-but-wrong work never ships.
+    ///
+    /// # Errors
+    /// Returns a message if the broker rejects the submission or cannot be reached.
+    pub fn submit(&self, task: &str, acceptance: &str, to: Option<&str>) -> Result<String, String> {
+        let mut payload = json!({
+            "role": self.role.as_str(),
+            "task": task,
+            "acceptance": acceptance,
+        });
+        if let Some(reviewer) = to {
+            payload["to"] = json!(reviewer);
+        }
+        self.post_json("/gate/submit", &payload)?;
+        Ok(format!(
+            "submitted `{task}` for verification. It is not done until an independent role \
+             tries to break it and passes it."
+        ))
+    }
+
+    /// Records this role's verdict on a task another role submitted (issue #47).
+    ///
+    /// A `pass` marks the task done; otherwise the work returns to its owner with the
+    /// `failure`. The broker refuses a verdict on one's own work, so a task passes only
+    /// when an independent role could not break it.
+    ///
+    /// # Errors
+    /// Returns a message if the verdict is refused (the verifier is the owner, or the
+    /// task is not awaiting a verdict), or the broker cannot be reached.
+    pub fn verdict(&self, task: &str, pass: bool, failure: &str) -> Result<String, String> {
+        let payload = json!({
+            "role": self.role.as_str(),
+            "task": task,
+            "pass": pass,
+            "failure": failure,
+        });
+        self.post_json("/gate/verdict", &payload)?;
+        Ok(if pass {
+            format!("verified `{task}`: it holds against its acceptance. Marked done.")
+        } else {
+            format!("failed `{task}` and returned it to its owner with the failure.")
+        })
+    }
+
+    /// Reads the done-gate: every task under verification and its standing (issue #47).
+    ///
+    /// # Errors
+    /// Returns a message if the broker cannot be reached or its response is malformed.
+    pub fn gate(&self) -> Result<GateSnapshot, String> {
+        self.get("/gate")
+    }
+
+    /// Posts a JSON `payload` to `path`, discarding the body on success.
+    fn post_json(&self, path: &str, payload: &Value) -> Result<(), String> {
+        let url = format!("{}{path}", self.base);
         match self
             .agent
             .post(&url)
@@ -426,6 +487,30 @@ pub struct RosterSnapshot {
     pub standing: Standing,
     /// The registered roles, sorted by id.
     pub roles: Vec<RoleEntry>,
+}
+
+/// The done-gate read from `GET /gate`: every task under verification (issue #47).
+#[derive(Debug, Deserialize)]
+pub struct GateSnapshot {
+    /// The tasks under the gate, ordered by title.
+    pub tasks: Vec<GateTask>,
+}
+
+/// One task's standing in the done-gate.
+#[derive(Debug, Deserialize)]
+pub struct GateTask {
+    /// The task title.
+    pub task: String,
+    /// The role that submitted the work and owns any rework.
+    pub owner: String,
+    /// The independent role that returned the latest verdict, if any.
+    #[serde(default)]
+    pub verifier: Option<String>,
+    /// Where the task stands: `submitted`, `passed`, or `failed`.
+    pub verdict: String,
+    /// The acceptance being claimed, or the failure on a handback.
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// The shape of `GET /roster`.

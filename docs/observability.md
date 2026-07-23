@@ -46,6 +46,9 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   out-of-lane path, and whether the crew's policy blocked the edit or only warned.
 - `ledger` a change to the shared work ledger: a role claiming a task or moving it
   to `in_progress`, `blocked`, or `done` (issue #45).
+- `verification` a step through the adversarial done-gate (issue #47): the task, its
+  owner, the independent verifier (once one judges it), and the verdict (submitted,
+  passed, or failed) with the acceptance claimed or the specific failure.
 
 ## The views
 
@@ -102,6 +105,24 @@ sees who reached where and whether the crew's policy warned or blocked. It rides
 filters to just the crossings. The policy itself (`warn` / `block` / `off`) lives in the
 crew config and rides each role card; see `docs/config.md` and `docs/roles.md` (lane
 enforcement).
+
+### The done-gate
+
+The adversarial done-gate is a projection of the same stream (issue #47). "Done" is not a
+role's own assertion: it submits finished work with `crew_submit`, an independent role
+tries to break it against the acceptance criteria and records a verdict with
+`crew_verdict`, and only a pass from a role other than the owner marks the task done. Each
+step is a `verification` event (to `all-units`), so the operator watches the gate in
+action on `/stream` and in `crew watch`, and `GET /history?kind=verification` reads just
+the gate's history.
+
+The broker holds the live gate in memory, the authority on ownership like the pause
+control, and `GET /gate` reads it: every task under verification, its owner, its verifier,
+and whether it is submitted, passed, or failed. A failed verdict also posts an actionable
+handback to the owner's inbox, so the rework routes back through the normal message path.
+The gate is enforced at the broker: `POST /gate/verdict` refuses a verdict from the task's
+own owner (409) and one on a task that is not awaiting a verdict, so confident-but-wrong
+work cannot slip through. See `docs/roles.md` (the done-gate).
 
 ## Live agent count and roster
 

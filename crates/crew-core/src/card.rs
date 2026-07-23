@@ -240,6 +240,16 @@ impl RoleCard {
 
         out.push('\n');
         out.push_str(
+            "Done means verified, not asserted. When you believe a task meets its acceptance \
+             criteria, do not report it done: submit it with crew_submit, and an independent role \
+             tries to break it. If it fails, you get the specific failure back to fix and \
+             resubmit. When a teammate asks you to verify their work, be the skeptic: try to \
+             break it against the acceptance and crew_verdict pass only if you cannot; on a fail, \
+             give the specific, actionable reason. You cannot verify your own work.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
             "A redirect or belay in your inbox is a command from the General: honor it at your \
              very next tool boundary, not when your current step finishes. A redirect steers you: \
              keep your task and adjust course. A belay overrides you: stop your current work and \
@@ -470,6 +480,10 @@ mod tests {
         assert!(
             briefing.contains("Stay in your lane") && briefing.contains("crew_lane"),
             "tells a role with a lane and enforcement on to stay in it"
+        );
+        assert!(
+            briefing.contains("Done means verified") && briefing.contains("crew_submit"),
+            "tells the role to verify before done and to be a skeptic"
         );
         assert!(
             briefing.contains("redirect") && briefing.contains("belay"),

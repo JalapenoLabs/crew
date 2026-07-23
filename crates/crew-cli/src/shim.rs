@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV};
-use crew_substrate::mcp::{Broker, InboxItem, LedgerItem, RosterSnapshot, Standing};
+use crew_substrate::mcp::{Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing};
 use eyre::{eyre, Result, WrapErr};
 
 /// The resolved agent context a shim command acts as: its broker, role, and lane.
@@ -157,6 +157,52 @@ pub fn lane(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Submits this agent's finished work for adversarial verification (issue #47).
+///
+/// Mirrors `crew_submit`: the work is not done until an independent role tries to break
+/// it and passes it. `to` optionally names a reviewer role to notify.
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker rejects the submission.
+pub fn submit(task: &str, acceptance: Option<&str>, to: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .submit(task, acceptance.unwrap_or_default(), to)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Records this agent's verdict on a task another role submitted (issue #47).
+///
+/// Mirrors `crew_verdict`: a `pass` marks the task done; otherwise the work returns to
+/// its owner with the `failure`. A role cannot verify its own work.
+///
+/// # Errors
+/// Returns an error if no role context is set, the verdict is refused, or a failing
+/// verdict carries no failure.
+pub fn verdict(task: &str, pass: bool, failure: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .verdict(task, pass, failure.unwrap_or_default())
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Prints the done-gate: every task under verification and its standing (issue #47).
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn gate() -> Result<()> {
+    let agent = load_agent()?;
+    let snapshot = agent.broker().gate().map_err(|reason| eyre!("{reason}"))?;
+    print_gate(&snapshot);
+    Ok(())
+}
+
 /// Resolves the agent context from the environment, the way the `crew-mcp` binary does.
 ///
 /// Prefers the role card at [`ROLE_CARD_ENV`], which carries the role, its lane, and
@@ -265,5 +311,30 @@ fn print_ledger(items: &[LedgerItem]) {
             format!(" ({})", item.title)
         };
         println!("- {} [{}] {}{}", item.task, item.state, item.owner, title);
+    }
+}
+
+/// Prints the done-gate: each task under verification, its owner, verifier, and standing.
+fn print_gate(snapshot: &GateSnapshot) {
+    if snapshot.tasks.is_empty() {
+        println!("The done-gate is empty; no task is under verification.");
+        return;
+    }
+    println!("{} task(s) under the done-gate:", snapshot.tasks.len());
+    for task in &snapshot.tasks {
+        let verifier = task
+            .verifier
+            .as_deref()
+            .map(|who| format!(" by {who}"))
+            .unwrap_or_default();
+        let detail = if task.detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", task.detail)
+        };
+        println!(
+            "- {} owned by {} [{}{}]{}",
+            task.task, task.owner, task.verdict, verifier, detail
+        );
     }
 }

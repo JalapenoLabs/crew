@@ -11,7 +11,7 @@ use std::io::{BufRead, Write};
 use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
-use crate::broker::{Broker, InboxItem, LedgerItem, RosterSnapshot, Standing};
+use crate::broker::{Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -153,6 +153,27 @@ impl Server {
                 )
             }
             "crew_ledger" => Ok(render_ledger(&self.broker.ledger()?)),
+            "crew_submit" => {
+                let task =
+                    str_arg(arguments, "task").ok_or("crew_submit requires a `task` to submit")?;
+                self.broker.submit(
+                    task,
+                    str_arg(arguments, "acceptance").unwrap_or_default(),
+                    str_arg(arguments, "to"),
+                )
+            }
+            "crew_verdict" => {
+                let task =
+                    str_arg(arguments, "task").ok_or("crew_verdict requires a `task` to judge")?;
+                let pass = bool_arg(arguments, "pass")
+                    .ok_or("crew_verdict requires a boolean `pass` (true if it holds)")?;
+                self.broker.verdict(
+                    task,
+                    pass,
+                    str_arg(arguments, "failure").unwrap_or_default(),
+                )
+            }
+            "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -172,10 +193,11 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: the coordination tools, then the ledger tools.
+/// The tool catalog for `tools/list`: coordination, then work-ledger, then done-gate.
 fn tool_catalog() -> Value {
     let mut tools = coordination_tools();
     tools.extend(ledger_tools());
+    tools.extend(done_gate_tools());
     Value::Array(tools)
 }
 
@@ -294,6 +316,56 @@ fn ledger_tools() -> Vec<Value> {
     ]
 }
 
+/// The adversarial done-gate tools: submit work, return a verdict, and read the gate.
+fn done_gate_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "crew_submit",
+            "description": "Submit your finished work for adversarial verification instead of \
+                reporting it done yourself. Done means verified, not asserted: an independent \
+                role tries to break it against the acceptance criteria before it counts as done. \
+                `task` is the task title (match the order's title), `acceptance` restates the \
+                criteria the work must meet, and `to` optionally names the reviewer to notify \
+                (for example `to: \"qa\"`). This does not mark the task done; wait for the verdict, \
+                and if it fails, fix the specific failure and resubmit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task title, matching the order it came from." },
+                    "acceptance": { "type": "string", "description": "The acceptance criteria the work claims to meet." },
+                    "to": { "type": "string", "description": "An optional reviewer role to notify (for example `qa`)." }
+                },
+                "required": ["task"]
+            }
+        }),
+        json!({
+            "name": "crew_verdict",
+            "description": "Return a verdict on a task another role submitted for verification. \
+                You are the skeptic: actively try to break the work against its acceptance \
+                criteria. Set `pass` true only if you could not break it, which marks the task \
+                done. Set `pass` false and give the specific, actionable `failure` if you broke \
+                it, which returns the work to its owner to fix. You cannot verify your own work: \
+                an independent role must judge it. `task` is the task title.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The task title under verification." },
+                    "pass": { "type": "boolean", "description": "True if you could not break it (marks it done); false if you broke it." },
+                    "failure": { "type": "string", "description": "The specific failure when `pass` is false, so the handback is actionable." }
+                },
+                "required": ["task", "pass"]
+            }
+        }),
+        json!({
+            "name": "crew_gate",
+            "description": "Read the done-gate: every task under verification, who owns it, who \
+                is verifying it, and whether it is submitted, passed, or failed. Use it to see \
+                what is awaiting an independent verifier and what has been proven done.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+    ]
+}
+
 /// A JSON-RPC success response, moving `result` into the envelope.
 fn rpc_result(id: &Value, result: Value) -> Value {
     Value::Object(serde_json::Map::from_iter([
@@ -320,6 +392,11 @@ fn str_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// A boolean argument, if present and a JSON boolean.
+fn bool_arg(arguments: &Value, key: &str) -> Option<bool> {
+    arguments.get(key).and_then(Value::as_bool)
 }
 
 /// A string-array argument as owned strings, dropping blanks; empty if absent.
@@ -418,6 +495,38 @@ fn render_roster(snapshot: &RosterSnapshot) -> String {
     format!("{header}\n{}", lines.join("\n"))
 }
 
+/// Renders the done-gate an agent reads: each task under verification and its standing.
+fn render_gate(snapshot: &GateSnapshot) -> String {
+    if snapshot.tasks.is_empty() {
+        return "The done-gate is empty; no task is under verification.".to_owned();
+    }
+    let lines: Vec<String> = snapshot
+        .tasks
+        .iter()
+        .map(|task| {
+            let verifier = task
+                .verifier
+                .as_deref()
+                .map(|who| format!(" by {who}"))
+                .unwrap_or_default();
+            let detail = if task.detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", task.detail)
+            };
+            format!(
+                "- {} owned by {} [{}{}]{}",
+                task.task, task.owner, task.verdict, verifier, detail
+            )
+        })
+        .collect();
+    format!(
+        "{} task(s) under the done-gate:\n{}",
+        snapshot.tasks.len(),
+        lines.join("\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -509,7 +618,10 @@ mod tests {
                 "crew_roster",
                 "crew_lane",
                 "crew_claim",
-                "crew_ledger"
+                "crew_ledger",
+                "crew_submit",
+                "crew_verdict",
+                "crew_gate"
             ]
         );
         // Each tool documents itself and its arguments.
@@ -582,6 +694,37 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("to"));
+    }
+
+    #[test]
+    fn crew_verdict_without_pass_is_a_tool_error_not_a_broker_call() {
+        // A missing `pass` fails before the broker is touched, so the bogus base is fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                    "params": { "name": "crew_verdict", "arguments": { "task": "login" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pass"));
+    }
+
+    #[test]
+    fn crew_submit_without_a_task_is_a_tool_error_not_a_broker_call() {
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": { "name": "crew_submit", "arguments": {} } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("task"));
     }
 
     #[test]

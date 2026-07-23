@@ -15,8 +15,8 @@ pub enum ApiError {
     BadRequest(String),
     /// The requested resource does not exist (HTTP 404).
     NotFound(String),
-    /// The request conflicts with the current state, such as claiming work another role
-    /// already holds (HTTP 409).
+    /// The request conflicts with the current state: claiming work another role already
+    /// holds, or verifying one's own work or a task not awaiting a verdict (HTTP 409).
     Conflict(String),
     /// The request is valid but the feature is not built yet (HTTP 501).
     NotImplemented(String),

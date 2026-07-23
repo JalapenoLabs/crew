@@ -12,7 +12,9 @@
 use std::io::{BufRead, BufReader};
 
 use crew_substrate::broker::Config as BrokerConfig;
-use crew_substrate::core::{Activity, BrokerEndpoint, Event, EventKind, MessageKind, Sender};
+use crew_substrate::core::{
+    Activity, BrokerEndpoint, Event, EventKind, MessageKind, Sender, Verdict, VerificationEvent,
+};
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
 
@@ -134,6 +136,29 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
                 }
             ),
         ),
+        EventKind::Verification(verification) => ("verification", verification_body(verification)),
+    }
+}
+
+/// A short description of a done-gate verification step (issue #47).
+fn verification_body(verification: &VerificationEvent) -> String {
+    let task = &verification.task;
+    let owner = &verification.owner;
+    let verifier = verification
+        .verifier
+        .as_ref()
+        .map_or("the verifier", |role| role.as_str());
+    let detail = &verification.detail;
+    match verification.verdict {
+        Verdict::Submitted if detail.is_empty() => {
+            format!("{owner} submitted `{task}` for verification")
+        }
+        Verdict::Submitted => format!("{owner} submitted `{task}` for verification: {detail}"),
+        Verdict::Passed => format!("{verifier} passed `{task}` (owner {owner}); it is done"),
+        Verdict::Failed if detail.is_empty() => {
+            format!("{verifier} failed `{task}` (owner {owner})")
+        }
+        Verdict::Failed => format!("{verifier} failed `{task}` (owner {owner}): {detail}"),
     }
 }
 
@@ -212,6 +237,40 @@ mod tests {
             ..note(Sender::Role(RoleId::new("backend")), "all-units", "")
         };
         assert!(render_event(&lifecycle).contains("(lifecycle) started"));
+    }
+
+    #[test]
+    fn renders_a_verification_step() {
+        use crew_substrate::core::{Verdict, VerificationEvent};
+
+        let event = |verdict, verifier: Option<&str>, detail: &str| Event {
+            kind: EventKind::Verification(VerificationEvent {
+                task: "login".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: verifier.map(RoleId::new),
+                verdict,
+                detail: detail.to_owned(),
+            }),
+            ..note(Sender::Role(RoleId::new("backend")), "all-units", "")
+        };
+
+        let submitted = render_event(&event(Verdict::Submitted, None, "tokens expire"));
+        assert!(
+            submitted.contains("(verification) backend submitted `login`"),
+            "submission names the owner and task: {submitted}"
+        );
+
+        let failed = render_event(&event(Verdict::Failed, Some("qa"), "tokens never expire"));
+        assert!(
+            failed.contains("qa failed `login`") && failed.contains("tokens never expire"),
+            "a failure names the verifier and the reason: {failed}"
+        );
+
+        let passed = render_event(&event(Verdict::Passed, Some("qa"), ""));
+        assert!(
+            passed.contains("qa passed `login`") && passed.contains("done"),
+            "a pass reads as done: {passed}"
+        );
     }
 
     #[test]

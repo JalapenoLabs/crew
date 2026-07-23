@@ -120,10 +120,13 @@ pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
             EventKind::Lifecycle(state) => {
                 *lifecycle.entry(lifecycle_label(*state)).or_default() += 1;
             }
-            // Activity, ledger, and boundary events are their own projections (the
-            // activity timeline, `GET /ledger`, and `history?kind=boundary`), so the
-            // message/lifecycle summary skips them.
-            EventKind::Activity(_) | EventKind::Ledger(_) | EventKind::Boundary(_) => {}
+            // Activity, ledger, boundary, and verification events are their own
+            // projections (the activity timeline, `GET /ledger`, `history?kind=boundary`,
+            // and the done-gate), so the message/lifecycle summary skips them.
+            EventKind::Activity(_)
+            | EventKind::Ledger(_)
+            | EventKind::Boundary(_)
+            | EventKind::Verification(_) => {}
         }
     }
 
