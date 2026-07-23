@@ -33,6 +33,11 @@ pub const MCP_SERVER_NAME: &str = "crew";
 /// The Claude Code CLI, resolved from `PATH`, that owns the MCP registry.
 pub(crate) const CLAUDE_BIN: &str = "claude";
 
+/// The Codex CLI, resolved from `PATH`, for roles that run on Codex (issue
+/// #128). Codex has no MCP surface, so a Codex role reaches the crew through the
+/// CLI shim (`crew send`, ...) instead (see `docs/codex.md`).
+pub(crate) const CODEX_BIN: &str = "codex";
+
 /// The crew MCP server binary's base name (the platform executable suffix is
 /// added).
 const SERVER_BINARY: &str = "crew-mcp";
@@ -121,6 +126,27 @@ pub fn agent_turn_argv(briefing: &str) -> Vec<String> {
         briefing.to_owned(),
         "--permission-mode".to_owned(),
         "bypassPermissions".to_owned(),
+    ]
+}
+
+/// Builds the `codex` argv for a headless agent turn, the Codex analog of
+/// [`agent_turn_argv`] (issue #128).
+///
+/// `codex exec` runs a non-interactive turn with `briefing` as the opening
+/// prompt (the shim-adapted role card bootstrap), and
+/// `--dangerously-bypass-approvals-and-sandbox` is the analog of Claude's
+/// `bypassPermissions`: it drops the approval gate and the sandbox so an
+/// unattended crew agent can work without prompting, which is the whole point
+/// of a spawned agent. `argv[0]` is the program. A Codex role needs no MCP
+/// registration; it reaches the crew through the CLI shim, which reads the same
+/// `CREW_ROLE_CARD` environment (see `docs/codex.md`).
+#[must_use]
+pub fn codex_turn_argv(briefing: &str) -> Vec<String> {
+    vec![
+        CODEX_BIN.to_owned(),
+        "exec".to_owned(),
+        "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+        briefing.to_owned(),
     ]
 }
 

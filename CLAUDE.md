@@ -136,7 +136,8 @@ not a reimplementation of the agent.
 - Commander identity: does the General always talk through the commander, or can
   the General drop into any role's channel directly? (Current lean: both, the
   commander is default.)
-- Codex parity: same MCP surface via a CLI shim, or a Codex-native path?
+- Codex parity: the CLI shim is built and `crew up` supervisor-spawns a Codex role from
+  the config's per-role `runtime` (issue #128); a Codex-native MCP path is still open.
 - Persistence: SQLite for the standalone broker vs in-memory with a log file.
   (Seraphim brings Postgres; the standalone need not.)
 
@@ -380,7 +381,8 @@ commander everywhere. `to_cards` stamps every card with the config's commander. 
 
 `crew-core` also carries the crew config (issue #25): `CrewConfig` is the declarative
 description `crew up` reads, a TOML document naming the roles and the lane each owns,
-the model tier each runs (issue #53), the repos in scope, the idle-stop
+the model tier each runs (issue #53), the runtime each runs on (`claude` or `codex`,
+issue #128), the repos in scope, the idle-stop
 timeout, and the commander. `from_toml` resolves the defaults (an omitted `roles`
 yields the default crew: commander, backend, frontend, qa) and validates the whole,
 so a documented config produces a valid crew and an invalid one fails with a precise
@@ -391,7 +393,12 @@ is a path or a bare name; `repo_paths(config_dir)` resolves it for worktree isol
 (issue #126): an absolute path as-is, else joined under the `workspace` root, which
 defaults to the crew config file's own directory (overridable with the `workspace` field).
 Anchoring to the config, not the shell's cwd, means a name points at the same clone
-wherever `crew up` runs. See `docs/config.md`.
+wherever `crew up` runs. Each role also carries a `runtime` (issue #128): `to_cards` stamps
+it onto the role card, and the supervisor's `agent_command` spawns `claude -p` (MCP tools)
+for a Claude role or `codex exec` (wired to the CLI shim) for a Codex role, adapting the
+card briefing to name the `crew <cmd>` shim invocations. The MCP server is registered only
+when the crew has a Claude role, so a Codex-only crew needs no `claude`, and `crew up`
+brings up a mixed-runtime unit in one command. See `docs/config.md` and `docs/codex.md`.
 
 Model per role spends strong-model budget where it matters and a cheap model everywhere
 else (issue #53, `crew_core::model`). A role runs a **model tier** (`strong` / `standard`
@@ -648,9 +655,10 @@ config) and reuses the same `crew_mcp::Broker` client, so a shim agent's I/O map
 the broker identically to the MCP path: it registers on boot (appearing on the roster
 and stream) and sends and reads the same way. The shim is stateless (a short-lived
 process per call), so `crew inbox` reports every message currently addressed to the
-role, not only those since a previous call; that and the other parity gaps (no push,
-operator-launched rather than supervisor-spawned) are in `docs/codex.md`. The General's
-own `crew send` / `crew watch` front-end follows.
+role, not only those since a previous call; that and the remaining parity gap (no push)
+are in `docs/codex.md`. A Codex role no longer needs an operator to launch it: with
+`runtime = "codex"` in the config, `crew up` supervisor-spawns it alongside the Claude
+roles (issue #128). The General's own `crew send` / `crew watch` front-end follows.
 
 `crew command` is the General's direct override (issue #42): it commands a specialist itself,
 bypassing the commander's fan-out, without breaking the chain of command. It posts an `order`

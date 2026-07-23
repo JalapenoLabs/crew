@@ -30,13 +30,15 @@ use std::{
     time::Duration,
 };
 
-use crew_core::{BrokerEndpoint, CrewConfig, RoleCard, RoleId};
+use crew_core::{BrokerEndpoint, CrewConfig, RoleCard, RoleId, Runtime};
 use eyre::{Result, WrapErr};
 use tracing::{event, Level};
 
 use crate::{
     lifecycle::{Fleet, LifecyclePolicy},
-    mcp::{agent_turn_argv, locate_server, register_server, CLAUDE_BIN},
+    mcp::{
+        agent_turn_argv, codex_turn_argv, locate_server, register_server, CLAUDE_BIN, CODEX_BIN,
+    },
     provision,
     roster::RosterClient,
     worktree::{self, Worktree},
@@ -103,20 +105,25 @@ pub struct PreparedAgent {
     pub command: AgentCommand,
 }
 
-/// Builds the `claude` command that runs one agent's headless turn from its
-/// boot card.
+/// Builds the command that runs one agent's headless turn from its boot card,
+/// on the runtime the role is configured for (issue #128).
 ///
-/// The command loads the user-scope crew MCP server with no prompt (see
-/// [`agent_turn_argv`](crate::agent_turn_argv)) and inherits `launch`'s
-/// environment, which points the MCP server at the role card (and thus the
-/// broker). `cwd` is the directory the agent works in.
+/// A `claude` role loads the user-scope crew MCP server (see
+/// [`agent_turn_argv`](crate::agent_turn_argv)); a `codex` role runs a headless
+/// `codex exec` wired to the CLI shim (see
+/// [`codex_turn_argv`](crate::codex_turn_argv)). Either way it inherits
+/// `launch`'s environment, which points the agent at the role card (and thus
+/// the broker). `cwd` is the directory the agent works in.
 #[must_use]
 pub fn agent_command(launch: &crate::Launch, cwd: &Path) -> AgentCommand {
     // The turn always starts with the program, then its args; guard the split so an
     // (impossible) empty argv falls back to the program name rather than panicking.
-    let mut turn = agent_turn_argv(&launch.briefing);
+    let (mut turn, fallback) = match launch.runtime {
+        Runtime::Claude => (agent_turn_argv(&launch.briefing), CLAUDE_BIN),
+        Runtime::Codex => (codex_turn_argv(&launch.briefing), CODEX_BIN),
+    };
     let program = if turn.is_empty() {
-        CLAUDE_BIN.to_owned()
+        fallback.to_owned()
     } else {
         turn.remove(0)
     };
@@ -126,6 +133,24 @@ pub fn agent_command(launch: &crate::Launch, cwd: &Path) -> AgentCommand {
         env: launch.env.clone(),
         cwd: cwd.to_path_buf(),
     }
+}
+
+/// Registers the crew MCP server once, unit-wide, if any role runs on Claude
+/// (issue #128).
+///
+/// A Claude role reaches the crew through the MCP tools, so the server must be
+/// registered; a Codex role uses the CLI shim and needs no MCP. A crew with no
+/// Claude role therefore skips registration entirely, so a Codex-only unit
+/// never requires `claude` on `PATH`.
+///
+/// # Errors
+/// Returns an error if the MCP server cannot be located or registered.
+fn register_mcp_if_needed(mut runtimes: impl Iterator<Item = Runtime>) -> Result<()> {
+    if runtimes.any(|runtime| runtime == Runtime::Claude) {
+        let server = locate_server()?;
+        register_server(&server)?;
+    }
+    Ok(())
 }
 
 /// The lead-in that introduces the injected briefing packet in the boot prompt,
@@ -212,12 +237,14 @@ impl Supervisor {
         }
     }
 
-    /// Brings a crew online: register the MCP server, then spawn every role.
+    /// Brings a crew online: register the MCP server (for Claude roles), then
+    /// spawn every role on its configured runtime.
     ///
-    /// Registers the crew MCP server once at user scope so every agent loads
-    /// the crew tools with no prompt (issue #20), provisions each role's
-    /// card, and spawns one `claude` process per role, each registered on
-    /// the roster. Returns the running [`Crew`].
+    /// Registers the crew MCP server once at user scope so every Claude agent
+    /// loads the crew tools with no prompt (issue #20), provisions each role's
+    /// card, and spawns one process per role, `claude` or `codex` per the
+    /// card's runtime (issue #128), each registered on the roster. Returns
+    /// the running [`Crew`].
     ///
     /// When `config` opts into worktree isolation (`worktrees` on, with
     /// `repos`), each role works in its own git worktree and the returned crew
@@ -231,9 +258,9 @@ impl Supervisor {
     /// spawned; any agents already started, and any worktrees already created,
     /// are cleaned up before the error is returned.
     pub fn up(&self, cards: &[RoleCard], config: Option<&CrewConfig>) -> Result<Crew> {
-        // One-time, unit-wide: make the crew tools available with no approval gate.
-        let server = locate_server()?;
-        register_server(&server)?;
+        // Only a Claude role needs the MCP server; a Codex-only crew must not
+        // require `claude` (issue #128).
+        register_mcp_if_needed(cards.iter().map(|card| card.runtime))?;
 
         // Resolve worktrees when `config` opts into isolation (issue #127); the
         // card-based entry has no config file, so the workspace anchor for a bare
@@ -256,14 +283,14 @@ impl Supervisor {
     /// `config`.
     ///
     /// The counterpart to [`up`](Supervisor::up) for the whole `crew up`
-    /// experience (issue #26): it registers the MCP server, provisions a
-    /// card per role, and hands the resolved agents to a [`Fleet`], which
-    /// manages lazy start, idle-stop, and the defibrillator (issues #22,
-    /// #23). Each agent runs the config's model for its role (its tier,
-    /// resolved through the crew's tier map, issue #53), and the fleet
-    /// idle-stops on the config's timeout. The fleet launches with every
-    /// agent stopped; bring the unit online with [`Fleet::start_all`],
-    /// which registers each role on the roster.
+    /// experience (issue #26): it registers the MCP server (for Claude roles),
+    /// provisions a card per role, and hands the resolved agents to a
+    /// [`Fleet`], which manages lazy start, idle-stop, and the defibrillator
+    /// (issues #22, #23). Each agent runs the config's model for its role (its
+    /// tier, resolved through the crew's tier map, issue #53) on its configured
+    /// runtime (issue #128), and the fleet idle-stops on the config's timeout.
+    /// The fleet launches with every agent stopped; bring the unit online with
+    /// [`Fleet::start_all`], which registers each role on the roster.
     ///
     /// `config_dir` is the crew config file's own directory: the crew's `repos`
     /// names resolve against it (issue #126), so a bare name means the same
@@ -273,9 +300,11 @@ impl Supervisor {
     /// Returns an error if the MCP server cannot be located or registered, or a
     /// card cannot be provisioned.
     pub fn launch(&self, config: &CrewConfig, config_dir: &Path) -> Result<Fleet> {
-        // One-time, unit-wide: make the crew tools available with no approval gate.
-        let server = locate_server()?;
-        register_server(&server)?;
+        // Claude roles load the crew tools over MCP; register the server once,
+        // unit-wide, only when the crew has a Claude role. A Codex-only crew needs
+        // no MCP (its roles use the CLI shim), so it must not require `claude` at
+        // all (issue #128).
+        register_mcp_if_needed(config.roles.iter().map(|role| role.runtime))?;
 
         let cards = config.to_cards(&self.broker);
         // With `worktrees` on, each role gets its own worktree of the crew's repos, and
@@ -642,7 +671,7 @@ fn stop_all(agents: &mut [AgentHandle]) {
 mod tests {
     use std::path::Path;
 
-    use crew_core::RoleId;
+    use crew_core::{RoleId, Runtime};
 
     use super::{
         agent_command, boot_command, with_briefing_packet, AgentCommand, BRIEFING_PACKET_LEAD_IN,
@@ -650,6 +679,10 @@ mod tests {
     use crate::{roster::RosterClient, Launch};
 
     fn launch() -> Launch {
+        launch_on(Runtime::Claude)
+    }
+
+    fn launch_on(runtime: Runtime) -> Launch {
         Launch {
             card_path: Path::new("/tmp/agents/backend/role-card.toml").to_path_buf(),
             env: vec![(
@@ -657,6 +690,7 @@ mod tests {
                 "/tmp/agents/backend/role-card.toml".to_owned(),
             )],
             briefing: "You are the backend role.".to_owned(),
+            runtime,
         }
     }
 
@@ -684,6 +718,30 @@ mod tests {
             .position(|a| a == "--permission-mode")
             .unwrap();
         assert_eq!(command.args[mode + 1], "bypassPermissions");
+    }
+
+    #[test]
+    fn agent_command_runs_a_headless_codex_turn_for_a_codex_role() {
+        // A codex role spawns `codex exec` instead of `claude -p`, with the briefing
+        // as the prompt and the autonomy flag standing in for bypassPermissions (#128).
+        let command = agent_command(&launch_on(Runtime::Codex), Path::new("/work/backend"));
+        assert_eq!(command.program, "codex");
+        assert_eq!(command.args[0], "exec");
+        assert!(
+            command
+                .args
+                .contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()),
+            "codex runs unattended without approval gates: {:?}",
+            command.args,
+        );
+        assert!(
+            command
+                .args
+                .contains(&"You are the backend role.".to_owned()),
+            "the briefing is the codex prompt",
+        );
+        // The same env reaches the codex agent, so the shim reads its role card.
+        assert!(command.env.iter().any(|(key, _)| key == "CREW_ROLE_CARD"));
     }
 
     #[test]
