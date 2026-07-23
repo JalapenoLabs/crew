@@ -52,8 +52,11 @@ CLI and Seraphim depend on the same versioned crate.
   private by the repository's access control. crates.io is deferred to the 1.0 line;
   see `docs/distribution.md` and `docs/architecture.md`. `publish = false` stays,
   since a Git dependency does not publish to a registry.
-- A release is a `v<version>` tag on `main`; `release.yml` builds the tagged commit
-  and cuts a GitHub Release so a consumer can pin it.
+- Publish on tag with a semver policy (issue #36, done): a release is a `v<version>`
+  tag on `main`; `release.yml` checks the tag matches the crate version, runs the full
+  gate on the pinned toolchain, and cuts a GitHub Release so a consumer can pin it. The
+  public API is `crew-substrate`'s re-exports; the per-tag release notes are the
+  changelog. See `docs/distribution.md` (Semantic versioning, Changelog).
 
 ## Phase 5: Seraphim integration
 

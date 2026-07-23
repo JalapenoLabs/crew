@@ -52,8 +52,12 @@ not a reimplementation of the agent.
 - **Distribution:** the substrate ships as the `crew-substrate` umbrella crate,
   consumed under the **JalapenoLabs** org as a private Git dependency pinned to a
   release tag (issue #35, decided): no registry to run, private by the repo's own
-  access control, and reversible. crates.io is deferred to 1.0. See
-  `docs/distribution.md` and `docs/architecture.md`.
+  access control, and reversible. crates.io is deferred to 1.0. Publishing on a
+  `v<version>` tag (issue #36): `release.yml` checks the tag matches the crate
+  version, runs the full gate on the pinned toolchain, and cuts a GitHub Release; the
+  public API is `crew-substrate`'s re-exports, versioned per semver (pre-1.0, so a
+  minor bump may break), and each tag's release notes are its changelog (no
+  `CHANGELOG.md`). See `docs/distribution.md` and `docs/architecture.md`.
 - **Transport:** a localhost broker (axum + SSE), not a shared file. The broker
   routes messages, filters your own messages out of your stream (no self-echo),
   and serves a compact rolling summary so a late joiner does not read the full

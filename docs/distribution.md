@@ -52,12 +52,47 @@ scope. `cargo build` then resolves and pins the crate like any other dependency.
 dependency (that flag only blocks `cargo publish` to a registry). It guards against
 an accidental public crates.io publish while the crate is private.
 
-## Versioning
+## Semantic versioning
 
 The workspace carries a single version in `Cargo.toml` (`[workspace.package]
-version`), inherited by every crate, so they never drift. It follows semantic
-versioning; while it is **pre-1.0**, a minor bump may change the public API. A
-consumer pins a tag and upgrades deliberately.
+version`), inherited by every crate, so they never drift. A consumer pins one tag,
+`v<version>`, and the whole substrate moves together.
+
+**The public API** is the surface `crew-substrate` re-exports (issue #34): the items a
+consumer can name through the umbrella crate. Everything else, the internal crates'
+private items and the CLI, is not part of the contract and may change freely.
+
+The version follows [semantic versioning](https://semver.org). A change to the public
+API sets the bump:
+
+- **Patch** (`0.1.0` to `0.1.1`): a backward-compatible fix. No change a consumer must
+  react to.
+- **Minor** (`0.1.0` to `0.2.0`): a backward-compatible addition, such as a new
+  exported item or a new optional argument.
+- **Major** (`0.1.0` to `1.0.0`): a breaking change, such as a removed or renamed item,
+  a changed signature, or a behavior a consumer relies on.
+
+While the substrate is **pre-1.0**, the `0.x` line shifts these one place left, per the
+semver spec: a **minor** bump (`0.1` to `0.2`) may break the API, and only a **patch**
+bump is guaranteed compatible. Pin a tag and upgrade deliberately; read the release
+notes (below) before bumping across a minor version.
+
+The version stabilizes at `1.0` when the API is settled, which is also when crates.io
+becomes the plan (see the decision above).
+
+## Changelog
+
+The changelog for a version is its **GitHub Release notes**, generated from the pull
+requests merged since the previous tag (`gh release create --generate-notes`, run by
+`release.yml`). Each tag gets one set of notes, a point-in-time record of what that
+version contains.
+
+The repository keeps **no `CHANGELOG.md`**. A hand-maintained changelog narrates
+history ("moved from X to Y", "added A, deferred B"), which this project's
+documentation policy excludes: the docs describe the current design and the roadmap,
+not the path taken to them (see `CLAUDE.md`, History). The per-tag release notes carry
+the same information a consumer needs, what changed between two versions, without a
+maintained history file to keep in sync.
 
 ## Cutting a release
 
@@ -72,9 +107,12 @@ A release is a Git tag `v<version>` on `main`. To cut one:
    git push origin v0.1.0
    ```
 
-3. The release workflow (`.github/workflows/release.yml`) runs on the `v*` tag:
-   it builds the tagged commit and, if it builds, creates a GitHub Release for the
-   tag. Consumers then pin `tag = "v0.1.0"`.
+3. The release workflow (`.github/workflows/release.yml`) runs on the `v*` tag. On
+   the pinned toolchain it: verifies the tag names the crate's own version (so a tag
+   never publishes a mismatched version), runs the full gate (fmt, clippy, tests) to
+   prove the tagged commit is green, then creates a GitHub Release with generated
+   notes. Consumers then pin `tag = "v0.1.0"`.
 
-Tag only commits on `main` that have passed CI, so a pinned version is always a
-green build.
+The version guard means step 1 is mandatory: bump `[workspace.package] version` to
+match the tag, or the release fails before publishing. Tag only commits on `main` that
+have passed CI, so a pinned version is always a green build.
