@@ -52,6 +52,8 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
 - `budget` a token-spend report against the crew budget (issue #54): the role, its
   cumulative spend and cap, the crew's cumulative spend and budget, and any cap the spend
   hit (role or crew).
+- `telemetry` a per-turn token-and-cost usage report (issue #55): the role, the tokens the
+  turn spent, and its cost in micro-USD. Always emitted, whether or not a budget is set.
 
 ## The views
 
@@ -283,6 +285,32 @@ then the accounting, enforcement, and reporting are exercised against spend fed 
 directly. An unbounded crew (no budget and no caps) records nothing, so a crew that opts out
 pays no overhead. A live `GET /budget` snapshot for the cockpit is a natural next step once
 the cockpit (issue #51) lands; the spend already rides the stream in the meantime.
+
+## Cost, tokens, and time telemetry
+
+Beyond enforcing a budget, a crew should make spend legible: how much each role costs, in
+tokens and dollars, and how long it works (issue #55). Two mechanisms carry it, and both
+are projections of the one stream.
+
+- **Idle-stop on quiet.** A role that goes quiet past its `idle_stop` timeout is stopped by
+  the supervisor's lifecycle machine (issue #22), keeping its roster entry so a restart is
+  fast. This is what makes an idle role cost nothing; see `docs/config.md` (`idle_stop`).
+- **Usage telemetry.** The supervisor reports each turn's tokens and cost as a `telemetry`
+  event (from the role, to `all-units`) over `POST /telemetry`, always, whether or not a
+  budget is set. Cost rides the wire as micro-USD (millionths of a dollar) so it sums
+  exactly. Tokens and cost come from the same stream-json feed as the budget (`Fleet::record_usage`,
+  the seam the activity parser of issue #24 drives); working time needs no feed, since the
+  broker reads it from the role's `lifecycle` events already on the stream.
+
+The broker folds these into a rollup and serves it at **`GET /stats`**: per role and in
+aggregate, the cumulative tokens, cost (micro-USD), and working seconds. Working time is a
+fold of the lifecycle transitions (entering `started` / `restarted` / `recovered` /
+`resumed` opens a working interval; `idle` / `stopped` / `died` / `paused` / `stood_down`
+closes it), and a role working right now has its open interval counted through the read
+instant, so a live role's time keeps climbing. Like the situation board, the rollup is a
+projection of the durable log, so it is rebuilt on a restart rather than kept separately.
+This is the data the `crew top` cockpit (issue #51) and the Seraphim per-role stats render,
+mirroring Seraphim's per-railway stats.
 
 ## Runewood
 

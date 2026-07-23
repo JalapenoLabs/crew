@@ -2,8 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
-use crew_core::{BoardEvent, BoardSection, Event, EventKind, RoleId, Verdict};
+use crew_core::{
+    BoardEvent, BoardSection, Event, EventKind, Lifecycle, RoleId, Sender, TelemetryEvent,
+    Timestamp, Verdict,
+};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -147,6 +151,137 @@ impl Board {
     }
 }
 
+/// One role's usage rollup: its cumulative tokens, cost, and working time (issue #55).
+#[derive(Debug, Clone, Default)]
+struct RoleStats {
+    /// Cumulative tokens the role spent, summed from its `telemetry` events.
+    tokens: u64,
+    /// Cumulative cost in micro-USD (millionths of a dollar), summed the same way.
+    cost_micro_usd: u64,
+    /// Working time already closed: the sum of the role's finished working intervals.
+    active: Duration,
+    /// When the role entered its current working interval, if it is working now. The
+    /// snapshot adds the in-progress time up to the read instant so a live role's time
+    /// keeps climbing between transitions.
+    working_since: Option<Timestamp>,
+}
+
+impl RoleStats {
+    /// Folds one of the role's `lifecycle` transitions into its working time.
+    ///
+    /// Entering the working state (started, restarted, recovered, resumed) opens an
+    /// interval; leaving it (idle, stopped, died, paused, stood down) closes the open one
+    /// and banks its duration. Re-entering while already working keeps the earlier start.
+    fn apply_lifecycle(&mut self, state: Lifecycle, at: Timestamp) {
+        match state {
+            Lifecycle::Started
+            | Lifecycle::Restarted
+            | Lifecycle::Recovered
+            | Lifecycle::Resumed => {
+                self.working_since.get_or_insert(at);
+            }
+            Lifecycle::Idle
+            | Lifecycle::Stopped
+            | Lifecycle::Died
+            | Lifecycle::Paused
+            | Lifecycle::StoodDown => {
+                if let Some(since) = self.working_since.take() {
+                    self.active += span(since, at);
+                }
+            }
+        }
+    }
+
+    /// The role's total working time as of `now`, including any open interval.
+    fn active_as_of(&self, now: Timestamp) -> Duration {
+        match self.working_since {
+            Some(since) => self.active + span(since, now),
+            None => self.active,
+        }
+    }
+}
+
+/// The non-negative time from `start` to `end`; a backwards pair (clock skew) counts as zero.
+fn span(start: Timestamp, end: Timestamp) -> Duration {
+    (end.to_datetime() - start.to_datetime())
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
+
+/// One role's line in the `GET /stats` rollup: tokens, cost, and working seconds (issue #55).
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleStatsView {
+    /// The role.
+    pub role: RoleId,
+    /// Cumulative tokens spent.
+    pub tokens: u64,
+    /// Cumulative cost in micro-USD (millionths of a dollar).
+    pub cost_micro_usd: u64,
+    /// Working time in whole seconds, including any interval still open at read time.
+    pub active_secs: u64,
+}
+
+/// The usage rollup: cost, tokens, and working time per role and in aggregate (issue #55).
+///
+/// A projection of the `telemetry` events (tokens, cost) and `lifecycle` events (working
+/// time) in the durable log, so it is rebuilt on a restart like the situation board rather
+/// than kept in a separate persistence path. It makes spend legible per role and overall,
+/// feeding the cockpit and the Seraphim stats rollup.
+#[derive(Debug, Default)]
+struct Stats {
+    roles: BTreeMap<RoleId, RoleStats>,
+}
+
+impl Stats {
+    /// Rebuilds the rollup by folding every `telemetry` and `lifecycle` event, oldest first.
+    fn rebuild(events: &[Event]) -> Self {
+        let mut stats = Self::default();
+        for event in events {
+            stats.apply(event);
+        }
+        stats
+    }
+
+    /// Folds one event into the rollup: usage adds tokens and cost, a lifecycle transition
+    /// advances working time. Every other kind is ignored.
+    fn apply(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::Telemetry(TelemetryEvent {
+                role,
+                tokens,
+                cost_micro_usd,
+            }) => {
+                let entry = self.roles.entry(role.clone()).or_default();
+                entry.tokens = entry.tokens.saturating_add(*tokens);
+                entry.cost_micro_usd = entry.cost_micro_usd.saturating_add(*cost_micro_usd);
+            }
+            EventKind::Lifecycle(state) => {
+                if let Sender::Role(role) = &event.from {
+                    self.roles
+                        .entry(role.clone())
+                        .or_default()
+                        .apply_lifecycle(*state, event.ts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The per-role rollup as of `now`, sorted by role, each with its working time closed
+    /// through `now`.
+    fn snapshot(&self, now: Timestamp) -> Vec<RoleStatsView> {
+        self.roles
+            .iter()
+            .map(|(role, stats)| RoleStatsView {
+                role: role.clone(),
+                tokens: stats.tokens,
+                cost_micro_usd: stats.cost_micro_usd,
+                active_secs: stats.active_as_of(now).as_secs(),
+            })
+            .collect()
+    }
+}
+
 /// How many events a subscriber may fall behind before the broker drops the oldest
 /// for it. Large enough to absorb a burst while a slow reader catches up; a lagged
 /// subscriber reconnects with its `Last-Event-ID` and replays the gap from the log,
@@ -199,6 +334,9 @@ pub struct AppState {
     /// The shared situation board: the crew's durable memory (issue #49). A projection of
     /// the `board` events in the log, so it is rebuilt from the log on a restart.
     board: Arc<Mutex<Board>>,
+    /// The usage rollup: cost, tokens, and working time per role (issue #55). A projection
+    /// of the `telemetry` and `lifecycle` events in the log, rebuilt from it on a restart.
+    stats: Arc<Mutex<Stats>>,
 }
 
 impl AppState {
@@ -220,9 +358,12 @@ impl AppState {
     pub fn with_storage(config: Config, storage: Arc<dyn Storage>) -> Self {
         let scrubber = Scrubber::new(config.secrets.iter().cloned());
         let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
-        // Rebuild the durable board from the log the storage just replayed, so a decision
-        // recorded before a restart is still on the board after it (issue #49).
-        let board = Board::rebuild(&storage.events());
+        // Rebuild the durable projections from the log the storage just replayed, so a
+        // decision recorded (issue #49) or spend accrued (issue #55) before a restart
+        // survives it.
+        let events = storage.events();
+        let board = Board::rebuild(&events);
+        let stats = Stats::rebuild(&events);
         Self {
             config: Arc::new(config),
             storage,
@@ -233,6 +374,7 @@ impl AppState {
             control: Arc::new(Mutex::new(Control::default())),
             gate: Arc::new(Mutex::new(Gate::default())),
             board: Arc::new(Mutex::new(board)),
+            stats: Arc::new(Mutex::new(stats)),
         }
     }
 
@@ -400,6 +542,22 @@ impl AppState {
         self.board.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The usage rollup per role as of `now`: tokens, cost, and working time (issue #55).
+    ///
+    /// Each role's working time is closed through `now`, so a role working right now shows
+    /// time that climbs between its lifecycle transitions. The caller (the `GET /stats`
+    /// endpoint) sums these for the aggregate.
+    #[must_use]
+    pub fn stats_snapshot(&self, now: Timestamp) -> Vec<RoleStatsView> {
+        self.stats().snapshot(now)
+    }
+
+    /// The stats projection behind its lock, recovering from a poisoned mutex (a panic in
+    /// another handler must not wedge the rollup).
+    fn stats(&self) -> std::sync::MutexGuard<'_, Stats> {
+        self.stats.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Scrubs an event of secrets, appends it to the log, and fans it to subscribers.
     ///
     /// The one path every emitter shares (a posted message, a roster change). Returns
@@ -432,6 +590,9 @@ impl AppState {
             .unwrap_or_else(PoisonError::into_inner);
         let seq = self.storage.next_seq();
         self.storage.append(event.clone());
+        // Advance the usage rollup at the one choke point every event flows through, so
+        // telemetry and lifecycle events from any handler are folded in (issue #55).
+        self.stats().apply(&event);
         let sequenced = Sequenced { seq, event };
         // Err(_) only means no subscribers are listening right now, which is fine.
         let _ = self.broadcast.send(sequenced.clone());
@@ -516,5 +677,112 @@ mod tests {
             "the lifecycle event correlates too"
         );
         assert_eq!(stored[2].task, None, "an event outside a task carries none");
+    }
+
+    /// A timestamp at an RFC 3339 instant, via the same serde form the wire uses.
+    fn at(rfc3339: &str) -> Timestamp {
+        serde_json::from_value(serde_json::Value::String(rfc3339.to_owned())).unwrap()
+    }
+
+    /// An event from `role` on `all-units` at `ts`, carrying `kind`.
+    fn from_role(role: &str, ts: Timestamp, kind: EventKind) -> Event {
+        Event {
+            ts,
+            from: Sender::Role(RoleId::new(role)),
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind,
+        }
+    }
+
+    #[test]
+    fn stats_roll_up_tokens_cost_and_closed_working_time() {
+        use crew_core::TelemetryEvent;
+
+        let state = AppState::new(Config::default());
+        // Backend works for a bounded interval, spending two turns in between.
+        state.publish(from_role(
+            "backend",
+            at("2026-07-23T00:00:00Z"),
+            EventKind::Lifecycle(Lifecycle::Started),
+        ));
+        for (tokens, cost) in [(1_000, 30_000), (500, 15_000)] {
+            state.publish(from_role(
+                "backend",
+                at("2026-07-23T00:00:30Z"),
+                EventKind::Telemetry(TelemetryEvent {
+                    role: RoleId::new("backend"),
+                    tokens,
+                    cost_micro_usd: cost,
+                }),
+            ));
+        }
+        state.publish(from_role(
+            "backend",
+            at("2026-07-23T00:01:30Z"),
+            EventKind::Lifecycle(Lifecycle::Idle),
+        ));
+
+        let rollup = state.stats_snapshot(at("2026-07-23T00:02:00Z"));
+        let backend = rollup
+            .iter()
+            .find(|s| s.role == RoleId::new("backend"))
+            .unwrap();
+        assert_eq!(backend.tokens, 1_500, "the two turns' tokens sum");
+        assert_eq!(backend.cost_micro_usd, 45_000, "the two turns' cost sums");
+        assert_eq!(
+            backend.active_secs, 90,
+            "working time is the closed interval, not the wall clock since"
+        );
+    }
+
+    #[test]
+    fn working_time_climbs_while_a_role_is_still_working() {
+        let state = AppState::new(Config::default());
+        state.publish(from_role(
+            "frontend",
+            at("2026-07-23T00:00:00Z"),
+            EventKind::Lifecycle(Lifecycle::Started),
+        ));
+        // No closing transition yet: the snapshot counts the open interval up to `now`.
+        let rollup = state.stats_snapshot(at("2026-07-23T00:00:45Z"));
+        let frontend = rollup
+            .iter()
+            .find(|s| s.role == RoleId::new("frontend"))
+            .unwrap();
+        assert_eq!(
+            frontend.active_secs, 45,
+            "an open working interval keeps climbing"
+        );
+    }
+
+    #[test]
+    fn stats_survive_a_restart_by_rebuilding_from_the_log() {
+        use crew_core::TelemetryEvent;
+        use std::sync::Arc;
+
+        use crate::store::Storage;
+
+        // Fold the projection over a log, then rebuild a fresh state over the same store.
+        let store: Arc<dyn Storage> = Arc::new(crate::store::MemoryStore::default());
+        let first = AppState::with_storage(Config::default(), Arc::clone(&store));
+        first.publish(from_role(
+            "docs",
+            at("2026-07-23T00:00:00Z"),
+            EventKind::Telemetry(TelemetryEvent {
+                role: RoleId::new("docs"),
+                tokens: 700,
+                cost_micro_usd: 1_200,
+            }),
+        ));
+
+        let rebuilt = AppState::with_storage(Config::default(), store);
+        let rollup = rebuilt.stats_snapshot(at("2026-07-23T00:01:00Z"));
+        let docs = rollup
+            .iter()
+            .find(|s| s.role == RoleId::new("docs"))
+            .unwrap();
+        assert_eq!(docs.tokens, 700, "the rollup rebuilds from the durable log");
+        assert_eq!(docs.cost_micro_usd, 1_200);
     }
 }

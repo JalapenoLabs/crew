@@ -37,6 +37,7 @@ mod router;
 mod secrets;
 mod serve;
 mod state;
+mod stats;
 mod store;
 mod summary;
 

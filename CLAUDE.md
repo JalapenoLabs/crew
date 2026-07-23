@@ -112,7 +112,10 @@ not a reimplementation of the agent.
   changing the mapping changes spend with no code change); a shared token budget with
   per-role caps (issue #54, done: a crew-wide `token_budget` and per-role `token_cap`,
   enforced by idle-stopping a role or the crew at a cap and surfaced as a `budget` event,
-  never a silent overrun); auto-idle with cost telemetry; and subscription usage awareness.
+  never a silent overrun); auto-idle on quiet with cost and token telemetry (issue #55,
+  done: the lifecycle machine idle-stops a quiet role, and per-turn `telemetry` events plus
+  the roles' `lifecycle` events feed a `GET /stats` rollup of tokens, cost, and working time
+  per role and in aggregate); and subscription usage awareness.
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -221,7 +224,7 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Boundary`,
-`Verification`, `Board`, `Budget`) stream
+`Verification`, `Board`, `Budget`, `Telemetry`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -496,6 +499,21 @@ turn's usage; until then the accounting, enforcement, and `budget` events are ex
 against spend fed to the seam directly (proven end to end in `tests/budget.rs`). The broker
 accepts a report at `POST /budget` and streams it as `EventKind::Budget`, filterable with
 `GET /history?kind=budget`. See `docs/observability.md` (token budget) and `docs/config.md`.
+
+Auto-idle on quiet with cost and token telemetry makes spend legible per role and overall
+(issue #55). Idle-stop is the lifecycle machine from issue #22: a role quiet past its
+`idle_stop` timeout is stopped, keeping its roster entry, so an idle role costs nothing.
+Telemetry is always-on: `Fleet::record_usage(role, tokens, cost_micro_usd)` reports each
+turn's usage as a `telemetry` event (`POST /telemetry`), whether or not a budget is set, and
+also charges the tokens against the budget (it wraps `record_spend`). The broker folds a
+`Stats` projection from the `telemetry` events (tokens, cost) and the roles' `lifecycle`
+events (working time, entering vs leaving the working state), rebuilt from the durable log on
+a restart like the board, and serves it at `GET /stats`: per role and in aggregate, the
+cumulative tokens, cost (micro-USD), and working seconds, with a live role's open working
+interval counted through the read instant. Cost and tokens ride the same stream-json feed as
+the budget (issue #24); working time needs no feed. This is the data the `crew top` cockpit
+(issue #51) and the Seraphim per-role stats render. See `docs/observability.md` (cost,
+tokens, and time telemetry).
 
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config

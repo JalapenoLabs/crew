@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use crew_core::{BudgetEvent, RoleId, TaskId, Timestamp};
+use crew_core::{BudgetEvent, RoleId, TaskId, TelemetryEvent, Timestamp};
 use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -144,6 +144,30 @@ impl RosterClient {
             .send_string(&body)
             .map(|_response| ())
             .map_err(|err| eyre!("could not report budget for role `{}`: {err}", event.role))
+    }
+
+    /// Reports a role's per-turn token-and-cost usage (`POST /telemetry`, issue #55).
+    ///
+    /// The broker records it as a `telemetry` event and folds it into the `GET /stats`
+    /// rollup, so per-role and aggregate spend is legible regardless of any budget.
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_telemetry(&self, event: &TelemetryEvent) -> Result<()> {
+        let url = format!("{}/telemetry", self.base);
+        let body = serde_json::to_string(event)
+            .map_err(|err| eyre!("could not encode the telemetry report: {err}"))?;
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_response| ())
+            .map_err(|err| {
+                eyre!(
+                    "could not report telemetry for role `{}`: {err}",
+                    event.role
+                )
+            })
     }
 
     /// Adds the task id to a roster request body when a task context is set.
