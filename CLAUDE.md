@@ -238,6 +238,19 @@ fails loudly if it is missing) and `register_server` records it at user scope
 silently. Registration is one-time and unit-wide: per-agent role and broker ride the
 `CREW_ROLE_CARD` environment the `crew-mcp` child inherits.
 
+`crew_supervisor::Supervisor::up` ties these together into the auto-spawn flow (issue
+#21): register the MCP server, then per resolved role card provision the card,
+register the role on the broker roster, and spawn one `claude -p` process wired to the
+broker. The supervisor owns lifecycle, so it registers a role on start and
+deregisters it on exit (via `RosterClient`), keeping `GET /roster` a true picture of
+the live unit; each process's stdout and stderr are captured and streamed as
+`Captured` lines for the activity parser (issue #24). `Crew::spawn` holds the
+lifecycle mechanics and takes fully-resolved `AgentCommand`s, so it is exercised in
+tests with a stub process instead of a real `claude`. Shutting the crew down kills the
+processes and deregisters every role; a dropped crew still kills its processes.
+The roster of roles comes from the crew config (issue #25), which `up` consumes as
+role cards. Idle-stop and restart-on-death land in a later phase.
+
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and

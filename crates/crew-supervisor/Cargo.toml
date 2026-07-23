@@ -16,3 +16,15 @@ workspace = true
 # provisioner performs when it writes a card for a spawned agent (M-APP-ERROR).
 crew-core.workspace = true
 eyre.workspace = true
+# The roster client: a synchronous, http-only HTTP client (no TLS system dep, since
+# the broker is localhost) plus JSON for its request and response bodies.
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Structured logging for spawn and lifecycle events (M-LOG-STRUCTURED).
+tracing.workspace = true
+
+[dev-dependencies]
+# Run a real broker in-process for the end-to-end spawn test (issue #21).
+crew-broker.workspace = true
+tokio = { workspace = true }

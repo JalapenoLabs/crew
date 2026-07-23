@@ -203,8 +203,14 @@ dependencies = [
 name = "crew-supervisor"
 version = "0.0.0"
 dependencies = [
+ "crew-broker",
  "crew-core",
  "eyre",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]
