@@ -87,8 +87,11 @@ it is about, and `channel` is `all-units`.
 ```
 
 The transition is one of `started`, `idle`, `stopped`, `restarted`, `died`,
-`recovered`. `started` and `recovered` bring a role up; `idle` parks it (still present);
-`stopped` and `died` take it down.
+`recovered`, `paused`, `resumed`, `stood_down`, or `mission_complete`. `started` and
+`recovered` bring a role up; `idle` parks it (still present); `stopped` and `died` take it
+down; `paused` / `resumed` gate and ungate a role (issue #41); `stood_down` is the crew's
+emergency halt (issue #41); and `mission_complete` is the crew's graceful finish (issue
+#121, the true completion the General is notified on, distinct from a stand-down).
 
 ### `activity` (an agent's own work)
 

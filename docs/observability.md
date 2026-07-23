@@ -285,6 +285,10 @@ The actionable moments are the ones the stream carries today:
 - **The crew is stalled** (a `stall` event with `status` `detected`, issue #120): the crew
   is stuck waiting on itself and needs the General. A `resolved` stall is good news and
   stays quiet.
+- **The mission completes** (a `lifecycle` `mission_complete`, issue #121): the crew
+  gracefully finished its work. This is the true completion, reported by the crew (typically
+  the commander through `crew_complete`), distinct from the `stood_down` emergency halt that
+  used to stand in for it.
 
 Not every question needs the General (issue #119). A peer loop (`@backend` asking a live
 `@frontend`) is coordination the crew resolves on its own, so pushing it would drown the
@@ -300,7 +304,7 @@ dropped.
 
 Everything else, status and notes, orders, answers and artifacts, ordinary lifecycle such
 as `started` or `idle`, activity, board, boundary, and verification events, is routine and
-never notifies. The policy is configurable per moment: `--mute question,died,stood-down,stalled`
+never notifies. The policy is configurable per moment: `--mute question,died,stood-down,stalled,complete`
 suppresses any subset (for a General who does not want peer questions, say), and
 `--no-sound` drops the terminal bell while keeping the desktop notification and the log
 line.
@@ -363,8 +367,8 @@ are projections of the one stream.
 The broker folds these into a rollup and serves it at **`GET /stats`**: per role and in
 aggregate, the cumulative tokens, cost (micro-USD), and working seconds. Working time is a
 fold of the lifecycle transitions (entering `started` / `restarted` / `recovered` /
-`resumed` opens a working interval; `idle` / `stopped` / `died` / `paused` / `stood_down`
-closes it), and a role working right now has its open interval counted through the read
+`resumed` opens a working interval; `idle` / `stopped` / `died` / `paused` / `stood_down` /
+`mission_complete` closes it), and a role working right now has its open interval counted through the read
 instant, so a live role's time keeps climbing. Like the situation board, the rollup is a
 projection of the durable log, so it is rebuilt on a restart rather than kept separately.
 This is the data the `crew top` cockpit (issue #51) and the Seraphim per-role stats render,

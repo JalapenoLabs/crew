@@ -14,6 +14,8 @@
 //!   touching shared work, and read who holds what),
 //! - `crew_submit` / `crew_verdict` / `crew_gate` (the adversarial done-gate:
 //!   submit work for verification, judge a teammate's work, and read the gate),
+//! - `crew_complete` (report the mission gracefully finished, typically as the
+//!   commander, so `crew notify` fires on a true completion),
 //! - `crew_board` / `crew_record` (the shared situation board: read the crew's
 //!   durable memory, and record or retract a decision, interface, or gotcha),
 //! - `crew_briefing` (the bounded new-role briefing packet: the board and a
