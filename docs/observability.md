@@ -111,8 +111,15 @@ and each role's inbox with no separate capture path. The broker derives the
 transition from the liveness change and the prior state: a role reaching `working`
 for the first time `started`, coming back from `dead` `recovered`, and otherwise
 `restarted`. The roster lives behind the storage trait, so a durable backend keeps it
-across a restart. The live count is the projection of these lifecycle events, computed
-by any consumer from the stream.
+across a restart.
+
+The live count is the current liveness projection, and `GET /roster` exposes it
+directly (issue #32) so a UI needs no polling: alongside the roles it returns a
+`count` with the headline `live` number (agents `working` or `idle`, present and up
+or resumable; a `stopped` role has left the field and a `dead` one gave up) and the
+per-liveness breakdown. A UI reads that snapshot once and keeps it current from the
+`lifecycle` events every roster change publishes, so it shows the live count updating
+as agents start, idle, stop, and die.
 
 The supervisor's lifecycle state machine drives these transitions (issue #22): it
 marks a role working on start, idle after a quiet period, and stopped on stand-down,
