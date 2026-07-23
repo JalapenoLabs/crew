@@ -157,9 +157,11 @@ fn print_inbox(items: &[InboxItem]) {
             (detail, "") => detail.to_owned(),
             (detail, body) => format!("{detail}. {body}"),
         };
+        // A redirect or belay is a General directive to honor at once, so flag it.
+        let marker = if item.directive { "[honor now] " } else { "" };
         println!(
-            "- {} on {} ({}): {}",
-            item.from, item.channel, item.kind, content
+            "- {}{} on {} ({}): {}",
+            marker, item.from, item.channel, item.kind, content
         );
     }
 }

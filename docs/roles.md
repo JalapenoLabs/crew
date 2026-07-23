@@ -10,11 +10,14 @@ ownership rules change.
 The commander directs; it does not take the field. Below the commander are the
 specialists, each owning a lane of the codebase.
 
-Command stays yours: a brake and a kill switch gate the crew's work without tearing it
-down (issue #41). `crew pause [role]` and `crew resume [role]` gate one role or the
-whole crew, and `crew standdown` halts every role at once and preserves the state, so
-the crew is recoverable. A gated role pulls no new work until you lift it; the state is
-visible on the roster and the stream (see `docs/observability.md`).
+You brief the commander by default, but command stays yours. You can steer any role
+mid-task without standing the crew down, with `crew redirect <role>` (adjust course,
+keep the task) and `crew belay <role>` (halt and re-task); the role honors the
+directive at once (see `docs/communication.md`, command and control). A brake and a
+kill switch gate the crew's work: `crew pause [role]` and `crew resume [role]` gate one
+role or the whole crew, and `crew standdown` halts every role at once and preserves the
+state, so the crew is recoverable. A gated role pulls no new work until you lift it; the
+state is visible on the roster and the stream (see `docs/observability.md`).
 
 ## The ownership model
 

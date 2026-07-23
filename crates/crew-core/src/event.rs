@@ -202,6 +202,28 @@ pub enum MessageKind {
     },
     /// Freeform prose for anything the other kinds do not cover.
     Note,
+    /// Steers a role mid-task without stopping it: the General's `crew redirect`
+    /// (issue #38). The role honors it at its next tool boundary, keeping its current
+    /// task and adjusting course; the steering text is the [`body`](Message::body).
+    Redirect,
+    /// Halts a role's current work and re-tasks it: the General's `crew belay`
+    /// (issue #38). The role stops what it is doing and takes the [`body`](Message::body)
+    /// as its new order.
+    Belay,
+}
+
+impl MessageKind {
+    /// Whether this is a General directive the receiving role must honor at once,
+    /// at its next tool boundary rather than at its leisure.
+    ///
+    /// A [`Redirect`](Self::Redirect) steers a role without stopping it; a
+    /// [`Belay`](Self::Belay) halts its current work and re-tasks it. Both are the
+    /// General interjecting to steer a running agent, so a front-end flags them and an
+    /// agent acts on them immediately (see `docs/communication.md`, command and control).
+    #[must_use]
+    pub fn is_directive(&self) -> bool {
+        matches!(self, Self::Redirect | Self::Belay)
+    }
 }
 
 /// What a [`MessageKind::Artifact`] reference points to (see `docs/communication.md`).
@@ -312,6 +334,8 @@ mod tests {
                 artifact_kind: ArtifactKind::PullRequest,
             })),
             envelope(message(MessageKind::Note)),
+            envelope(message(MessageKind::Redirect)),
+            envelope(message(MessageKind::Belay)),
             envelope(EventKind::Lifecycle(Lifecycle::Started)),
             envelope(EventKind::Lifecycle(Lifecycle::Died)),
             envelope(EventKind::Lifecycle(Lifecycle::Paused)),
@@ -343,6 +367,31 @@ mod tests {
             json,
             serde_json::json!({ "kind": "lifecycle", "data": "idle" })
         );
+    }
+
+    #[test]
+    fn directives_are_the_redirect_and_belay_kinds() {
+        assert!(
+            MessageKind::Redirect.is_directive(),
+            "a redirect is a directive"
+        );
+        assert!(MessageKind::Belay.is_directive(), "a belay is a directive");
+        for kind in [
+            MessageKind::Note,
+            MessageKind::Status,
+            MessageKind::Answer,
+            MessageKind::Question { options: vec![] },
+        ] {
+            assert!(!kind.is_directive(), "{kind:?} is not a directive");
+        }
+    }
+
+    #[test]
+    fn directives_serialize_with_their_snake_case_tag() {
+        let redirect = serde_json::to_value(MessageKind::Redirect).unwrap();
+        assert_eq!(redirect, serde_json::json!({ "kind": "redirect" }));
+        let belay = serde_json::to_value(MessageKind::Belay).unwrap();
+        assert_eq!(belay, serde_json::json!({ "kind": "belay" }));
     }
 
     #[test]

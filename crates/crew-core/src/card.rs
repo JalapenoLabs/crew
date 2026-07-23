@@ -198,6 +198,14 @@ impl RoleCard {
 
         out.push('\n');
         out.push_str(
+            "A redirect or belay in your inbox is a command from the General: honor it at your \
+             very next tool boundary, not when your current step finishes. A redirect steers you: \
+             keep your task and adjust course. A belay overrides you: stop your current work and \
+             take its message as your new order.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
             "The General can pause you. Before you pick up new work, check crew_roster: if you \
              are marked paused, or the crew is paused or stood down, pull no new work and wait \
              for it to lift. A stand-down means stop now and leave your work recoverable.\n",
@@ -417,6 +425,14 @@ mod tests {
             "gives the broker address"
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
+        assert!(
+            briefing.contains("redirect") && briefing.contains("belay"),
+            "tells the role to honor the General's redirect and belay"
+        );
+        assert!(
+            briefing.contains("next tool boundary"),
+            "says when to honor a directive"
+        );
         assert!(
             briefing.contains("paused") && briefing.contains("pull no new work"),
             "tells the role to honor a pause"

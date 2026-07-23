@@ -12,6 +12,9 @@
 //!   stream live, so a peer sees a teammate's messages without polling and never its
 //!   own; the upgraded `coworker` skill replaces its `tail -F` monitor with it (see
 //!   `docs/communication.md`).
+//! - The General steers a running agent with `crew redirect` and `crew belay` (issue
+//!   #38): each posts a directive to a role's inbox that the role honors at once,
+//!   without tearing the crew down (see `docs/communication.md`).
 //!
 //! `main` establishes the application conventions (issue #4): eyre errors, the
 //! mimalloc allocator, and the shared structured-logging init, then dispatches the
@@ -24,6 +27,7 @@ use eyre::Result;
 use mimalloc::MiMalloc;
 
 mod broker;
+mod control;
 mod down;
 mod paths;
 mod pause;
@@ -76,6 +80,26 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Redirect a role mid-task: inject a steering message it honors immediately.
+    Redirect {
+        /// The role to steer (its `@role` channel).
+        role: String,
+        /// The steering message (markdown).
+        message: String,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Belay a role: halt its current work and re-task it with a new order.
+    Belay {
+        /// The role to re-task (its `@role` channel).
+        role: String,
+        /// The new order (markdown).
+        order: String,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// Pause a role, or the whole crew: it pulls no new work until resumed.
     Pause {
         /// The role to pause; omit to pause the whole crew.
@@ -112,6 +136,16 @@ fn main() -> Result<()> {
         Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
+        Command::Redirect {
+            role,
+            message,
+            broker,
+        } => control::redirect(broker.as_deref(), &role, &message),
+        Command::Belay {
+            role,
+            order,
+            broker,
+        } => control::belay(broker.as_deref(), &role, &order),
         Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
