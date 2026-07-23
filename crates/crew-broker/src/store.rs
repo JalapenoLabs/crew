@@ -14,6 +14,13 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// A short, stable name for the backend, such as `memory`.
     fn backend(&self) -> &'static str;
 
+    /// The sequence number the next appended event will receive.
+    ///
+    /// Equal to the current event count, so an event's sequence is its position in
+    /// the log. It is the cursor the inbox stream hands out as a `Last-Event-ID`,
+    /// letting a reconnecting subscriber resume exactly after the last event it saw.
+    fn next_seq(&self) -> u64;
+
     /// Appends an event to the log.
     fn append(&self, event: Event);
 
@@ -34,6 +41,13 @@ pub struct MemoryStore {
 impl Storage for MemoryStore {
     fn backend(&self) -> &'static str {
         "memory"
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len() as u64
     }
 
     fn append(&self, event: Event) {

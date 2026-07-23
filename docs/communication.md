@@ -68,6 +68,17 @@ messages, so it spends no context polling. Because the stream is self-filtered,
 there is no "ignore your own writes" rule to remember. The broker, not a
 convention in a skill, guarantees it.
 
+A role subscribes over `GET /inbox?role=<role>`, a Server-Sent-Events stream of
+the events addressed to it: its direct `@role` channel, any pair channel it
+belongs to, and `all-units` (issue #10). The broker drops an event whose sender is
+the subscribing role at the source, so self-echo is impossible by construction.
+Each event carries its log sequence as the SSE `id`; on reconnect the client's
+`Last-Event-ID` resumes the stream right after the last event it received,
+replaying anything missed from the log before rejoining the live tail, so a
+dropped connection loses nothing. A fresh connection with no cursor starts at the
+live tail rather than replaying the whole history (that catch-up is the rolling
+summary's job, below). The canonical channel model and membership are issue #11.
+
 ## Context management
 
 The failure mode of the old file transport was unbounded growth: a fresh agent

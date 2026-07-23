@@ -4,8 +4,9 @@
 //! `docs/architecture.md`). It binds loopback-only, serves a health probe, and
 //! shuts down gracefully (issue #7); it stores and reads the [`crew_core`] event
 //! model over `POST`/`GET /events`, with typed per-kind message fields and typed
-//! 4xx validation errors (issue #8). The self-filtered SSE streams, the roster,
-//! and the rolling-summary history come in later tickets.
+//! 4xx validation errors (issue #8). It streams a role its live, self-filtered
+//! events over `GET /inbox?role=<role>`, resumable from a `Last-Event-ID` cursor
+//! (issue #10). The roster and the rolling-summary history come in later tickets.
 //!
 //! Run it with the `crewd` binary, or drive it as a library through [`run`].
 //!
@@ -15,6 +16,7 @@ mod api;
 mod config;
 mod error;
 mod events;
+mod inbox;
 mod router;
 mod serve;
 mod state;
@@ -24,5 +26,5 @@ pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
 pub use error::ApiError;
 pub use router::ChannelRouter;
 pub use serve::run;
-pub use state::AppState;
+pub use state::{AppState, Sequenced};
 pub use store::{MemoryStore, Storage};

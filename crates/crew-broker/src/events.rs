@@ -84,7 +84,8 @@ impl PostMessage {
 }
 
 /// `POST /events`: post a message. The broker stamps its id and timestamp, stores
-/// the resulting [`Event`], and returns it with `201 Created`.
+/// the resulting [`Event`], fans it out to live subscribers, and returns it with
+/// `201 Created`.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if the body is malformed or fails validation.
@@ -104,8 +105,8 @@ async fn post_event(
             body: request.body,
         }),
     };
-    state.storage.append(event.clone());
-    Ok((StatusCode::CREATED, Json(event)))
+    let sequenced = state.publish(event);
+    Ok((StatusCode::CREATED, Json(sequenced.event)))
 }
 
 /// The body of `GET /events`: the stored event log, oldest first.
