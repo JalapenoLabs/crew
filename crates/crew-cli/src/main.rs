@@ -16,9 +16,12 @@
 //!   a teammate's messages without polling and never its own; the upgraded
 //!   `coworker` skill replaces its `tail -F` monitor with it (see
 //!   `docs/communication.md`).
-//! - The General steers a running agent with `crew redirect` and `crew belay`
-//!   (issue #38): each posts a directive to a role's inbox that the role honors
-//!   at once, without tearing the crew down (see `docs/communication.md`).
+//! - The General drives the unit with `crew brief` (issue #118): a free-form
+//!   note posted as the General to the commander by default, a role, or a
+//!   channel, distinct from the agent shim's `crew send`. The General also
+//!   steers a running agent with `crew redirect` and `crew belay` (issue #38):
+//!   each posts a directive to a role's inbox that the role honors at once,
+//!   without tearing the crew down (see `docs/communication.md`).
 //!
 //! `main` establishes the application conventions (issue #4): eyre errors, the
 //! mimalloc allocator, and the shared structured-logging init, then dispatches
@@ -135,6 +138,28 @@ enum Command {
         /// log line.
         #[arg(long)]
         no_sound: bool,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Brief the crew as the General: post a free-form note to the commander by
+    /// default, a role, or a channel (distinct from the agent `send`).
+    Brief {
+        /// Brief one role directly (its `@role` channel) instead of the
+        /// commander.
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+        /// Post to a named channel: `all-units`, or a pair like
+        /// `frontend+backend`.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// The crew's commander, the default addressee. Defaults to
+        /// `commander`.
+        #[arg(long, value_name = "ROLE")]
+        commander: Option<String>,
+        /// The message text (markdown).
+        body: String,
         /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
         /// environment).
         #[arg(long, value_name = "URL")]
@@ -324,6 +349,10 @@ enum Command {
     },
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the command dispatch is a flat one-arm-per-subcommand match"
+)]
 fn main() -> Result<()> {
     crew_telemetry::init();
 
@@ -353,6 +382,19 @@ fn main() -> Result<()> {
         } => notify::notify(
             broker.as_deref(),
             &notify::NotifyPolicy::new(mute, !no_sound),
+        ),
+        Command::Brief {
+            to,
+            channel,
+            commander,
+            body,
+            broker,
+        } => control::brief(
+            broker.as_deref(),
+            to.as_deref(),
+            channel.as_deref(),
+            commander.as_deref(),
+            &body,
         ),
         Command::Redirect {
             role,

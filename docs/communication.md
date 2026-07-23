@@ -119,6 +119,19 @@ issue #11.
 
 ## Command and control
 
+### Briefing the crew
+
+`crew brief "<message>"` is the General's plain send (issue #118): a free-form `note` posted
+as the General, the operator-facing counterpart to an agent's `crew send`. It obeys the one
+addressing rule above (`Channel::resolve`): `--to <role>` messages a role, `--channel <name>`
+posts to `all-units` or a pair, and neither reaches the commander (`--commander` names it,
+default `commander`). So `crew brief "..."` is the default brief that sets the unit to work,
+and `crew brief --channel all-units "..."` is the General's broadcast. Like the directives
+below it posts as the General, so it needs no role card, only the broker address (`--broker`,
+else the `CREW_BROKER_*` environment).
+
+### Steering a running agent
+
 The General steers a running agent without tearing the crew down, the core "I am in
 command" gesture (issue #38). Two directives:
 

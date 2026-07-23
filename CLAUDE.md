@@ -153,6 +153,8 @@ The full design is in `docs/architecture.md`. In short:
 - **MCP server:** the agent-facing surface (`crew_send`, `crew_inbox`, ...).
 - **CLI (`crew`):** the operator front-end (`crew up` / `crew down`, and the
   `crew pause` / `crew resume` / `crew standdown` brake and kill switch), the General's
+  plain send (`crew brief` to post a free-form note as the General to the commander by
+  default, a role, or a channel, issue #118), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task, and `crew command` to order a role directly, bypassing the commander while
   keeping it informed, issue #42), `crew integrate` to merge the roles' branches into one
@@ -667,7 +669,17 @@ per-role cursor on disk (`<state_dir>/shim-cursors/<role>.cursor`, a count of in
 messages seen), so `crew inbox` shows only messages since the last call (issue #130);
 the remaining parity gap (no push) is in `docs/codex.md`. A Codex role no longer needs an operator to launch it: with
 `runtime = "codex"` in the config, `crew up` supervisor-spawns it alongside the Claude
-roles (issue #128). The General's own `crew send` / `crew watch` front-end follows.
+roles (issue #128).
+
+`crew brief` is the General's plain send (issue #118), the operator-facing counterpart to the
+agent shim's `crew send`. It posts a free-form `note` as the General, so unlike the shim it
+needs no role card, only the broker address. The target follows the crew's one addressing rule
+(`Channel::resolve`): `--to` a role wins, else `--channel` a name (`all-units` or a pair), else
+the commander (`--commander`, default `commander`). So `crew brief "..."` is the default brief
+that sets the unit to work, and `crew brief --channel all-units "..."` is the General's
+broadcast. It shares the General front-end path with `crew redirect` / `crew belay` / `crew
+command` in `src/control.rs` (posting as the General, no role card), so it needs no broker
+change. See `docs/communication.md`.
 
 `crew command` is the General's direct override (issue #42): it commands a specialist itself,
 bypassing the commander's fan-out, without breaking the chain of command. It posts an `order`
