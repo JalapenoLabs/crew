@@ -64,13 +64,22 @@ stream filtered to one `role`.
 
 The whole unit's combined stream, ordered by time and filterable by role,
 channel, or kind. This is the "what is happening across the team right now" view,
-structured rather than a firehose. The broker serves it as `GET /history` (issue
-#12): filters (`channel`, `role`, `kind`, `task`, `since`), deterministic ordering
-by `ts` then log position, and cursor pagination that stays stable under concurrent
-writes, so a consumer or a late joiner reads the past without holding the stream
-open. `summary=true` returns the rolling compaction instead (issue #19): the older
-events folded into bounded aggregates plus the recent raw tail, so joining a
-long-running conversation costs bounded context rather than the full log.
+structured rather than a firehose.
+
+The broker serves it both ways under one filter, so the live and historical views
+always agree (issues #12, #31). Historically, `GET /history` reads the past:
+filters (`channel`, `role`, `kind`, `task`, `since`), deterministic ordering by `ts`
+then log position, and cursor pagination that stays stable under concurrent writes,
+so a consumer or a late joiner reads the past without holding the stream open.
+`summary=true` returns the rolling compaction instead (issue #19): the older events
+folded into bounded aggregates plus the recent raw tail, so joining a long-running
+conversation costs bounded context rather than the full log. Live, `GET /stream`
+delivers the same view over SSE, narrowed by the same filter params applied with the
+very same `EventFilter::matches`: with no filter it is the firehose, and with one it
+delivers only matching events. A consumer loads the backlog from `/history` and
+subscribes to `/stream` for what follows, both under the same filter; on a lagged or
+dropped connection it catches the gap up through `/history` again, since the stream
+is live-only.
 
 ## Live agent count and roster
 

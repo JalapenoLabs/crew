@@ -218,7 +218,11 @@ pub struct EventFilter {
 
 impl EventFilter {
     /// Whether `event` satisfies every set filter.
-    fn matches(&self, event: &Event) -> bool {
+    ///
+    /// The store applies it to the log for `GET /history`; the live `GET /stream`
+    /// applies the same test to each fanned-out event, so a filtered live
+    /// subscription and a filtered history read agree on the view (issue #31).
+    pub(crate) fn matches(&self, event: &Event) -> bool {
         if let Some(since) = self.since {
             if event.ts < since {
                 return false;

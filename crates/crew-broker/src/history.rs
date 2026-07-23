@@ -17,14 +17,13 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use crew_core::{ChannelId, Event, RoleId, TaskId, Timestamp};
-use serde::de::DeserializeOwned;
+use crew_core::Event;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::error::ApiError;
+use crate::filter::{nonempty, FilterQuery};
 use crate::state::AppState;
-use crate::store::{EventFilter, EventKindTag, EventQuery};
+use crate::store::{EventFilter, EventQuery};
 use crate::summary::{summarize, HistorySummary};
 
 /// The default page size when a request does not set `limit`.
@@ -38,22 +37,13 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/history", get(history))
 }
 
-/// The query of `GET /history`: filters, pagination, and the summary hook.
+/// The pagination and summary params of `GET /history`, alongside the shared
+/// [`FilterQuery`] that says which events to keep.
 ///
 /// Every field is a raw string so a malformed value yields a typed 400 from this
 /// handler rather than an untyped rejection from the extractor.
 #[derive(Debug, Deserialize)]
-struct HistoryQuery {
-    /// Keep only events on this channel (pair member order does not matter).
-    channel: Option<String>,
-    /// Keep only events sent by this role.
-    role: Option<String>,
-    /// Keep only events of this kind: `message`, `lifecycle`, or `activity`.
-    kind: Option<String>,
-    /// Keep only events belonging to this task (a UUID).
-    task: Option<String>,
-    /// Keep only events at or after this RFC 3339 instant.
-    since: Option<String>,
+struct HistoryOptions {
     /// Resume after this opaque cursor (from a previous page's `next_cursor`).
     after: Option<String>,
     /// The maximum number of events to return; the tail size under `summary`.
@@ -94,18 +84,19 @@ struct SummaryResponse {
 /// Returns a 400 [`ApiError`] if a filter, the cursor, or `limit` is malformed.
 async fn history(
     State(state): State<AppState>,
-    Query(query): Query<HistoryQuery>,
+    Query(filter): Query<FilterQuery>,
+    Query(options): Query<HistoryOptions>,
 ) -> Result<Response, ApiError> {
-    let filter = parse_filter(&query)?;
-    let limit = parse_limit(query.limit.as_deref())?;
+    let filter = filter.to_filter()?;
+    let limit = parse_limit(options.limit.as_deref())?;
 
-    if wants_summary(query.summary.as_deref()) {
+    if wants_summary(options.summary.as_deref()) {
         return Ok(Json(summary_response(&state, filter, limit)?).into_response());
     }
 
     let request = EventQuery {
         filter,
-        after: parse_cursor(query.after.as_deref())?,
+        after: parse_cursor(options.after.as_deref())?,
         limit,
     };
     let page = state
@@ -148,31 +139,6 @@ fn summary_response(
     })
 }
 
-/// Parses and validates the filter parameters into a backend-neutral [`EventFilter`].
-fn parse_filter(query: &HistoryQuery) -> Result<EventFilter, ApiError> {
-    let kind = match nonempty(query.kind.as_deref()) {
-        Some(kind) => Some(EventKindTag::parse(kind).ok_or_else(|| {
-            ApiError::bad_request(format!(
-                "unknown kind `{kind}`; expected message, lifecycle, or activity"
-            ))
-        })?),
-        None => None,
-    };
-    Ok(EventFilter {
-        channel: nonempty(query.channel.as_deref()).map(ChannelId::new),
-        role: nonempty(query.role.as_deref()).map(RoleId::new),
-        kind,
-        task: nonempty(query.task.as_deref())
-            .map(|task| from_str::<TaskId>(task).map_err(|_error| bad("task", "a UUID")))
-            .transpose()?,
-        since: nonempty(query.since.as_deref())
-            .map(|since| {
-                from_str::<Timestamp>(since).map_err(|_error| bad("since", "an RFC 3339 timestamp"))
-            })
-            .transpose()?,
-    })
-}
-
 /// Whether the `summary` flag was set to a truthy value.
 fn wants_summary(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true" | "yes"))
@@ -204,21 +170,6 @@ fn parse_cursor(after: Option<&str>) -> Result<Option<u64>, ApiError> {
         .transpose()
 }
 
-/// The trimmed value if present and not blank, so a bare `?role=` reads as absent.
-fn nonempty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-/// Deserializes a string into a wire type (e.g. [`TaskId`], [`Timestamp`]) via serde.
-fn from_str<T: DeserializeOwned>(value: &str) -> Result<T, serde_json::Error> {
-    serde_json::from_value(Value::String(value.to_owned()))
-}
-
-/// A 400 for a filter that must be a particular shape.
-fn bad(field: &str, shape: &str) -> ApiError {
-    ApiError::bad_request(format!("{field} must be {shape}"))
-}
-
 #[cfg(test)]
 mod tests {
     use axum::body::{to_bytes, Body};
@@ -229,9 +180,9 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use super::from_str;
     use crate::api;
     use crate::config::Config;
+    use crate::filter::from_str;
     use crate::state::AppState;
 
     /// An RFC 3339 timestamp for deterministic ordering in tests.

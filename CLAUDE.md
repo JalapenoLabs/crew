@@ -191,7 +191,7 @@ reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
 `ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
 masks configured secret values out of the event, persists it, and fans it to every
-subscriber. Subscribers read either `GET /stream`, the whole live feed, or
+subscriber. Subscribers read either `GET /stream`, the live aggregate feed, or
 `GET /inbox?role=<role>`, a role's live events filtered to its direct, pair, and
 `all-units` channels with its own messages dropped at the source and resumable from
 a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
@@ -202,6 +202,11 @@ compaction instead (issue #19): the older events folded into bounded aggregates
 (counts by sender, message kind, and lifecycle state, plus a capped digest of recent
 orders and artifacts and a one-line headline) plus the recent raw `tail` sized by
 `limit`, so joining a long conversation costs bounded context, not the full log. The
+**aggregate activity log** takes the same filter both ways (issue #31): `GET /stream`
+accepts the same `channel` / `role` / `kind` / `task` / `since` params as `/history`
+(the shared `FilterQuery`, applied live with the very same `EventFilter::matches`), so
+a filtered live subscription and a filtered history read agree; with no filter
+`/stream` is the firehose. The
 `/roster` endpoints expose who is in the unit (issue
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with

@@ -121,6 +121,21 @@ impl TestBroker {
             buffer: String::new(),
         }
     }
+
+    /// Subscribes to the aggregate live stream with a query (e.g. `?role=backend`).
+    async fn stream(&self, query: &str) -> Inbox {
+        let response = self
+            .client
+            .get(self.url(&format!("/stream{query}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "the stream should open");
+        Inbox {
+            response,
+            buffer: String::new(),
+        }
+    }
 }
 
 /// A live Server-Sent-Events subscription, reading one event at a time.
@@ -213,6 +228,44 @@ async fn a_posted_message_is_received_live_and_appears_in_history() {
     // ...and persisted, so history returns it.
     let history = broker.get_json("/history").await;
     assert_eq!(bodies(&history), vec!["the API is ready"]);
+
+    broker.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_aggregate_view_is_filterable_live_and_historically() {
+    // The aggregate activity log (issue #31): the whole unit's stream, the same filter
+    // applied live and historically so the two views agree.
+    let broker = TestBroker::in_memory().await;
+
+    // A filtered live subscription: only backend's events, opened before any post.
+    let mut backend_only = broker.stream("?role=backend").await;
+
+    broker.post_note("all-units", role("backend"), "b1").await; // seq 0, backend
+    broker.post_note("all-units", role("frontend"), "f1").await; // seq 1, frontend
+    broker.post_note("@qa", role("backend"), "b2").await; // seq 2, backend
+
+    // Live: only backend's events arrive, in order; frontend's is filtered out.
+    assert_eq!(body_of(&backend_only.recv(EXPECTED).await.unwrap()), "b1");
+    assert_eq!(body_of(&backend_only.recv(EXPECTED).await.unwrap()), "b2");
+    assert!(
+        backend_only.recv(ABSENT).await.is_none(),
+        "an event from another role is filtered out of the live stream",
+    );
+
+    // Historically: the same filter over `/history` returns the same set, time-ordered.
+    let history = broker.get_json("/history?role=backend").await;
+    assert_eq!(
+        bodies(&history),
+        vec!["b1", "b2"],
+        "history and the live stream agree under one filter",
+    );
+
+    // Unfiltered, the aggregate view is the whole firehose, time-ordered.
+    assert_eq!(
+        bodies(&broker.get_json("/history").await),
+        vec!["b1", "f1", "b2"],
+    );
 
     broker.stop().await;
 }

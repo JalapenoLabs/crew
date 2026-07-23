@@ -24,6 +24,7 @@ mod api;
 mod config;
 mod error;
 mod events;
+mod filter;
 mod history;
 mod inbox;
 mod roster;
