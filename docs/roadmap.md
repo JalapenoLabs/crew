@@ -112,7 +112,9 @@ it.
   into tokens, cost, and working time per role and in aggregate, feeding the cockpit and the
   Seraphim stats); and subscription usage awareness (issue #56, done: one shared usage gauge
   auto-pauses new work when a reading crosses `CREW_BROKER_USAGE_THRESHOLD`, lifts at the
-  window reset, and lets the operator resume early with `crew resume`).
+  window reset, and lets the operator resume early with `crew resume`, with the live
+  rate-limit detection that feeds the gauge awaiting the stream-json activity parser, issue
+  #24, wired into `RosterClient::report_usage` under issue #113).
 
 ## Parallel track: coworker skill transport upgrade (done)
 

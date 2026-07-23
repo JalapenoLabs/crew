@@ -379,9 +379,13 @@ mirroring Seraphim's per-railway stats.
 
 A crew shares one subscription, so it must not exhaust the shared window (issue #56). The
 broker keeps **one usage gauge** across the crew, mirroring Seraphim's usage auto-pause. The
-supervisor reports the window's fill against the shared limit (`POST /usage`, the reading
-plus when the window resets); the detection of that fill from the agents' rate-limit output
-is the stream-json parser's (issue #24), and `POST /usage` is the surface it reports to.
+supervisor carries the reporting seam, `RosterClient::report_usage` (`POST /usage`, the
+window fill plus when it resets). Detecting that fill from the agents' rate-limit output is
+the stream-json parser's job (issue #24), so the seam stays unwired until that parser lands:
+feeding detection into `report_usage` is issue #113, paused on #24. Until then the gauge is
+exercised through `POST /usage` directly. When #24 arrives it maps the rate-limit signal from
+Claude Code's stream-json onto `report_usage(percent, window_reset)`; the exact percent-used
+and reset-time field names are the open question to settle then.
 
 When a reading reaches the threshold (`CREW_BROKER_USAGE_THRESHOLD`, default 90 percent), the
 broker auto-pauses new work and publishes a `usage` event carrying the reset time, so the
