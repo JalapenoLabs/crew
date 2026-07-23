@@ -57,6 +57,10 @@ pub struct CrewConfig {
     pub idle_stop: Duration,
     /// The repos in scope for the crew (paths or names the operator supplies).
     pub repos: Vec<String>,
+    /// Whether each role works in its own git worktree of the crew's repos, so
+    /// parallel roles never clobber each other's edits (issue #43). Off by default;
+    /// opt a crew in with `worktrees = true`.
+    pub worktrees: bool,
 }
 
 /// One role in a crew: its name, its lane, its acceptance bar, and its model.
@@ -84,6 +88,7 @@ impl Default for CrewConfig {
             model: DEFAULT_MODEL.to_owned(),
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
+            worktrees: false,
         }
     }
 }
@@ -279,6 +284,7 @@ struct RawConfig {
     commander: Option<String>,
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
+    worktrees: Option<bool>,
     roles: Option<Vec<RawRole>>,
 }
 
@@ -314,6 +320,7 @@ impl RawConfig {
             model: self.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
             idle_stop,
             repos: self.repos.unwrap_or_default(),
+            worktrees: self.worktrees.unwrap_or(false),
         })
     }
 }
@@ -413,6 +420,7 @@ mod tests {
         commander = "commander"
         idle_stop = "10m"
         repos = ["api", "web"]
+        worktrees = true
 
         [[roles]]
         role = "commander"
@@ -441,6 +449,7 @@ mod tests {
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.idle_stop.as_secs(), 10 * 60);
         assert_eq!(config.repos, ["api", "web"]);
+        assert!(config.worktrees, "worktree isolation is opted in");
 
         // A per-role model overrides the crew default; others fall back to it.
         assert_eq!(config.model_for(&RoleId::new("backend")), "haiku");
@@ -488,6 +497,8 @@ mod tests {
         assert_eq!(config.commander, RoleId::new("commander"));
         assert_eq!(config.model, "opus");
         assert_eq!(config.idle_stop.as_secs(), 5 * 60);
+        assert!(config.repos.is_empty());
+        assert!(!config.worktrees, "worktree isolation is off by default");
         // The default crew round-trips through validation via an empty config document.
         assert_eq!(CrewConfig::from_toml("").unwrap(), config);
     }
