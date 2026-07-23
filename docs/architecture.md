@@ -38,6 +38,8 @@ Planned surface (illustrative, not final):
 - `GET /roster` lists roles, their liveness, their owned paths, and the crew's pause
   `standing`; `POST /pause`, `POST /resume`, and `POST /standdown` gate the crew's work
   (issue #41).
+- `GET /ledger` reads the work ledger, and `POST /ledger` claims a task or moves a
+  claim's state, refusing a claim another role holds (issue #45).
 
 Why a broker beats the old shared file:
 
@@ -139,8 +141,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes four tools (issues #17,
-#27):
+broker's HTTP API; it never touches the store. It exposes these tools (issues #17,
+#27, #45):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -156,6 +158,10 @@ broker's HTTP API; it never touches the store. It exposes four tools (issues #17
   and surfaces an order's structured fields so a specialist reads the task.
 - `crew_roster` lists every registered teammate, the paths it owns, and its
   liveness (working / idle / stopped / dead).
+- `crew_claim` claims a piece of work (a task key) before the role starts it, or moves
+  the role's claim to `in_progress`, `blocked`, or `done`. The broker refuses a claim
+  another role holds, so two roles never edit the same work blind (issue #45).
+- `crew_ledger` reads the work ledger: every claimed task, its owner, and its state.
 
 Each tool documents itself and its arguments in `tools/list` so an agent calls it
 right the first time. A tool failure comes back as an `isError` result the agent

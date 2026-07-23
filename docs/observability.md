@@ -42,6 +42,8 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   and the General's control gestures (paused, resumed, stood_down; issue #41).
 - `activity` an agent's own work, parsed from its stream-json (turn boundaries,
   tool calls, text output).
+- `ledger` a change to the shared work ledger: a role claiming a task or moving it
+  to `in_progress`, `blocked`, or `done` (issue #45).
 
 ## The views
 
@@ -136,6 +138,27 @@ a role dead when its turn crashes or hangs (a `died` event) and, within the reco
 budget, revives it (a `recovered` event); it also records the diagnostic incident
 behind each death. So the stream and the live count reflect lazy start, idle-stop,
 restart, and death-and-recovery with no separate signal.
+
+## Work ledger
+
+The **work ledger** keeps two roles from grabbing the same work or editing the same
+file blind (issue #45). It is another projection of the stream, like the roster: a
+role claims a task before it starts, and the broker records who holds what.
+
+`POST /ledger` (body `{task, owner, state?, title?}`) claims a task or moves a claim
+forward. The `task` is a stable key the crew agrees on (a path, a feature, an order's
+title). The broker is the authority: it serializes claims under one lock and refuses a
+claim on a task another role already holds (`409`, naming the holder), so a conflict is
+surfaced rather than raced. A task is **held** while `claimed`, `in_progress`, or
+`blocked`; `done` frees it, so a finished task may be claimed again. Only the owner may
+move its own task. `GET /ledger` reads the live ownership, sorted by key.
+
+Every change also rides the stream as a `ledger` event (from the owner, to `all-units`,
+filterable with `history?kind=ledger`), so the ledger is reconstructable from the log
+and the cockpit can render it. Agents use the ledger through `crew_claim` and
+`crew_ledger` (or the CLI shim `crew claim` / `crew ledger`); every role card tells a
+role to claim before it touches shared work. The live ledger lives in the broker; like
+the pause state, rebuilding it from the durable log on a restart is a later refinement.
 
 ## Runewood
 

@@ -85,9 +85,9 @@ not a reimplementation of the agent.
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
   commander to command a specialist directly.
 - **Coordination robustness.** Parallel roles work in isolated git worktrees and
-  integrate through a deliberate step; a commander-maintained work ledger with
-  claims prevents collisions; lane ownership is enforced; nothing is done until an
-  adversarial gate fails to break it; the defibrillator also catches coordination
+  integrate through a deliberate step; a work ledger with claims prevents collisions
+  (`crew_claim` / `crew_ledger`, issue #45); lane ownership is enforced; nothing is done
+  until an adversarial gate fails to break it; the defibrillator also catches coordination
   stalls, not just dead agents.
 - **Team memory.** A shared decision board (agreed interfaces, decisions,
   gotchas) the crew reads and writes, distinct from the transient message stream;
@@ -124,8 +124,8 @@ The full design is in `docs/architecture.md`. In short:
   `crew pause` / `crew resume` / `crew standdown` brake and kill switch), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
-  `crew roster`) for a runtime without MCP, and `crew watch` to tail a role's
-  self-filtered inbox stream live.
+  `crew roster` / `crew claim` / `crew ledger`) for a runtime without MCP, and
+  `crew watch` to tail a role's self-filtered inbox stream live.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -384,8 +384,8 @@ exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` driv
 in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
-`crew inbox`, and `crew roster` let an agent on a runtime without MCP, such as Codex,
-coordinate through subcommands instead of tools. Each boots from the same role context
+`crew inbox`, `crew roster`, `crew claim`, and `crew ledger` let an agent on a runtime
+without MCP, such as Codex, coordinate through subcommands instead of tools. Each boots from the same role context
 the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`
 config) and reuses the same `crew_mcp::Broker` client, so a shim agent's I/O maps onto
 the broker identically to the MCP path: it registers on boot (appearing on the roster

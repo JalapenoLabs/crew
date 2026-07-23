@@ -83,8 +83,8 @@ it.
   (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
   the commander.
 - **Coordination Robustness.** Worktree-per-role isolation with an integrator, a
-  work ledger with claims, lane-ownership enforcement, an adversarial done-gate,
-  and coordination-stall detection.
+  work ledger with claims (issue #45, done), lane-ownership enforcement, an adversarial
+  done-gate, and coordination-stall detection.
 - **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
   the `crew top` terminal cockpit, and push notifications on the actionable
   moments.

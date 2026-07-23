@@ -10,7 +10,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{json, Value};
 
-use crate::broker::{Broker, InboxItem, RosterSnapshot, Standing};
+use crate::broker::{Broker, InboxItem, LedgerItem, RosterSnapshot, Standing};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -123,6 +123,16 @@ impl Server {
             }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
             "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
+            "crew_claim" => {
+                let task =
+                    str_arg(arguments, "task").ok_or("crew_claim requires a `task` to claim")?;
+                self.broker.claim(
+                    task,
+                    str_arg(arguments, "state").unwrap_or("claimed"),
+                    str_arg(arguments, "title").unwrap_or_default(),
+                )
+            }
+            "crew_ledger" => Ok(render_ledger(&self.broker.ledger()?)),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -204,6 +214,34 @@ fn tool_catalog() -> Value {
                 and whether it is working, idle, stopped, or dead. Use it to see who is on the \
                 team and what they own before sending or claiming work.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crew_claim",
+            "description": "Claim a piece of work before you start it, so no two roles touch \
+                the same work. `task` is a stable key the crew agrees on (a path, a feature, an \
+                order's title). If another role already holds it, this fails and names the \
+                holder: coordinate, do not race. Call it again with `state` to move your claim \
+                forward: `in_progress` when you start, `blocked` if you are stuck, and `done` \
+                when you finish (which frees the task). `title` is an optional human label.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "The work item's key (a path, feature, or order title)." },
+                    "state": {
+                        "type": "string",
+                        "enum": ["claimed", "in_progress", "blocked", "done"],
+                        "description": "The state to move it to; defaults to `claimed`."
+                    },
+                    "title": { "type": "string", "description": "An optional short label for the ledger." }
+                },
+                "required": ["task"]
+            }
+        },
+        {
+            "name": "crew_ledger",
+            "description": "Read the work ledger: every claimed task, who owns it, and its \
+                state. Check it before claiming, so you never grab work a teammate already holds.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
@@ -276,6 +314,25 @@ fn render_inbox(items: &[InboxItem]) -> String {
         })
         .collect();
     format!("{} new message(s):\n{}", items.len(), lines.join("\n"))
+}
+
+/// Renders the work ledger an agent reads.
+fn render_ledger(items: &[LedgerItem]) -> String {
+    if items.is_empty() {
+        return "The ledger is empty; no work is claimed.".to_owned();
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .map(|item| {
+            let title = if item.title.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", item.title)
+            };
+            format!("- {} [{}] {}{}", item.task, item.state, item.owner, title)
+        })
+        .collect();
+    format!("{} task(s):\n{}", items.len(), lines.join("\n"))
 }
 
 /// Renders the roster an agent reads.
@@ -393,7 +450,14 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["crew_send", "crew_order", "crew_inbox", "crew_roster"]
+            [
+                "crew_send",
+                "crew_order",
+                "crew_inbox",
+                "crew_roster",
+                "crew_claim",
+                "crew_ledger"
+            ]
         );
         // Each tool documents itself and its arguments.
         for tool in tools {

@@ -122,6 +122,43 @@ impl Broker {
         Ok(format!("ordered {to}: {title}"))
     }
 
+    /// Claims `task` for this role, or moves the role's claim to `state` (issue #45).
+    ///
+    /// A role claims before it starts and moves its claim to `done` when it finishes.
+    /// The broker refuses a claim on work another role already holds; the returned
+    /// error names the holder, so a conflict is surfaced rather than raced. An empty
+    /// `title` keeps the task's current title.
+    ///
+    /// # Errors
+    /// Returns a message if another role holds the task, or the broker cannot be reached.
+    pub fn claim(&self, task: &str, state: &str, title: &str) -> Result<String, String> {
+        let url = format!("{}/ledger", self.base);
+        let payload = json!({
+            "task": task,
+            "owner": self.role.as_str(),
+            "state": state,
+            "title": title,
+        });
+        match self
+            .agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&payload.to_string())
+        {
+            Ok(_) => Ok(format!("{state}: {task}")),
+            Err(err) => Err(self.explain(err)),
+        }
+    }
+
+    /// Reads the work ledger: every claimed task, its owner, and its state.
+    ///
+    /// # Errors
+    /// Returns a message if the broker cannot be reached or its response is malformed.
+    pub fn ledger(&self) -> Result<Vec<LedgerItem>, String> {
+        let view: LedgerView = self.get("/ledger")?;
+        Ok(view.tasks)
+    }
+
     /// Posts `payload` to `channel`, returning `sent to {channel}` or a broker error.
     fn post_message(&self, channel: &str, payload: &Value) -> Result<String, String> {
         let url = format!("{}/channels/{channel}/messages", self.base);
@@ -282,6 +319,25 @@ pub struct InboxItem {
     /// Whether this is a General directive (a `redirect` or `belay`) the role must
     /// honor at once, so the inbox render can flag it (see `docs/communication.md`).
     pub directive: bool,
+}
+
+/// One task in the work ledger from `GET /ledger` (issue #45).
+#[derive(Debug, Deserialize)]
+pub struct LedgerItem {
+    /// The task's key.
+    pub task: String,
+    /// A short human title, or empty.
+    pub title: String,
+    /// The role that owns the claim.
+    pub owner: String,
+    /// The task's state: `claimed`, `in_progress`, `blocked`, or `done`.
+    pub state: String,
+}
+
+/// The shape of `GET /ledger`.
+#[derive(Debug, Deserialize)]
+struct LedgerView {
+    tasks: Vec<LedgerItem>,
 }
 
 /// One roster entry from `GET /roster`.

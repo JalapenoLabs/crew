@@ -198,6 +198,15 @@ impl RoleCard {
 
         out.push('\n');
         out.push_str(
+            "Claim work before you touch it: call crew_claim with a stable key (a path, a \
+             feature, an order's title) so two roles never edit the same thing blind. If the \
+             claim is refused, a teammate holds it: coordinate, do not race. Move your claim to \
+             in_progress when you start, blocked if you are stuck, and done when you finish. \
+             Check crew_ledger to see who holds what.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
             "A redirect or belay in your inbox is a command from the General: honor it at your \
              very next tool boundary, not when your current step finishes. A redirect steers you: \
              keep your task and adjust course. A belay overrides you: stop your current work and \
@@ -436,6 +445,10 @@ mod tests {
         assert!(
             briefing.contains("paused") && briefing.contains("pull no new work"),
             "tells the role to honor a pause"
+        );
+        assert!(
+            briefing.contains("crew_claim") && briefing.contains("before you touch it"),
+            "tells the role to claim work before starting"
         );
     }
 

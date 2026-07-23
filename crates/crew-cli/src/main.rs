@@ -6,7 +6,8 @@
 //!   (issue #26), and gates its work with `crew pause` / `crew resume` / `crew standdown`
 //!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
-//!   `crew register`, `crew send`, `crew inbox`, and `crew roster` act as the role the
+//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew claim`, and
+//!   `crew ledger` act as the role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
 //!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
 //!   stream live, so a peer sees a teammate's messages without polling and never its
@@ -124,6 +125,19 @@ enum Command {
     },
     /// List the unit's roster: every role, its lane, and its liveness.
     Roster,
+    /// Claim a task on the work ledger, or move this role's claim to a new state.
+    Claim {
+        /// The task key to claim (a path, a feature, or an order's title).
+        task: String,
+        /// The state to move it to: `claimed`, `in_progress`, `blocked`, or `done`.
+        #[arg(long, default_value = "claimed")]
+        state: String,
+        /// An optional short label for the ledger.
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Show the work ledger: every claimed task, its owner, and its state.
+    Ledger,
 }
 
 fn main() -> Result<()> {
@@ -150,5 +164,9 @@ fn main() -> Result<()> {
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
         Command::Roster => shim::roster(),
+        Command::Claim { task, state, title } => {
+            shim::claim(&task, &state, title.as_deref().unwrap_or_default())
+        }
+        Command::Ledger => shim::ledger(),
     }
 }

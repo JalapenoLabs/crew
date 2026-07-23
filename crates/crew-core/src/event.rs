@@ -146,6 +146,8 @@ pub enum EventKind {
     Lifecycle(Lifecycle),
     /// An agent's own work, parsed from its `claude -p` stream-json.
     Activity(Activity),
+    /// A change to the shared work ledger: a role claiming or updating work (issue #45).
+    Ledger(LedgerEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -288,6 +290,66 @@ pub enum Activity {
         /// The output text.
         text: String,
     },
+}
+
+/// A change to the shared work ledger: a role claiming a piece of work or moving it to
+/// a new state (issue #45).
+///
+/// The ledger keeps two roles from grabbing the same work: a role claims before it
+/// starts and moves the claim to `done` when it finishes. The broker enforces one owner
+/// per task, and every change rides the event stream, so the ledger is a projection of
+/// it (see `docs/observability.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerEvent {
+    /// The work item's key: a stable identifier the crew agrees on, such as a path, a
+    /// feature name, or an order's title. Two roles must not hold the same key at once.
+    pub task: String,
+    /// The role that owns the claim.
+    pub owner: RoleId,
+    /// The state the work moved to.
+    pub state: TaskState,
+    /// A short human title for the ledger view; may be empty.
+    #[serde(default)]
+    pub title: String,
+}
+
+/// The state of a claimed piece of work in the ledger (issue #45).
+///
+/// A task is **held** while [`Claimed`](Self::Claimed), [`InProgress`](Self::InProgress),
+/// or [`Blocked`](Self::Blocked): another role's claim is refused. [`Done`](Self::Done)
+/// frees it, so a finished task no longer blocks a new claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    /// A role has claimed the work but not started it.
+    Claimed,
+    /// The owner is working on it.
+    InProgress,
+    /// The owner is blocked and cannot proceed.
+    Blocked,
+    /// The work is finished; the claim is released.
+    Done,
+}
+
+impl TaskState {
+    /// Whether a task in this state is still held, so another role's claim is refused.
+    ///
+    /// Every state but [`Done`](Self::Done) holds the claim.
+    #[must_use]
+    pub fn is_held(self) -> bool {
+        !matches!(self, Self::Done)
+    }
+
+    /// The state's stable label, matching its serialized name.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -27,6 +27,7 @@ mod error;
 mod events;
 mod history;
 mod inbox;
+mod ledger;
 mod roster;
 mod router;
 mod secrets;
