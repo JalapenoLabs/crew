@@ -225,6 +225,15 @@ shrinks to). One loader serves both paths: `crew_supervisor::provision` writes a
 role's card and returns the `CREW_ROLE_CARD` environment plus its briefing, and the
 `crew-mcp` binary reads the same card to boot and register. See `docs/roles.md`.
 
+`crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
+crew tools with no per-task approval (issue #20), the way Seraphim registers the
+Playwright MCP. `locate_server` finds the `crew-mcp` binary (a build/boot check that
+fails loudly if it is missing) and `register_server` records it at user scope
+(`claude mcp add -s user crew -- <path>`, idempotent via remove-then-add), so a
+`claude -p --permission-mode bypassPermissions` turn (`agent_turn_argv`) loads it
+silently. Registration is one-time and unit-wide: per-agent role and broker ride the
+`CREW_ROLE_CARD` environment the `crew-mcp` child inherits.
+
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
