@@ -27,6 +27,7 @@ mimalloc.workspace = true
 # The service: async runtime, HTTP framework, and serde for the event wire types.
 tokio.workspace = true
 axum.workspace = true
+tokio-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

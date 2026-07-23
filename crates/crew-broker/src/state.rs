@@ -2,15 +2,29 @@
 
 use std::sync::Arc;
 
+use crew_core::Event;
+use tokio::sync::broadcast;
+
 use crate::config::Config;
 use crate::router::ChannelRouter;
+use crate::secrets::Scrubber;
 use crate::store::{MemoryStore, Storage};
+
+/// How many events a subscriber may fall behind before the broker drops the oldest
+/// for it. Large enough to absorb a brief burst while a reader reconnects; a lagged
+/// subscriber skips the gap rather than stalling the broker (see the `/stream`
+/// handler). Raising it trades memory for a longer tolerated stall.
+const BROADCAST_CAPACITY: usize = 256;
 
 /// The shared state every request handler sees.
 ///
-/// Cheap to clone (each field is behind an [`Arc`]), which axum requires since it
-/// clones the state per request. It wires the [`Config`], the [`Storage`] backend,
-/// and the [`ChannelRouter`] together so handlers read them without global state.
+/// Cheap to clone (each field is an [`Arc`] or a broadcast [`Sender`], which shares
+/// its channel on clone), which axum requires since it clones the state per request.
+/// It wires the [`Config`], the [`Storage`] backend, the [`ChannelRouter`], the
+/// secret [`Scrubber`], and the fan-out channel together so handlers read them
+/// without global state.
+///
+/// [`Sender`]: broadcast::Sender
 #[derive(Debug, Clone)]
 pub struct AppState {
     /// The runtime configuration.
@@ -19,16 +33,27 @@ pub struct AppState {
     pub storage: Arc<dyn Storage>,
     /// The channel router.
     pub router: Arc<ChannelRouter>,
+    /// Masks configured secret values out of every event before it is stored or streamed.
+    pub scrubber: Arc<Scrubber>,
+    /// The fan-out channel a `POST` publishes to and every subscriber stream reads.
+    pub broadcast: broadcast::Sender<Event>,
 }
 
 impl AppState {
     /// Builds the application state with the default in-memory storage backend.
+    ///
+    /// Builds the secret [`Scrubber`] once from [`Config::secrets`] and opens the
+    /// fan-out channel; both are shared across every request.
     #[must_use]
     pub fn new(config: Config) -> Self {
+        let scrubber = Scrubber::new(config.secrets.iter().cloned());
+        let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             config: Arc::new(config),
             storage: Arc::new(MemoryStore::default()),
             router: Arc::new(ChannelRouter),
+            scrubber: Arc::new(scrubber),
+            broadcast,
         }
     }
 }
