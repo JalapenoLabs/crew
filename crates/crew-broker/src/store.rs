@@ -208,6 +208,9 @@ pub struct EventFilter {
     pub channel: Option<ChannelId>,
     /// Keep only events sent by this role.
     pub role: Option<RoleId>,
+    /// Keep only events on this role's activity timeline: the ones it sent (messages,
+    /// its lifecycle, its activity) plus the messages addressed to it (issue #30).
+    pub agent: Option<RoleId>,
     /// Keep only events of this kind.
     pub kind: Option<EventKindTag>,
     /// Keep only events belonging to this task.
@@ -231,6 +234,11 @@ impl EventFilter {
         }
         if let Some(role) = &self.role {
             if !matches!(&event.from, Sender::Role(from) if from == role) {
+                return false;
+            }
+        }
+        if let Some(agent) = &self.agent {
+            if !event.in_timeline_of(agent) {
                 return false;
             }
         }

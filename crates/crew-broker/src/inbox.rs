@@ -1,11 +1,20 @@
-//! The inbox endpoint: a role's live, self-filtered event stream.
+//! A role's live event streams over Server-Sent Events: its inbox, and its timeline.
 //!
-//! `GET /inbox?role=<role>` delivers the events addressed to a role over
-//! Server-Sent Events: its direct `@role` channel, any pair channel it belongs to,
-//! and `all-units`. The role's own messages are filtered out at the source, so the
-//! old tail self-echo hack is gone by construction, not by convention. Each event
-//! carries its log sequence as the SSE `id`, so a reconnecting client resumes from
-//! its `Last-Event-ID` without loss.
+//! `GET /inbox?role=<role>` delivers the events **addressed to** a role: its direct
+//! `@role` channel, any pair channel it belongs to, and `all-units`. The role's own
+//! messages are filtered out at the source, so the old tail self-echo hack is gone by
+//! construction, not by convention. This is the delivery stream: what a role must act
+//! on.
+//!
+//! `GET /activity?agent=<role>` delivers the role's full **activity timeline** (issue
+//! #30): what it sent (messages, its lifecycle, its activity) plus what it received.
+//! Unlike the inbox it is not self-filtered, since a timeline is what the role does as
+//! well as what reaches it. It is the live counterpart of `GET /history?agent=<role>`.
+//!
+//! Both share one SSE engine ([`role_stream`]) parameterized by a per-event predicate,
+//! so the replay-from-`Last-Event-ID` and live-tail machinery is written once. Each
+//! event carries its log sequence as the SSE `id`, so a reconnecting client resumes
+//! without loss.
 //!
 //! The channel-naming model here is the minimal resolution the inbox needs; issue
 //! #11 owns the canonical channel model and membership.
@@ -28,9 +37,11 @@ use crate::state::{AppState, Sequenced};
 /// The channel that reaches every live role (see `docs/communication.md`).
 const ALL_UNITS: &str = "all-units";
 
-/// The inbox route: `GET /inbox?role=<role>` (subscribe to a role's event stream).
+/// The per-role stream routes: the self-filtered inbox and the full activity timeline.
 pub(crate) fn routes() -> Router<AppState> {
-    Router::new().route("/inbox", get(inbox))
+    Router::new()
+        .route("/inbox", get(inbox))
+        .route("/activity", get(activity))
 }
 
 /// The query of `GET /inbox`: which role's inbox to stream.
@@ -39,6 +50,16 @@ struct InboxQuery {
     /// The role whose inbox to subscribe to.
     role: Option<String>,
 }
+
+/// The query of `GET /activity`: which role's activity timeline to stream.
+#[derive(Debug, Deserialize)]
+struct ActivityQuery {
+    /// The role whose timeline to subscribe to.
+    agent: Option<String>,
+}
+
+/// A per-event predicate deciding whether a role's stream keeps an event.
+type Keep = fn(&Event, &RoleId) -> bool;
 
 /// `GET /inbox?role=<role>`: stream the events addressed to a role over SSE.
 ///
@@ -56,31 +77,66 @@ async fn inbox(
     headers: HeaderMap,
     Query(query): Query<InboxQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let role = query.role.unwrap_or_default();
-    let role = role.trim();
-    if role.is_empty() {
-        return Err(ApiError::bad_request(
-            "the `role` query parameter is required",
-        ));
-    }
-    let role = RoleId::new(role);
+    let role = require_role(query.role.as_deref(), "role")?;
+    Ok(role_stream(&state, &headers, role, event_reaches_role))
+}
 
-    // Subscribe before snapshotting the log, so an event appended while we read the
-    // backlog is buffered on the receiver and delivered live rather than missed.
+/// `GET /activity?agent=<role>`: stream a role's full activity timeline over SSE.
+///
+/// Delivers the role's own events (messages it sent, its lifecycle, its activity) and
+/// the messages addressed to it. Unlike the inbox it is not self-filtered, since a
+/// timeline is what the role does as well as what reaches it. It resumes from
+/// `Last-Event-ID` and starts a fresh connection at the live tail, exactly as the
+/// inbox does. This is the live counterpart of `GET /history?agent=<role>`.
+///
+/// # Errors
+/// Returns a 400 [`ApiError`] if the `agent` query parameter is missing or empty.
+async fn activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ActivityQuery>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let role = require_role(query.agent.as_deref(), "agent")?;
+    Ok(role_stream(&state, &headers, role, Event::in_timeline_of))
+}
+
+/// Validates the required role-naming query parameter, rejecting a missing or blank one.
+fn require_role(value: Option<&str>, param: &str) -> Result<RoleId, ApiError> {
+    let role = value.unwrap_or_default().trim();
+    if role.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "the `{param}` query parameter is required"
+        )));
+    }
+    Ok(RoleId::new(role))
+}
+
+/// The shared per-role SSE engine: replay the matching backlog, then stream live.
+///
+/// Subscribes before snapshotting the log, so an event appended while the backlog is
+/// read is buffered on the receiver and delivered live rather than missed. `keep`
+/// decides which events reach this role's stream, so the inbox and the activity
+/// timeline share one replay-and-live implementation.
+fn role_stream(
+    state: &AppState,
+    headers: &HeaderMap,
+    role: RoleId,
+    keep: Keep,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = state.broadcast.subscribe();
     let backlog = state.storage.events();
     let live_from = backlog.len() as u64;
 
     // A reconnect resumes right after its last delivered event; a fresh connection
     // (no cursor) starts at the live tail.
-    let resume_from = last_event_id(&headers).map_or(live_from, |id| id + 1);
+    let resume_from = last_event_id(headers).map_or(live_from, |id| id + 1);
 
     let replay: Vec<Result<SseEvent, Infallible>> = backlog
         .into_iter()
         .enumerate()
         .filter_map(|(index, event)| {
             let seq = index as u64;
-            if seq >= resume_from && event_reaches_role(&event, &role) {
+            if seq >= resume_from && keep(&event, &role) {
                 to_sse(seq, &event).map(Ok)
             } else {
                 None
@@ -94,7 +150,7 @@ async fn inbox(
             return None;
         };
         // Only events after the snapshot; earlier ones are already in `replay`.
-        if seq >= live_from && event_reaches_role(&event, &role) {
+        if seq >= live_from && keep(&event, &role) {
             to_sse(seq, &event).map(Ok)
         } else {
             None
@@ -102,7 +158,7 @@ async fn inbox(
     });
 
     let stream = tokio_stream::iter(replay).chain(live);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Parses the `Last-Event-ID` reconnect cursor from the request headers.
@@ -277,6 +333,15 @@ mod tests {
             .unwrap()
     }
 
+    /// Opens `role`'s activity timeline stream (`GET /activity?agent=<role>`).
+    async fn open_activity(state: &AppState, role: &str) -> axum::response::Response {
+        let request = Request::builder()
+            .uri(format!("/activity?agent={role}"))
+            .body(Body::empty())
+            .unwrap();
+        api::build(state.clone()).oneshot(request).await.unwrap()
+    }
+
     /// Reads up to `want` Server-Sent Events `(id, data)` from a body, giving up
     /// after a short budget since the live tail never closes the stream.
     async fn read_events(body: Body, want: usize) -> Vec<(u64, Value)> {
@@ -352,6 +417,55 @@ mod tests {
         );
         assert_eq!(body_of(&events[0].1), "hello");
         assert_eq!(body_of(&events[1].1), "direct");
+    }
+
+    #[tokio::test]
+    async fn the_activity_stream_carries_the_role_s_own_and_received_events() {
+        let state = AppState::new(Config::default());
+
+        // A fresh connection starts at the live tail, so it sees only events posted
+        // after it opens. Unlike the inbox, the timeline keeps the role's own message.
+        let activity = open_activity(&state, "backend").await;
+        assert_eq!(activity.status(), StatusCode::OK);
+        assert_eq!(
+            activity
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream"),
+        );
+        let body = activity.into_body();
+
+        post(&state, "backend", "all-units", "i am working").await; // seq 0, its own
+        post(&state, "frontend", "@backend", "please build").await; // seq 1, received
+        post(&state, "frontend", "@qa", "not yours").await; // seq 2, not addressed to it
+
+        let events = read_events(body, 2).await;
+        let ids: Vec<u64> = events.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1],
+            "its own message is kept (not self-filtered) and a peer's private one is not",
+        );
+        assert_eq!(body_of(&events[0].1), "i am working");
+        assert_eq!(body_of(&events[1].1), "please build");
+    }
+
+    #[tokio::test]
+    async fn an_activity_stream_without_an_agent_is_a_typed_400() {
+        let state = AppState::new(Config::default());
+        for uri in ["/activity", "/activity?agent=", "/activity?agent=%20"] {
+            let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let response = api::build(state.clone()).oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} should be 400"
+            );
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(value.get("error").is_some(), "typed error body for {uri}");
+        }
     }
 
     #[tokio::test]
