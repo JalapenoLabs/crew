@@ -283,7 +283,8 @@ mod tests {
             ),
             (
                 "@backend",
-                json!({ "from": backend, "kind": "answer", "body": "a" }),
+                json!({ "from": backend, "kind": "answer",
+                    "in_reply_to": "11111111-1111-1111-1111-111111111111", "body": "a" }),
             ),
             (
                 "all-units",
