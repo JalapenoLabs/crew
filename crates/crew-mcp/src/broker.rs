@@ -104,6 +104,31 @@ impl Broker {
         Ok(new)
     }
 
+    /// Registers this role on the roster with the lane it owns, so the unit sees it.
+    ///
+    /// This is how a role reaches the broker at boot: it announces itself and its
+    /// owned paths, publishing a `lifecycle` event to the unit. Registering again
+    /// updates the owned paths and marks the role working, so a restart is safe.
+    ///
+    /// # Errors
+    /// Returns a message if the broker rejects the registration or cannot be reached.
+    pub fn register(&self, owned_paths: &[String]) -> Result<(), String> {
+        let url = format!("{}/roster", self.base);
+        let payload = json!({
+            "role": self.role.as_str(),
+            "owned_paths": owned_paths,
+        });
+        match self
+            .agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&payload.to_string())
+        {
+            Ok(_) => Ok(()),
+            Err(err) => Err(self.explain(err)),
+        }
+    }
+
     /// Lists the roster: every registered role with its owned paths and liveness.
     ///
     /// # Errors

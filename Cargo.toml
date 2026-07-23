@@ -29,6 +29,8 @@ mimalloc = "0.1"
 # Serialization for the wire types, timestamps, and unique identifiers.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The role-card format: a thin, human-authored TOML bootstrap document.
+toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Structured logging (M-LOG-STRUCTURED): `tracing` is the emit-side facade any

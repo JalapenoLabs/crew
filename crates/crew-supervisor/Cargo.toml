@@ -12,4 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+# The shared role-card format and loader (issue #18), and eyre for the I/O the
+# provisioner performs when it writes a card for a spawned agent (M-APP-ERROR).
 crew-core.workspace = true
+eyre.workspace = true
