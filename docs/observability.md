@@ -64,7 +64,11 @@ stream filtered to one `role`.
 
 The whole unit's combined stream, ordered by time and filterable by role,
 channel, or kind. This is the "what is happening across the team right now" view,
-structured rather than a firehose.
+structured rather than a firehose. The broker serves it as `GET /history` (issue
+#12): filters (`channel`, `role`, `kind`, `task`, `since`), deterministic ordering
+by `ts` then log position, and cursor pagination that stays stable under concurrent
+writes, so a consumer or a late joiner reads the past without holding the stream
+open. A `summary=true` rolling compaction is reserved for Phase 2.
 
 ## Live agent count and roster
 

@@ -176,14 +176,18 @@ vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
-`crewd` (the broker, issues #7, #8, #9 and #11)
+`crewd` (the broker, issues #7, #8, #9, #11 and #12)
 starts on loopback, serves `GET /health`, and shuts down gracefully. It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
 reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
 `ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
 masks configured secret values out of the event, persists it, and fans it to every
-subscriber on the `GET /stream` SSE feed. Its `ChannelRouter` resolves a channel to
+subscriber on the `GET /stream` SSE feed. `GET /history` reads past events filtered
+by `channel`, `role`, `kind`, `task`, and `since`, ordered by `ts` then log
+position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
+under concurrent writes; `summary=true` is reserved (a `501` hook) for the Phase 2
+compaction (issue #12). Its `ChannelRouter` resolves a channel to
 the roles it reaches (issue #11), filtering a supplied roster through the `Channel`
 membership test. The live roster that feeds routing, the self-filtered per-role
 streams, and the rolling-summary history are still scaffolds waiting for the phased
