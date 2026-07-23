@@ -96,10 +96,13 @@ it.
   push notifications on the actionable moments (`crew notify`, issue #52, done: a native
   notification when a question is asked, a role dies, or the crew stands down, configurable
   per moment and quiet on routine chatter, over the same event stream).
-- **Economy.** Model per role; a shared token budget with per-role caps (issue #54, done: a
-  crew-wide `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the
-  crew at a cap and surfaced as a `budget` event over the stream, with the live token feed
-  awaiting the stream-json activity parser, issue #24); auto-idle on quiet with cost and
+- **Economy.** Model per role (`ModelTier` plus a per-crew tier map and a sensible
+  default mapping by role, issue #53, done: strong for the lead and architect, cheap for
+  docs / ci / lint / test, standard for the builders, retunable in config with no code
+  change); a shared token budget with per-role caps (issue #54, done: a crew-wide
+  `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the crew at a
+  cap and surfaced as a `budget` event over the stream, with the live token feed awaiting
+  the stream-json activity parser, issue #24); auto-idle on quiet with cost and
   token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role, and a
   `GET /stats` rollup folds per-turn `telemetry` events and the roles' `lifecycle` events
   into tokens, cost, and working time per role and in aggregate, feeding the cockpit and the

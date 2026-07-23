@@ -29,6 +29,7 @@ mod config;
 mod event;
 mod id;
 mod lane;
+mod model;
 mod time;
 
 pub use budget::{Budget, BudgetScope, Spend};
@@ -42,4 +43,5 @@ pub use event::{
 };
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use lane::path_in_lane;
+pub use model::{default_tier_for, ModelTier, ModelTiers};
 pub use time::Timestamp;

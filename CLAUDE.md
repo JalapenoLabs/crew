@@ -107,17 +107,19 @@ not a reimplementation of the agent.
   an idle-stop or a restart. A new role boots from a bounded briefing packet
   (`crew_briefing`, issue #50: role card plus the board plus a lane-scoped rolling summary,
   size-capped), never the raw log, so it joins mid-mission and acts in its lane in seconds.
-- **Economy.** Model per role (strong for the commander and architect, cheap for
-  mechanical roles); a shared token budget with per-role caps (issue #54, done: a crew-wide
-  `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the crew at a
-  cap and surfaced as a `budget` event, never a silent overrun); auto-idle on quiet with
-  cost and token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role,
-  and per-turn `telemetry` events plus the roles' `lifecycle` events feed a `GET /stats`
-  rollup of tokens, cost, and working time per role and in aggregate); and subscription
-  usage awareness (issue #56, done: one shared usage gauge across the crew auto-pauses new
-  work when a reading crosses `CREW_BROKER_USAGE_THRESHOLD`, lifts lazily at the window
-  reset, and lets the operator resume early with `crew resume`, distinct from the manual
-  pause).
+- **Economy.** Model per role (issue #53, done: a `strong` / `standard` / `cheap` tier
+  per role over a per-crew tier map, with a sensible default mapping by name, strong for
+  the commander and architect, cheap for mechanical roles, standard for the builders, so
+  changing the mapping changes spend with no code change); a shared token budget with
+  per-role caps (issue #54, done: a crew-wide `token_budget` and per-role `token_cap`,
+  enforced by idle-stopping a role or the crew at a cap and surfaced as a `budget` event,
+  never a silent overrun); auto-idle on quiet with cost and token telemetry (issue #55,
+  done: the lifecycle machine idle-stops a quiet role, and per-turn `telemetry` events plus
+  the roles' `lifecycle` events feed a `GET /stats` rollup of tokens, cost, and working time
+  per role and in aggregate); and subscription usage awareness (issue #56, done: one shared
+  usage gauge across the crew auto-pauses new work when a reading crosses
+  `CREW_BROKER_USAGE_THRESHOLD`, lifts lazily at the window reset, and lets the operator
+  resume early with `crew resume`, distinct from the manual pause).
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -357,7 +359,7 @@ commander everywhere. `to_cards` stamps every card with the config's commander. 
 
 `crew-core` also carries the crew config (issue #25): `CrewConfig` is the declarative
 description `crew up` reads, a TOML document naming the roles and the lane each owns,
-the model (a crew default with per-role overrides), the repos in scope, the idle-stop
+the model tier each runs (issue #53), the repos in scope, the idle-stop
 timeout, and the commander. `from_toml` resolves the defaults (an omitted `roles`
 yields the default crew: commander, backend, frontend, qa) and validates the whole,
 so a documented config produces a valid crew and an invalid one fails with a precise
@@ -365,6 +367,19 @@ so a documented config produces a valid crew and an invalid one fails with a pre
 empty role, or a typo'd field). `to_cards(&broker)` produces the per-role `RoleCard`s
 the supervisor spawns, and `model_for(role)` resolves the spawn model. See
 `docs/config.md`.
+
+Model per role spends strong-model budget where it matters and a cheap model everywhere
+else (issue #53, `crew_core::model`). A role runs a **model tier** (`strong` / `standard`
+/ `cheap`, `ModelTier`), an intent rather than an exact build; `ModelTiers` maps each tier
+to a concrete alias, defaulting to `opus` / `sonnet` / `haiku` and overridable per crew in
+the config `[models]` table, so retuning spend is a config change, not a code change.
+`default_tier_for(role)` gives every role a sensible default tier by name (the lead and
+architect strong, docs / ci / lint / test cheap, the builders standard), so the default
+crew already spends well with no model config. `model_for(role)` resolves most-specific-
+first: a role's exact `model`, else its explicit `tier`, else a crew-wide `model`
+override, else the default tier for its name, always through the crew's tier map. The
+supervisor spawns each role with the resolved alias via `--model` (unchanged), so changing
+the mapping changes spend with no code change. See `docs/config.md` (model per role).
 
 Lane-ownership enforcement makes those owned paths a checked boundary (issue #46). The
 config carries a crew-wide `lane_enforcement` policy (`warn` the default, `block`, or
