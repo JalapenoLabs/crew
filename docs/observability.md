@@ -47,6 +47,8 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
 - `verification` a step through the adversarial done-gate (issue #47): the task, its
   owner, the independent verifier (once one judges it), and the verdict (submitted,
   passed, or failed) with the acceptance claimed or the specific failure.
+- `board` a change to the shared situation board (issue #49): an entry recorded or
+  retracted, with its key, section (decision / interface / gotcha), author, and content.
 
 ## The views
 
@@ -121,6 +123,23 @@ handback to the owner's inbox, so the rework routes back through the normal mess
 The gate is enforced at the broker: `POST /gate/verdict` refuses a verdict from the task's
 own owner (409) and one on a task that is not awaiting a verdict, so confident-but-wrong
 work cannot slip through. See `docs/roles.md` (the done-gate).
+
+### The situation board
+
+The shared situation board is the crew's durable memory (issue #49): agreed interfaces,
+decisions and their rationale, and known gotchas, distinct from the transient message
+stream so the crew stops re-deriving and re-litigating what is settled. A role records or
+retracts an entry with `crew_record` (`POST /board`) and reads the board with `crew_board`
+(`GET /board`, filterable by section); the whole crew reads and writes it, and the
+commander curates it.
+
+Every change is a `board` event (to `all-units`), so the board is auditable on `/stream`,
+in `crew watch`, and via `GET /history?kind=board`. The board itself is a **projection of
+those events**: the broker rebuilds it from the durable log on startup, so a decision
+recorded before an idle-stop or a broker restart is still on the board after it. Unlike
+the pause control and the done-gate, which are in-memory and reset on a broker restart, the
+board survives one because it reads back from the log (see `docs/communication.md`, context
+management).
 
 ## Live agent count and roster
 

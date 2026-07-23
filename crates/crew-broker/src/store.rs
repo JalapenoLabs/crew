@@ -180,6 +180,8 @@ pub enum EventKindTag {
     Boundary,
     /// A done-gate step: a submission or a verdict (issue #47).
     Verification,
+    /// A change to the shared situation board (issue #49).
+    Board,
 }
 
 impl EventKindTag {
@@ -192,6 +194,7 @@ impl EventKindTag {
             "activity" => Some(Self::Activity),
             "boundary" => Some(Self::Boundary),
             "verification" => Some(Self::Verification),
+            "board" => Some(Self::Board),
             _ => None,
         }
     }
@@ -205,6 +208,7 @@ impl EventKindTag {
                 | (Self::Activity, EventKind::Activity(_))
                 | (Self::Boundary, EventKind::Boundary(_))
                 | (Self::Verification, EventKind::Verification(_))
+                | (Self::Board, EventKind::Board(_))
         )
     }
 }

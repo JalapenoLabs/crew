@@ -20,7 +20,9 @@ use std::path::PathBuf;
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV};
-use crew_substrate::mcp::{Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing};
+use crew_substrate::mcp::{
+    BoardSnapshot, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing,
+};
 use eyre::{eyre, Result, WrapErr};
 
 /// The resolved agent context a shim command acts as: its broker, role, and lane.
@@ -171,6 +173,44 @@ pub fn gate() -> Result<()> {
     Ok(())
 }
 
+/// Records or retracts a shared situation board entry (issue #49).
+///
+/// Mirrors `crew_record`: records a `decision`, `interface`, or `gotcha` under `key`, or,
+/// with `retract`, removes the entry. The commander curates the board.
+///
+/// # Errors
+/// Returns an error if no role context is set, a required field is missing, a retraction
+/// names a missing entry, or the broker cannot be reached.
+pub fn record(key: &str, section: Option<&str>, body: Option<&str>, retract: bool) -> Result<()> {
+    let agent = load_agent()?;
+    let broker = agent.broker();
+    let confirmation = if retract {
+        broker.retract(key)
+    } else {
+        let section = section
+            .ok_or_else(|| eyre!("recording needs --section (decision, interface, or gotcha)"))?;
+        let body = body.ok_or_else(|| eyre!("recording needs --body (the content)"))?;
+        broker.record(key, section, body)
+    }
+    .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Prints the shared situation board: the crew's durable memory (issue #49).
+///
+/// # Errors
+/// Returns an error if no role context is set, or the broker cannot be reached.
+pub fn board(section: Option<&str>) -> Result<()> {
+    let agent = load_agent()?;
+    let snapshot = agent
+        .broker()
+        .board(section)
+        .map_err(|reason| eyre!("{reason}"))?;
+    print_board(&snapshot);
+    Ok(())
+}
+
 /// Resolves the agent context from the environment, the way the `crew-mcp` binary does.
 ///
 /// Prefers the role card at [`ROLE_CARD_ENV`], which carries the role, its lane, and
@@ -287,5 +327,33 @@ fn print_gate(snapshot: &GateSnapshot) {
             "- {} owned by {} [{}{}]{}",
             task.task, task.owner, task.verdict, verifier, detail
         );
+    }
+}
+
+/// Prints the situation board: each entry, its section, author, and content.
+fn print_board(snapshot: &BoardSnapshot) {
+    if snapshot.entries.is_empty() {
+        println!("The situation board is empty.");
+        return;
+    }
+    println!(
+        "{} board entr{}:",
+        snapshot.entries.len(),
+        plural(snapshot.entries.len())
+    );
+    for entry in &snapshot.entries {
+        println!(
+            "- [{}] {} (by {}): {}",
+            entry.section, entry.key, entry.author, entry.body
+        );
+    }
+}
+
+/// The suffix for `entr(y|ies)` given a count.
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        "y"
+    } else {
+        "ies"
     }
 }

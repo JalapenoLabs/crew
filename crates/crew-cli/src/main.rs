@@ -6,8 +6,9 @@
 //!   (issue #26), and gates its work with `crew pause` / `crew resume` / `crew standdown`
 //!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
-//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew lane`, and the
-//!   done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47) act as the
+//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew lane`, the
+//!   done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), and the
+//!   situation-board pair `crew board` / `crew record` (issue #49) act as the
 //!   role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
 //!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
@@ -155,6 +156,26 @@ enum Command {
     },
     /// Read the done-gate: tasks under verification and their standing.
     Gate,
+    /// Record or retract a shared situation board entry: a decision, interface, or gotcha.
+    Record {
+        /// The entry's stable key (its topic), for example `auth-strategy`.
+        key: String,
+        /// The section: `decision`, `interface`, or `gotcha` (required unless retracting).
+        #[arg(long, value_name = "SECTION")]
+        section: Option<String>,
+        /// The entry's content (required unless retracting).
+        #[arg(long, value_name = "TEXT")]
+        body: Option<String>,
+        /// Retract the entry named by `key` instead of recording one.
+        #[arg(long)]
+        retract: bool,
+    },
+    /// Read the shared situation board: the crew's durable memory.
+    Board {
+        /// Read just one section: `decision`, `interface`, or `gotcha`.
+        #[arg(long, value_name = "SECTION")]
+        section: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -193,5 +214,12 @@ fn main() -> Result<()> {
             failure,
         } => shim::verdict(&task, pass, failure.as_deref()),
         Command::Gate => shim::gate(),
+        Command::Record {
+            key,
+            section,
+            body,
+            retract,
+        } => shim::record(&key, section.as_deref(), body.as_deref(), retract),
+        Command::Board { section } => shim::board(section.as_deref()),
     }
 }

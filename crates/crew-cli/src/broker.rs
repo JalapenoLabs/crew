@@ -13,7 +13,8 @@ use std::io::{BufRead, BufReader};
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{
-    Activity, BrokerEndpoint, Event, EventKind, MessageKind, Sender, Verdict, VerificationEvent,
+    Activity, BoardEvent, BrokerEndpoint, Event, EventKind, MessageKind, Sender, Verdict,
+    VerificationEvent,
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -133,6 +134,27 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
             ),
         ),
         EventKind::Verification(verification) => ("verification", verification_body(verification)),
+        EventKind::Board(board) => ("board", board_body(board)),
+    }
+}
+
+/// A short description of a situation-board change (issue #49).
+fn board_body(board: &BoardEvent) -> String {
+    if board.retracted {
+        format!(
+            "{} retracted `{}` ({})",
+            board.author,
+            board.key,
+            board.section.label()
+        )
+    } else {
+        format!(
+            "{} recorded `{}` ({}): {}",
+            board.author,
+            board.key,
+            board.section.label(),
+            board.body
+        )
     }
 }
 

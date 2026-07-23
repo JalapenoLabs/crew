@@ -88,9 +88,10 @@ it.
   done), an adversarial done-gate (`crew_submit` / `crew_verdict` / `crew_gate`, issue
   #47, done), and coordination-stall detection (the defibrillator's fleet-wide stall
   monitor, issue #48, done).
-- **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
-  the `crew top` terminal cockpit, and push notifications on the actionable
-  moments.
+- **Team Memory + Cockpit.** A shared situation board (`crew_board` / `crew_record`,
+  issue #49, done: the crew's durable memory of decisions, interfaces, and gotchas,
+  rebuilt from the log across a restart), a new-role briefing packet, the `crew top`
+  terminal cockpit, and push notifications on the actionable moments.
 - **Economy.** Model per role, a shared token budget with per-role caps,
   auto-idle with cost telemetry, and subscription usage awareness.
 

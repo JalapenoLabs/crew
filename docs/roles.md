@@ -92,12 +92,29 @@ event on the stream, and `crew_gate` (or `GET /gate`) reads the live gate: each 
 verification, its owner, its verifier, and whether it is submitted, passed, or failed (see
 `docs/observability.md`).
 
+### The situation board
+
+The crew keeps a shared situation board (issue #49): its durable memory, distinct from the
+transient message stream. It holds agreed interfaces, decisions and their rationale, and
+known gotchas, so the crew stops re-deriving and re-litigating what is settled. The whole
+crew reads and writes it, and the commander curates it.
+
+A role reads the board with `crew_board` before it re-derives a settled decision, and
+records a new decision, interface, or gotcha with `crew_record` (keyed by a stable topic,
+so recording the same key updates the entry; `retract` removes one). Every change is a
+`board` event, so the board is auditable, and because the board is a projection of those
+durable events it survives an idle-stop or a broker restart: the broker rebuilds it from
+the log. See `docs/communication.md` (context management) and `docs/observability.md` (the
+situation board).
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface
   decisions, arbitration, and the interface to the General. It issues orders and
-  reports back; it does not write feature code. This is the agent the General
-  briefs.
+  reports back; it does not write feature code. It also curates the shared situation
+  board (issue #49), the crew's durable memory of decisions, interfaces, and gotchas that
+  the whole crew reads and writes (see the situation board below). This is the agent the
+  General briefs.
 - **backend** owns server code, the database, and migrations (for example
   `api/`).
 - **frontend** owns the UI (for example `frontend/`).

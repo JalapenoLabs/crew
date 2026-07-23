@@ -137,8 +137,8 @@ impl Event {
 ///
 /// `message` is inter-agent communication, `lifecycle` is a supervised state change,
 /// `activity` is an agent's own work parsed from its stream-json, `boundary` is a lane
-/// crossing (issue #46), and `verification` is a step through the adversarial done-gate
-/// (issue #47).
+/// crossing (issue #46), `verification` is a step through the adversarial done-gate
+/// (issue #47), and `board` is a change to the shared situation board (issue #49).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -152,6 +152,8 @@ pub enum EventKind {
     Boundary(BoundaryEvent),
     /// A step through the adversarial done-gate: a submission or a verdict (issue #47).
     Verification(VerificationEvent),
+    /// A change to the shared situation board: an entry recorded or retracted (issue #49).
+    Board(BoardEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -354,11 +356,64 @@ pub enum Verdict {
     Failed,
 }
 
+/// A change to the shared situation board: an entry recorded or retracted (issue #49).
+///
+/// The board is the crew's durable memory, distinct from the transient message stream:
+/// agreed interfaces, decisions and their rationale, and known gotchas, so the crew stops
+/// re-deriving and re-litigating what is settled. Every change is a first-class `board`
+/// event, so the board is auditable and rebuildable from the log across a restart (see
+/// `docs/communication.md`, context management).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardEvent {
+    /// The entry's stable key: a topic the crew agrees on, such as `auth-strategy` or
+    /// `api-error-format`. Recording the same key again updates the entry.
+    pub key: String,
+    /// Which section of the board the entry belongs to.
+    pub section: BoardSection,
+    /// The role that recorded or retracted the entry.
+    pub author: RoleId,
+    /// The entry's content: a decision and its rationale, an agreed interface, or a
+    /// gotcha. Empty on a retraction.
+    #[serde(default)]
+    pub body: String,
+    /// Whether this change retracts the entry, removing it from the board.
+    #[serde(default)]
+    pub retracted: bool,
+}
+
+/// A section of the shared situation board (issue #49).
+///
+/// The three kinds of durable memory the crew keeps: what it decided, what interfaces it
+/// agreed on, and what gotchas it hit, so a new or returning role reads them rather than
+/// re-deriving them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardSection {
+    /// A decision the crew agreed on, with its rationale.
+    Decision,
+    /// An agreed interface or contract between roles.
+    Interface,
+    /// A known gotcha or pitfall, so the crew does not rediscover it.
+    Gotcha,
+}
+
+impl BoardSection {
+    /// The section's stable label, matching its serialized name.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Decision => "decision",
+            Self::Interface => "interface",
+            Self::Gotcha => "gotcha",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Activity, ArtifactKind, Event, EventKind, Lifecycle, Message, MessageKind, Verdict,
-        VerificationEvent,
+        Activity, ArtifactKind, BoardEvent, BoardSection, Event, EventKind, Lifecycle, Message,
+        MessageKind, Verdict, VerificationEvent,
     };
     use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
     use crate::time::Timestamp;
@@ -435,6 +490,21 @@ mod tests {
                 verifier: Some(RoleId::new("qa")),
                 verdict: Verdict::Failed,
                 detail: "/health returns 500 under load".to_owned(),
+            })),
+            envelope(EventKind::Board(BoardEvent {
+                key: "auth-strategy".to_owned(),
+                section: BoardSection::Decision,
+                author: RoleId::new("commander"),
+                body: "JWT with 15m access tokens; rationale: stateless, matches the gateway."
+                    .to_owned(),
+                retracted: false,
+            })),
+            envelope(EventKind::Board(BoardEvent {
+                key: "auth-strategy".to_owned(),
+                section: BoardSection::Decision,
+                author: RoleId::new("commander"),
+                body: String::new(),
+                retracted: true,
             })),
         ]
     }
