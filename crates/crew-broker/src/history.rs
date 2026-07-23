@@ -8,10 +8,13 @@
 //! This module owns the HTTP surface only: it parses and validates the query string
 //! into a backend-neutral [`EventQuery`] and formats the [`EventPage`] the store
 //! returns. The filter, ordering, and paging live behind the [`Storage`](crate::Storage)
-//! trait (see `store.rs`), so a future indexed backend can push them down. The
-//! `summary=true` compaction lands in Phase 2 (this endpoint reserves the hook).
+//! trait (see `store.rs`), so a future indexed backend can push them down. With
+//! `summary=true` it returns a rolling-summary compaction instead of a raw page (see
+//! [`summary`](crate::summary)): the older events folded into bounded aggregates plus
+//! the recent tail, so a late joiner reads bounded context, not the full log.
 
 use axum::extract::{Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use crew_core::{ChannelId, Event, RoleId, TaskId, Timestamp};
@@ -22,6 +25,7 @@ use serde_json::Value;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::store::{EventFilter, EventKindTag, EventQuery};
+use crate::summary::{summarize, HistorySummary};
 
 /// The default page size when a request does not set `limit`.
 const DEFAULT_LIMIT: usize = 100;
@@ -52,9 +56,9 @@ struct HistoryQuery {
     since: Option<String>,
     /// Resume after this opaque cursor (from a previous page's `next_cursor`).
     after: Option<String>,
-    /// The maximum number of events to return (defaults to [`DEFAULT_LIMIT`]).
+    /// The maximum number of events to return; the tail size under `summary`.
     limit: Option<String>,
-    /// Reserved: request the Phase 2 rolling-summary compaction.
+    /// Request the rolling-summary compaction instead of a raw page.
     summary: Option<String>,
 }
 
@@ -68,25 +72,41 @@ struct HistoryPage {
     next_cursor: Option<String>,
 }
 
+/// The `summary=true` response: a compaction of older events plus the recent tail.
+///
+/// The `summary` folds every event older than the tail into bounded aggregates; the
+/// `tail` keeps the most recent `limit` events raw so recent detail is not lost.
+#[derive(Debug, Serialize)]
+struct SummaryResponse {
+    /// The bounded compaction of the older events.
+    summary: HistorySummary,
+    /// The most recent events, kept raw (oldest first), at most `limit`.
+    tail: Vec<Event>,
+}
+
 /// `GET /history`: read past events, filtered, time-ordered, and paginated.
 ///
+/// With `summary=true` it returns the rolling-summary compaction instead: a digest of
+/// the older events plus the recent tail (sized by `limit`), so a late joiner reads
+/// bounded context rather than the full log.
+///
 /// # Errors
-/// Returns a 400 [`ApiError`] if a filter, the cursor, or `limit` is malformed, and
-/// a 501 if `summary=true` is requested (that compaction lands in Phase 2).
+/// Returns a 400 [`ApiError`] if a filter, the cursor, or `limit` is malformed.
 async fn history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<HistoryPage>, ApiError> {
+) -> Result<Response, ApiError> {
+    let filter = parse_filter(&query)?;
+    let limit = parse_limit(query.limit.as_deref())?;
+
     if wants_summary(query.summary.as_deref()) {
-        return Err(ApiError::not_implemented(
-            "history summary compaction is not implemented yet (Phase 2)",
-        ));
+        return Ok(Json(summary_response(&state, filter, limit)?).into_response());
     }
 
     let request = EventQuery {
-        filter: parse_filter(&query)?,
+        filter,
         after: parse_cursor(query.after.as_deref())?,
-        limit: parse_limit(query.limit.as_deref())?,
+        limit,
     };
     let page = state
         .storage
@@ -96,7 +116,36 @@ async fn history(
     Ok(Json(HistoryPage {
         events: page.events,
         next_cursor: page.next.map(|position| position.to_string()),
-    }))
+    })
+    .into_response())
+}
+
+/// Builds the rolling-summary response: older events compacted, recent `tail` kept raw.
+///
+/// Reads the whole filtered, time-ordered history in one query, then splits off the
+/// most recent `tail` events and folds the rest into a [`HistorySummary`].
+fn summary_response(
+    state: &AppState,
+    filter: EventFilter,
+    tail: usize,
+) -> Result<SummaryResponse, ApiError> {
+    let request = EventQuery {
+        filter,
+        after: None,
+        limit: usize::MAX,
+    };
+    // `after` is None, so the query cannot return an invalid-cursor error here.
+    let mut events = state
+        .storage
+        .query(&request)
+        .map(|page| page.events)
+        .map_err(|_error| ApiError::bad_request("could not read history"))?;
+    let split = events.len().saturating_sub(tail);
+    let recent = events.split_off(split);
+    Ok(SummaryResponse {
+        summary: summarize(&events),
+        tail: recent,
+    })
 }
 
 /// Parses and validates the filter parameters into a backend-neutral [`EventFilter`].
@@ -280,11 +329,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_is_a_reserved_501_hook() {
+    async fn summary_compacts_older_events_and_keeps_the_recent_tail() {
         let state = AppState::new(Config::default());
+        // 20 events; ask for a tail of 5, so 15 fold into the summary.
+        seed(
+            &state,
+            (0..20).map(|i| message("backend", "all-units", ts(i))),
+        );
+
+        let (status, body) = get(&state, "?summary=true&limit=5").await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert_eq!(
+            body["summary"]["event_count"], 15,
+            "the older 15 are summarized"
+        );
+        assert_eq!(
+            body["tail"].as_array().unwrap().len(),
+            5,
+            "the recent 5 stay raw",
+        );
+        // The tail is the most recent events, in order.
+        let tail_ts = |i: usize| -> Timestamp {
+            serde_json::from_value(body["tail"][i]["ts"].clone()).unwrap()
+        };
+        assert_eq!(
+            tail_ts(0),
+            ts(15),
+            "the tail starts after the summarized events"
+        );
+        assert_eq!(tail_ts(4), ts(19), "the tail ends at the newest event");
+        // The summary carries bounded aggregates, not the raw older events.
+        assert!(
+            body["summary"].get("events").is_none(),
+            "no raw older events"
+        );
+        assert_eq!(body["summary"]["senders"][0]["name"], "backend");
+        assert_eq!(body["summary"]["senders"][0]["count"], 15);
+        assert!(body["summary"]["headline"]
+            .as_str()
+            .unwrap()
+            .contains("15 earlier events"));
+    }
+
+    #[tokio::test]
+    async fn summary_of_a_short_log_summarizes_nothing() {
+        let state = AppState::new(Config::default());
+        seed(
+            &state,
+            (0..3).map(|i| message("backend", "all-units", ts(i))),
+        );
+
+        // The tail default (100) exceeds the log, so nothing is old enough to summarize.
         let (status, body) = get(&state, "?summary=true").await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body.get("error").is_some(), "typed error body: {body}");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"]["event_count"], 0);
+        assert_eq!(
+            body["summary"]["headline"],
+            "No earlier events to summarize."
+        );
+        assert_eq!(
+            body["tail"].as_array().unwrap().len(),
+            3,
+            "all three stay raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_respects_filters() {
+        let state = AppState::new(Config::default());
+        seed(
+            &state,
+            (0..10).map(|i| message("backend", "all-units", ts(i))),
+        );
+        seed(
+            &state,
+            (0..4).map(|i| message("frontend", "all-units", ts(20 + i))),
+        );
+
+        // Summarize only backend's messages, tail of 2, so 8 fold in.
+        let (status, body) = get(&state, "?summary=true&role=backend&limit=2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["summary"]["event_count"], 8,
+            "only backend events counted"
+        );
+        assert_eq!(body["summary"]["senders"].as_array().unwrap().len(), 1);
+        assert_eq!(body["summary"]["senders"][0]["name"], "backend");
     }
 
     #[tokio::test]

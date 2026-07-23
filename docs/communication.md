@@ -107,10 +107,24 @@ The failure mode of the old file transport was unbounded growth: a fresh agent
 read the entire history and spent 100k tokens before doing anything. crew bounds
 it:
 
-- **Rolling summary.** `history?summary=true` returns a compaction of older
-  messages plus the recent tail, so joining is cheap.
+- **Rolling summary.** `GET /history?summary=true` returns a compaction of the
+  older events plus the recent tail (issue #19), so joining is cheap. The response
+  is `{ summary, tail }`: `tail` is the most recent events kept raw (sized by
+  `limit`), and `summary` folds everything older into bounded aggregates,
+  independent of how long the log has run. The compaction is a deterministic
+  projection of the typed stream, not an LLM rendering (the broker has no model):
+  it carries the summarized event count and time span, per-sender and per-kind
+  counts, lifecycle transition counts, and a capped digest of the most recent
+  orders and artifacts, plus a one-line headline. The same filters apply
+  (`channel`, `role`, `kind`, `task`, `since`), so a joiner can summarize one task
+  or channel. A fresh SSE connection with no cursor starts at the live tail, so the
+  summary is the deliberate catch-up path.
 - **Scoped reads.** A role fetches its own channels, not the whole board.
-- **Pruning.** Old raw messages age out behind the summary once compacted.
+- **Pruning.** Old raw events age out behind the summary in the joiner's view: the
+  summary stands in for them so a joiner never reads them. Physically dropping the
+  aged-out events from storage (bounding the broker's own footprint over a very long
+  run) is a later optimization; the durable log stays the append-only source of
+  truth in the meantime.
 
 ## Relationship to the coworker skill
 

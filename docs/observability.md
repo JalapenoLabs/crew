@@ -68,7 +68,9 @@ structured rather than a firehose. The broker serves it as `GET /history` (issue
 #12): filters (`channel`, `role`, `kind`, `task`, `since`), deterministic ordering
 by `ts` then log position, and cursor pagination that stays stable under concurrent
 writes, so a consumer or a late joiner reads the past without holding the stream
-open. A `summary=true` rolling compaction is reserved for Phase 2.
+open. `summary=true` returns the rolling compaction instead (issue #19): the older
+events folded into bounded aggregates plus the recent raw tail, so joining a
+long-running conversation costs bounded context rather than the full log.
 
 ## Live agent count and roster
 
