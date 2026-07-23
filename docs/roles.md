@@ -119,6 +119,32 @@ durable events it survives an idle-stop or a broker restart: the broker rebuilds
 the log. See `docs/communication.md` (context management) and `docs/observability.md` (the
 situation board).
 
+### The integration step
+
+Parallel roles work in isolated worktrees on `crew/<role>` branches (issue #43), so their
+edits never clobber each other. That isolation is only half the story: the work is done only
+when it comes back together into one coherent result. The **integration step** (issue #44) is
+that deliberate merge, run by the commander or an opt-in `integrator` role.
+
+`crew integrate` merges each role's `crew/<role>` branch into an integration branch
+(`crew/integration`), in a dedicated worktree so it never disturbs the main checkout or the
+role worktrees, and runs the crew's acceptance checks (build, tests) on the merged result with
+`--check "<command>"`. It reports where the integration stands: **green** (everything merged
+and the checks passed, push the branch and open a PR), **merged** (clean merge, run the
+checks), **conflicts**, or **checks failed**.
+
+Conflicts are resolved, not dropped. A merge that conflicts is aborted and reported with the
+branch and the files it collides on, so a person (or the commander) resolves it by hand or
+redraws the lanes, never a force-merge that discards a role's work behind its back. Migrations
+and other ordering concerns stay linear because the acceptance checks run on the integrated
+branch: a collision that breaks the build or the tests fails the integration rather than
+shipping. This is the counterpart to the done-gate (issue #47): the done-gate judges a single
+task done, the integration judges the whole crew's work green.
+
+When roles build on each other, integrate in dependency order (a role's branch merges before
+its dependents) so a stacked-PR strategy composes cleanly. See `CLAUDE.md`
+(`crew_supervisor::integrate`).
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface
@@ -143,6 +169,10 @@ Spin these up for a specific push, then stand them down:
 - **sdet-unit** and **sdet-e2e** are the split of `qa` for a test-heavy effort.
 - **security** reviews a change for an authorization or secrets gap.
 - **docs** keeps the design docs and user-facing text current.
+- **integrator** runs the integration step (issue #44): it merges the roles' `crew/<role>`
+  branches into one coherent, green branch, resolves conflicts, and runs the acceptance
+  checks. The commander can do this itself; spin up a dedicated integrator for a large,
+  many-role push where merging is a job of its own.
 
 ## Role cards
 
