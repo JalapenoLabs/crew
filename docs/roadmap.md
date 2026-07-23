@@ -44,9 +44,11 @@ The "one command brings up a team" experience.
 Make the substrate a consumable package under the **JalapenoLabs** org, so the
 CLI and Seraphim depend on the same versioned crate.
 
-- Split the substrate (broker + supervisor) into its own crate, CLI and glue as
-  consumers.
-- Wire the chosen distribution path (see the open decision below).
+- Split the substrate into one consumable crate, CLI and glue as consumers (issue
+  #34, done): the `crew-substrate` umbrella re-exports the four substrate crates and
+  defines the public API; the CLI depends only on it.
+- Wire the chosen distribution path (see the open decision below), flipping
+  `publish = false` when the registry is picked.
 - CI publishes on tag.
 
 ## Phase 5: Seraphim integration

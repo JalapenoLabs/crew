@@ -14,9 +14,9 @@ use std::path::Path;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crew_broker::Config as BrokerConfig;
-use crew_core::{BrokerEndpoint, CrewConfig};
-use crew_supervisor::{AgentState, Fleet, RosterClient, Supervisor};
+use crew_substrate::broker::Config as BrokerConfig;
+use crew_substrate::core::{BrokerEndpoint, CrewConfig};
+use crew_substrate::supervisor::{AgentState, Fleet, RosterClient, Supervisor};
 use eyre::{eyre, Result, WrapErr};
 use tokio::sync::oneshot;
 use tracing::{event, Level};
@@ -168,7 +168,7 @@ fn run_broker(config: BrokerConfig, shutdown_rx: oneshot::Receiver<()>) {
         }
     };
 
-    let outcome = runtime.block_on(crew_broker::run_until(config, async move {
+    let outcome = runtime.block_on(crew_substrate::broker::run_until(config, async move {
         let _ = shutdown_rx.await;
     }));
     if let Err(err) = outcome {

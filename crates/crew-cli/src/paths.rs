@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use crew_broker::Config as BrokerConfig;
+use crew_substrate::broker::Config as BrokerConfig;
 
 /// The pidfile name, kept under the broker's state directory (`.crew/` by default).
 const PIDFILE: &str = "crew.pid";

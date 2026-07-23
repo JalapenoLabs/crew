@@ -263,10 +263,7 @@ name = "crew-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
- "crew-broker",
- "crew-core",
- "crew-mcp",
- "crew-supervisor",
+ "crew-substrate",
  "crew-telemetry",
  "eyre",
  "mimalloc",
@@ -299,6 +296,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq",
+]
+
+[[package]]
+name = "crew-substrate"
+version = "0.0.0"
+dependencies = [
+ "crew-broker",
+ "crew-core",
+ "crew-mcp",
+ "crew-supervisor",
 ]
 
 [[package]]

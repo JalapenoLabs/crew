@@ -158,6 +158,7 @@ crates/
   crew-broker        the localhost broker service + the `crewd` binary
   crew-supervisor    process management: spawn/wire/lifecycle of role agents
   crew-mcp           the agent-facing MCP surface (crew_send, crew_inbox, ...)
+  crew-substrate     the umbrella crate: re-exports the four above as one dependency
   crew-cli           the human front-end binary (`crew`)
   crew-telemetry     shared structured-logging (tracing) init + secret redaction
 ```
@@ -167,8 +168,17 @@ the dependency direction flows toward `crew-core`, and nothing depends on
 `crew-cli` (the CLI is a consumer only). `crew-telemetry` is a standalone
 infrastructure crate the binaries call to initialize logging, so the library
 crates never pull a subscriber. `crew-core` holds the domain types and event
-model (issue #6); the other substrate crates are scaffolds, each filled in by its
-phase in `docs/roadmap.md`.
+model (issue #6). `crew-substrate` is the umbrella (issue #34): it re-exports the
+four substrate crates (`crew-core`, `crew-broker`, `crew-supervisor`, `crew-mcp`) as
+the modules `core` / `broker` / `supervisor` / `mcp`, so a front-end takes one
+dependency and depends only on the substrate's public API. External consumers (the
+CLI, later Seraphim) use `crew-substrate`; a substrate crate's own binary (`crewd`,
+`crew-mcp`) uses its siblings directly, since routing through the umbrella would be a
+dependency cycle. The umbrella carries the canonical crate docs
+(`M-CANONICAL-DOCS`, `M-MODULE-DOCS`) that define the public API and note the
+third-party types it deliberately leaks for interop (`M-DONT-LEAK-TYPES`, footnote 2:
+an umbrella may leak siblings' types), so the substrate builds and documents as a
+standalone, publishable crate. See `docs/architecture.md` (Distribution).
 
 ## Status
 

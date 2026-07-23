@@ -251,6 +251,20 @@ The substrate is the reusable part, so it ships as a Rust crate (the broker plus
 supervisor library) that both front-ends depend on, published under the
 **JalapenoLabs** org.
 
+The substrate is packaged as one **umbrella crate**, `crew-substrate` (issue #34),
+that re-exports the public API of the four library crates it is built from
+(`crew-core`, `crew-broker`, `crew-supervisor`, `crew-mcp`) as the modules `core`,
+`broker`, `supervisor`, and `mcp`. A front-end takes a single dependency on
+`crew-substrate` and reaches every part through it, never the individual crates; the
+CLI is the first such consumer. The umbrella adds no logic and follows
+`M-DONT-LEAK-TYPES` (footnote 2: an umbrella may leak its siblings' types), documenting
+the few third-party types it deliberately exposes for interoperability (tokio on the
+async broker boundary, serde on the wire types, chrono through `Timestamp`, and eyre as
+the entry-point error type). It builds and documents as a standalone crate. Today it is
+consumed as a private Git dependency (below), so every crate keeps `publish = false` to
+guard against an accidental crates.io publish; flipping that is part of the registry
+choice below.
+
 **Constraint:** GitHub Packages does not host cargo registries (it serves npm,
 Maven, NuGet, RubyGems, and Docker, not Rust). So "publish under JalapenoLabs"
 has three realistic shapes:
