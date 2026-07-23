@@ -237,8 +237,15 @@ rolling summary scoped to the role's own lane (what it sent and what is addresse
 never the raw transcript. The broker renders it to text and caps it to a byte budget,
 reporting the measured size, so joining a long mission costs bounded context, not the
 100k-token whole-log read. The role card's briefing tells a role to catch up this way as
-its first action, so it starts productive in seconds and acts in its lane. See
-`docs/communication.md` (context management).
+its first action, so it starts productive in seconds and acts in its lane.
+
+The packet does not rely on the agent remembering to call the tool: the supervisor also
+fetches it at spawn and folds it into the agent's opening `claude -p` turn (issue #122), so
+the bounded catch-up is in context from the first token even if the agent never calls
+`crew_briefing`. The fetch happens at spawn, not at provision, so a role the fleet starts
+lazily gets the current board and summary, and it is best-effort: if the broker is briefly
+unreachable the agent boots on its card briefing alone, with `crew_briefing` as the re-read
+path. See `docs/communication.md` (context management).
 
 ## Sizing guidance
 

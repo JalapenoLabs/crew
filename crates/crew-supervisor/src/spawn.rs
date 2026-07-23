@@ -8,6 +8,11 @@
 //! #24). When a process exits, its role is deregistered from the roster, so the
 //! roster always reflects who is live.
 //!
+//! At the spawn moment [`boot_command`] fetches the role's briefing packet
+//! (issue #50) and folds it into the opening turn (issue #122), best-effort, so
+//! the bounded catch-up is in context even if the agent never calls
+//! `crew_briefing`.
+//!
 //! [`Supervisor::up`] is the production entry that invokes `claude`. The spawn
 //! and lifecycle mechanics live in [`Crew::spawn`], which takes fully-resolved
 //! [`AgentCommand`]s, so the process management is exercised in tests with a
@@ -121,6 +126,68 @@ pub fn agent_command(launch: &crate::Launch, cwd: &Path) -> AgentCommand {
         env: launch.env.clone(),
         cwd: cwd.to_path_buf(),
     }
+}
+
+/// The lead-in that introduces the injected briefing packet in the boot prompt,
+/// so the agent knows this is its live situation and can re-read it any time.
+const BRIEFING_PACKET_LEAD_IN: &str =
+    "--- Your current briefing packet (fetched at spawn; re-read any time with the crew_briefing \
+     tool) ---";
+
+/// The command to spawn `base` with, with `role`'s freshly fetched briefing
+/// packet folded into its opening `claude -p` turn (issue #122).
+///
+/// The new-role briefing packet (issue #50) is otherwise in context only if the
+/// agent calls `crew_briefing` first thing. Pushing it into the opening turn
+/// guarantees the bounded catch-up is in context even when the agent skips that
+/// tool call. It is fetched here, at spawn rather than at provision, so the
+/// board and rolling summary are current for a role the fleet starts lazily,
+/// long after `launch`.
+///
+/// Best-effort by design: if the broker is briefly unreachable the agent boots
+/// on its card briefing alone, and `crew_briefing` stays the re-read path. A
+/// command with no `-p` boot prompt (a test stub) is returned unchanged.
+pub(crate) fn boot_command(
+    base: &AgentCommand,
+    roster: &RosterClient,
+    role: &RoleId,
+) -> AgentCommand {
+    match roster.briefing(role) {
+        Ok(packet) if !packet.trim().is_empty() => with_briefing_packet(base, &packet),
+        Ok(_) => base.clone(),
+        Err(err) => {
+            event!(
+                name: "supervisor.briefing.skipped",
+                Level::DEBUG,
+                crew.role = %role,
+                error = %err,
+                "could not fetch the briefing packet at spawn; booting `{{crew.role}}` on its card briefing",
+            );
+            base.clone()
+        }
+    }
+}
+
+/// Returns `command` with `packet` appended to its `-p` boot prompt.
+///
+/// A real `claude` turn carries the boot prompt as the argument after `-p`; a
+/// stub command has none, and is returned unchanged.
+fn with_briefing_packet(command: &AgentCommand, packet: &str) -> AgentCommand {
+    let mut augmented = command.clone();
+    if let Some(prompt) = boot_prompt_mut(&mut augmented.args) {
+        prompt.push_str("\n\n");
+        prompt.push_str(BRIEFING_PACKET_LEAD_IN);
+        prompt.push_str("\n\n");
+        prompt.push_str(packet);
+    }
+    augmented
+}
+
+/// The mutable boot-prompt argument (the value after `-p`), if the command
+/// carries one.
+fn boot_prompt_mut(args: &mut [String]) -> Option<&mut String> {
+    let flag = args.iter().position(|arg| arg == "-p")?;
+    args.get_mut(flag + 1)
 }
 
 /// Spawns and manages the agent processes for a crew (issue #21).
@@ -400,6 +467,10 @@ fn spawn_agent(
     // The role is on the roster the moment its process starts.
     roster.register(&role, &owned_paths)?;
 
+    // Fold the freshly fetched briefing packet into the opening turn (issue #122),
+    // best-effort, so bounded context is in context even if the agent never calls
+    // `crew_briefing`.
+    let command = boot_command(&command, roster, &role);
     let mut child = match spawn_process(&command) {
         Ok(child) => child,
         Err(err) => {
@@ -522,8 +593,12 @@ fn stop_all(agents: &mut [AgentHandle]) {
 mod tests {
     use std::path::Path;
 
-    use super::agent_command;
-    use crate::Launch;
+    use crew_core::RoleId;
+
+    use super::{
+        agent_command, boot_command, with_briefing_packet, AgentCommand, BRIEFING_PACKET_LEAD_IN,
+    };
+    use crate::{roster::RosterClient, Launch};
 
     fn launch() -> Launch {
         Launch {
@@ -533,6 +608,17 @@ mod tests {
                 "/tmp/agents/backend/role-card.toml".to_owned(),
             )],
             briefing: "You are the backend role.".to_owned(),
+        }
+    }
+
+    /// A stub command with no `-p` boot prompt, like the ones the
+    /// process-lifecycle tests drive.
+    fn stub() -> AgentCommand {
+        AgentCommand {
+            program: "bash".to_owned(),
+            args: vec!["-c".to_owned(), "echo hi".to_owned()],
+            env: Vec::new(),
+            cwd: Path::new("/work/backend").to_path_buf(),
         }
     }
 
@@ -558,6 +644,50 @@ mod tests {
         assert!(
             command.env.iter().any(|(key, _)| key == "CREW_ROLE_CARD"),
             "the process inherits the role card, so the MCP server reaches the broker",
+        );
+    }
+
+    #[test]
+    fn with_briefing_packet_folds_the_packet_into_the_boot_prompt() {
+        let base = agent_command(&launch(), Path::new("/work/backend"));
+        let augmented =
+            with_briefing_packet(&base, "Briefing for backend.\nOn the board: use JWT.");
+
+        let prompt = &augmented.args[1];
+        assert!(
+            prompt.starts_with("You are the backend role."),
+            "the card briefing still leads the prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains(BRIEFING_PACKET_LEAD_IN) && prompt.contains("On the board: use JWT."),
+            "the packet is appended under a lead-in: {prompt}"
+        );
+        // Only the boot prompt changed; the flags and env are untouched.
+        assert_eq!(augmented.args[0], "-p");
+        assert_eq!(augmented.args[2..], base.args[2..]);
+        assert_eq!(augmented.env, base.env);
+    }
+
+    #[test]
+    fn with_briefing_packet_leaves_a_stub_without_a_prompt_unchanged() {
+        let base = stub();
+        let augmented = with_briefing_packet(&base, "some packet");
+        assert_eq!(
+            augmented.args, base.args,
+            "a command with no `-p` boot prompt is untouched"
+        );
+    }
+
+    #[test]
+    fn boot_command_falls_back_to_the_base_when_the_broker_is_unreachable() {
+        // Port 1 is not listening, so the fetch fails fast (connection refused): the
+        // agent must still boot, on its card briefing alone.
+        let roster = RosterClient::new("http://127.0.0.1:1");
+        let base = agent_command(&launch(), Path::new("/work/backend"));
+        let booted = boot_command(&base, &roster, &RoleId::new("backend"));
+        assert_eq!(
+            booted.args, base.args,
+            "an unreachable broker is non-fatal: the boot prompt is the card briefing"
         );
     }
 }

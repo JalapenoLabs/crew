@@ -195,8 +195,11 @@ it:
   at hand), renders it to text, and caps it to a byte budget, reporting the measured size
   so the packet stays small no matter how long the mission has run. A role calls
   `crew_briefing` first thing on boot, so it joins mid-mission with bounded context and
-  acts in its lane in seconds rather than reading the whole log. See `docs/roles.md` (the
-  briefing packet).
+  acts in its lane in seconds rather than reading the whole log. The supervisor also folds
+  the packet into the agent's opening turn at spawn (issue #122), fetched then, not at
+  provision, so it is current for a lazily started role, and best-effort so an unreachable
+  broker still boots the agent on its card briefing; the tool stays the re-read path. See
+  `docs/roles.md` (the briefing packet).
 
 ## Relationship to the coworker skill
 

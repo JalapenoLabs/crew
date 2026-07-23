@@ -451,8 +451,17 @@ small no matter how long the mission ran. `crew_briefing` is the tool (and `crew
 the shim); each role card's briefing now tells a role to call it first thing on boot as the
 deliberate catch-up path, so it joins mid-mission with bounded context and acts in its lane
 in seconds. The endpoint reuses the existing rolling summary (issue #19) and board (issue
-#49) rather than adding an event kind or projection. See `docs/roles.md` (the briefing
-packet) and `docs/communication.md` (context management).
+#49) rather than adding an event kind or projection.
+
+So the packet lands in context even if the agent skips the tool, the supervisor also pushes
+it into the agent's opening `claude -p` turn at spawn (issue #122). `RosterClient::briefing`
+fetches the packet and `spawn::boot_command` folds it into the boot prompt after the card
+briefing at the spawn moment (both the eager `Crew::spawn` and the lazy `Fleet`'s
+`AgentLifecycle::spawn`), so it is fetched at spawn rather than provision and is current for
+a lazily started role. It is best-effort: an unreachable broker leaves the agent booting on
+its card briefing alone (a debug `supervisor.briefing.skipped` log), and a stub command with
+no `-p` prompt is untouched, so `crew_briefing` stays the re-read path. See `docs/roles.md`
+(the briefing packet) and `docs/communication.md` (context management).
 
 `crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
 crew tools with no per-task approval (issue #20), the way Seraphim registers the

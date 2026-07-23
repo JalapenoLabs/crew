@@ -53,7 +53,7 @@ use tracing::{event, Level};
 
 use crate::{
     roster::{Liveness, RosterClient},
-    spawn::{spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent},
+    spawn::{boot_command, spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent},
     stall::{Stall, StallMonitor},
     worktree::Worktree,
 };
@@ -817,7 +817,11 @@ impl AgentLifecycle {
     /// The register publishes the lifecycle event: `started` for the first
     /// working, `recovered` coming back from dead, `restarted` otherwise.
     fn spawn(&mut self) -> Result<()> {
-        let mut child = spawn_process(&self.command)?;
+        // Fetch the briefing packet at this spawn (not at provision) so it is current
+        // for a lazily started role, and fold it into the opening turn (issue #122).
+        // Best-effort: an unreachable broker boots the agent on its card briefing.
+        let command = boot_command(&self.command, &self.roster, &self.shared.role);
+        let mut child = spawn_process(&command)?;
         if let Some(stdout) = child.stdout.take() {
             capture(
                 OutputStream::Stdout,
