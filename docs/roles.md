@@ -26,6 +26,12 @@ Two rules keep a unit healthy:
    An idle role is a running tax. Spin roles up on demand and stand them down when
    the push is over.
 
+A crew is described by a declarative config (`crew_core::CrewConfig`, issue #25): the
+roles and the lane each owns, the model they run, the repos in scope, the idle-stop
+timeout, and the commander. `crew up` reads it, and it validates itself (an unknown
+commander or an overlapping ownership boundary fails with a precise message). Omit it
+and the default crew below applies. See `docs/config.md`.
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface

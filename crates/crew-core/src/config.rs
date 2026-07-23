@@ -1,0 +1,581 @@
+//! The crew config: the declarative description `crew up` reads to bring a crew online.
+//!
+//! A [`CrewConfig`] names the roles and the lane each owns, the model they run, the
+//! repos in scope, the idle-stop timeout, and which role is the commander. It resolves
+//! sensible defaults (the default crew: commander, backend, frontend, qa) and validates
+//! itself, so a documented config produces a valid crew and an invalid one fails with a
+//! precise message (see `docs/config.md`). The config is broker-agnostic; it produces
+//! the per-role [`RoleCard`]s with [`to_cards`](CrewConfig::to_cards), taking the broker
+//! address at that point.
+//!
+//! Like [`RoleCard`], the config is sans-io: it parses from a string and never touches
+//! the filesystem, so `crew-core` stays free of I/O and the format is trivially
+//! testable (the caller owns the file).
+
+use std::backtrace::Backtrace;
+use std::collections::BTreeSet;
+use std::fmt::{self, Display, Formatter};
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use crate::card::{BrokerEndpoint, RoleCard};
+use crate::id::RoleId;
+
+/// The default model a role runs, an alias Claude Code resolves to the current build.
+const DEFAULT_MODEL: &str = "opus";
+
+/// The default commander: the lead and router the General briefs.
+const DEFAULT_COMMANDER: &str = "commander";
+
+/// The default idle-stop timeout: how long a role may be quiet before it is stopped.
+const DEFAULT_IDLE_STOP: Duration = Duration::from_secs(5 * 60);
+
+/// A resolved, validated crew: its roles, its defaults, and its commander.
+///
+/// Build one from a config file with [`from_toml`](CrewConfig::from_toml), or take the
+/// [`default`](CrewConfig::default) crew. Every field is resolved (defaults applied) and
+/// the whole is validated, so holding a `CrewConfig` means it is well-formed.
+///
+/// # Examples
+/// ```
+/// use crew_core::CrewConfig;
+///
+/// let config = CrewConfig::default();
+/// assert_eq!(config.roles.len(), 4);
+/// assert_eq!(config.commander.as_str(), "commander");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrewConfig {
+    /// The roles that make up the crew, each with the lane it owns.
+    pub roles: Vec<RoleSpec>,
+    /// The role that leads and routes: the one the General briefs.
+    pub commander: RoleId,
+    /// The default model every role runs, unless it overrides it.
+    pub model: String,
+    /// How long a role may be quiet before the supervisor idle-stops it.
+    pub idle_stop: Duration,
+    /// The repos in scope for the crew (paths or names the operator supplies).
+    pub repos: Vec<String>,
+}
+
+/// One role in a crew: its name, its lane, its acceptance bar, and its model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleSpec {
+    /// The role's stable id (`commander`, `backend`, ...).
+    pub role: RoleId,
+    /// The directory boundaries the role owns, its lane in the tree.
+    pub owned_paths: Vec<String>,
+    /// The bar the role holds its work to; empty falls back to the crew's standard bar.
+    pub acceptance: String,
+    /// The model this role runs, overriding the crew default when set.
+    pub model: Option<String>,
+}
+
+impl Default for CrewConfig {
+    /// The default crew: commander, backend, frontend, and qa (see `docs/roles.md`).
+    ///
+    /// A starting point the operator customizes: the commander routes and owns no lane,
+    /// and the specialists own the clean boundaries most repos hand you.
+    fn default() -> Self {
+        Self {
+            roles: default_roles(),
+            commander: RoleId::new(DEFAULT_COMMANDER),
+            model: DEFAULT_MODEL.to_owned(),
+            idle_stop: DEFAULT_IDLE_STOP,
+            repos: Vec::new(),
+        }
+    }
+}
+
+impl CrewConfig {
+    /// Parses a config from its TOML form, applying defaults and validating it.
+    ///
+    /// Omitted fields take their defaults: no `roles` yields the default crew, and no
+    /// `commander` / `model` / `idle_stop` take the crew defaults.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the TOML is malformed, an unknown field is present,
+    /// the idle-stop duration is unparseable, or validation fails (an empty or duplicate
+    /// role, a commander that is not a declared role, or two roles owning overlapping
+    /// paths). The message names the offending value.
+    pub fn from_toml(toml: &str) -> Result<Self, ConfigError> {
+        let raw: RawConfig =
+            toml::from_str(toml).map_err(|source| ConfigError::parse(Box::new(source)))?;
+        let config = raw.resolve()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Produces one [`RoleCard`] per role, reaching the broker at `broker`.
+    ///
+    /// The config is broker-agnostic; the broker address (where `crewd` listens) is
+    /// supplied here, so the same config drives any broker.
+    #[must_use]
+    pub fn to_cards(&self, broker: &BrokerEndpoint) -> Vec<RoleCard> {
+        self.roles
+            .iter()
+            .map(|spec| {
+                RoleCard::new(
+                    spec.role.clone(),
+                    spec.owned_paths.clone(),
+                    spec.acceptance.clone(),
+                    broker.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// The model `role` runs: its own override, or the crew default.
+    #[must_use]
+    pub fn model_for(&self, role: &RoleId) -> &str {
+        self.roles
+            .iter()
+            .find(|spec| &spec.role == role)
+            .and_then(|spec| spec.model.as_deref())
+            .unwrap_or(&self.model)
+    }
+
+    /// Validates the resolved config, returning the first problem it finds.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.roles.is_empty() {
+            return Err(ConfigError::invalid("a crew must have at least one role"));
+        }
+
+        // Role ids must be present and unique.
+        let mut seen = BTreeSet::new();
+        for spec in &self.roles {
+            let id = spec.role.as_str();
+            if id.trim().is_empty() {
+                return Err(ConfigError::invalid("a role's name must not be empty"));
+            }
+            if !seen.insert(id) {
+                return Err(ConfigError::invalid(format!(
+                    "the role `{id}` is declared more than once"
+                )));
+            }
+        }
+
+        // The commander must be one of the declared roles.
+        if !self.roles.iter().any(|spec| spec.role == self.commander) {
+            return Err(ConfigError::invalid(format!(
+                "the commander `{}` is not one of the declared roles ({})",
+                self.commander,
+                self.role_names(),
+            )));
+        }
+
+        self.check_ownership_overlaps()
+    }
+
+    /// Rejects two roles owning overlapping directory boundaries.
+    ///
+    /// Two lanes overlap when one path is a prefix of the other (or they are equal), so
+    /// `api/` and `api/routes/` collide but `api/` and `apiv2/` do not.
+    fn check_ownership_overlaps(&self) -> Result<(), ConfigError> {
+        // Each owned lane, with the role and the path as written for the message.
+        let mut lanes: Vec<(&RoleId, &str, String)> = Vec::new();
+        for spec in &self.roles {
+            for path in &spec.owned_paths {
+                let boundary = directory_boundary(path);
+                if boundary.is_empty() {
+                    continue;
+                }
+                for (other_role, other_path, other_boundary) in &lanes {
+                    if *other_role != &spec.role && boundaries_overlap(&boundary, other_boundary) {
+                        return Err(ConfigError::invalid(format!(
+                            "roles `{}` and `{other_role}` own overlapping paths (`{}` and `{other_path}`)",
+                            spec.role,
+                            path.trim(),
+                        )));
+                    }
+                }
+                lanes.push((&spec.role, path.trim(), boundary));
+            }
+        }
+        Ok(())
+    }
+
+    /// The declared role names, joined for an error message.
+    fn role_names(&self) -> String {
+        self.roles
+            .iter()
+            .map(|spec| spec.role.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The default crew's roles: the commander routes, the specialists own their lanes.
+fn default_roles() -> Vec<RoleSpec> {
+    let role = |name: &str, paths: &[&str]| RoleSpec {
+        role: RoleId::new(name),
+        owned_paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        acceptance: String::new(),
+        model: None,
+    };
+    vec![
+        role("commander", &[]),
+        role("backend", &["api/"]),
+        role("frontend", &["frontend/"]),
+        role("qa", &["tests/"]),
+    ]
+}
+
+/// Normalizes a path to a directory boundary: trimmed, with exactly one trailing slash.
+///
+/// So `api`, `api/`, and `api//` all become `api/`, and a blank path becomes empty.
+fn directory_boundary(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{trimmed}/")
+}
+
+/// Whether two directory boundaries overlap: equal, or one nested under the other.
+///
+/// Both end with `/`, so a prefix test is exactly the nesting test: `api/` is a prefix
+/// of `api/routes/`, but not of `apiv2/`.
+fn boundaries_overlap(a: &str, b: &str) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Parses a human duration: a plain number of seconds, or a number with an `s`/`m`/`h`
+/// suffix (`30s`, `5m`, `2h`).
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    let text = text.trim();
+    let expected = "expected a duration like `5m`, `30s`, `2h`, or a number of seconds";
+    if text.is_empty() {
+        return Err(expected.to_owned());
+    }
+    if text.chars().all(|c| c.is_ascii_digit()) {
+        let seconds = text.parse().map_err(|_error| expected.to_owned())?;
+        return Ok(Duration::from_secs(seconds));
+    }
+
+    let (number, unit) = text.split_at(text.len() - 1);
+    let count: u64 = number
+        .trim()
+        .parse()
+        .map_err(|_error| format!("expected a number before the unit; {expected}"))?;
+    let seconds = match unit {
+        "s" => count,
+        "m" => count * 60,
+        "h" => count * 3600,
+        other => return Err(format!("unknown time unit `{other}`; use s, m, or h")),
+    };
+    Ok(Duration::from_secs(seconds))
+}
+
+/// The TOML wire form of a crew config: every field optional, so a default applies.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    model: Option<String>,
+    commander: Option<String>,
+    idle_stop: Option<String>,
+    repos: Option<Vec<String>>,
+    roles: Option<Vec<RawRole>>,
+}
+
+/// The TOML wire form of one role.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRole {
+    role: String,
+    owned_paths: Option<Vec<String>>,
+    acceptance: Option<String>,
+    model: Option<String>,
+}
+
+impl RawConfig {
+    /// Applies defaults, parsing the idle-stop duration.
+    fn resolve(self) -> Result<CrewConfig, ConfigError> {
+        let idle_stop = match self.idle_stop {
+            Some(text) => parse_duration(&text).map_err(|reason| {
+                ConfigError::invalid(format!("could not parse idle_stop `{text}`: {reason}"))
+            })?,
+            None => DEFAULT_IDLE_STOP,
+        };
+        let roles = match self.roles {
+            Some(roles) => roles.into_iter().map(RawRole::resolve).collect(),
+            None => default_roles(),
+        };
+        Ok(CrewConfig {
+            roles,
+            commander: RoleId::new(self.commander.map_or_else(
+                || DEFAULT_COMMANDER.to_owned(),
+                |name| name.trim().to_owned(),
+            )),
+            model: self.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            idle_stop,
+            repos: self.repos.unwrap_or_default(),
+        })
+    }
+}
+
+impl RawRole {
+    /// Applies per-role defaults.
+    fn resolve(self) -> RoleSpec {
+        RoleSpec {
+            role: RoleId::new(self.role.trim()),
+            owned_paths: self.owned_paths.unwrap_or_default(),
+            acceptance: self.acceptance.unwrap_or_default(),
+            model: self.model,
+        }
+    }
+}
+
+/// The error returned when a crew config cannot be parsed or is invalid.
+///
+/// Inspect it with [`is_parse`](ConfigError::is_parse) and
+/// [`is_invalid`](ConfigError::is_invalid); its [`Display`] carries the precise reason.
+#[derive(Debug)]
+pub struct ConfigError {
+    kind: ErrorKind,
+    backtrace: Backtrace,
+}
+
+impl ConfigError {
+    /// Wraps a kind, capturing a backtrace (empty unless `RUST_BACKTRACE` is set).
+    fn new(kind: ErrorKind) -> Self {
+        Self {
+            kind,
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// A malformed-TOML (or unknown-field) parse error.
+    fn parse(source: Box<toml::de::Error>) -> Self {
+        Self::new(ErrorKind::Parse(source))
+    }
+
+    /// A validation error carrying a precise, human-readable reason.
+    fn invalid(reason: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Invalid(reason.into()))
+    }
+
+    /// Whether the config text was malformed and could not be parsed.
+    #[must_use]
+    pub fn is_parse(&self) -> bool {
+        matches!(self.kind, ErrorKind::Parse(_))
+    }
+
+    /// Whether the config parsed but failed validation.
+    #[must_use]
+    pub fn is_invalid(&self) -> bool {
+        matches!(self.kind, ErrorKind::Invalid(_))
+    }
+}
+
+impl Display for ConfigError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            ErrorKind::Parse(source) => write!(f, "could not parse the crew config: {source}")?,
+            ErrorKind::Invalid(reason) => write!(f, "invalid crew config: {reason}")?,
+        }
+        if let std::backtrace::BacktraceStatus::Captured = self.backtrace.status() {
+            write!(f, "\n{}", self.backtrace)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            ErrorKind::Parse(source) => Some(&**source),
+            ErrorKind::Invalid(_) => None,
+        }
+    }
+}
+
+/// What went wrong with a config. Kept private so new failure modes never break the
+/// public API (callers match on the `is_*` methods and read the `Display`).
+#[derive(Debug)]
+enum ErrorKind {
+    Parse(Box<toml::de::Error>),
+    Invalid(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_duration, CrewConfig};
+    use crate::{BrokerEndpoint, RoleId};
+
+    /// A fully specified config exercising every field, mirrored in `docs/config.md`.
+    const DOCUMENTED: &str = r#"
+        model = "sonnet"
+        commander = "commander"
+        idle_stop = "10m"
+        repos = ["api", "web"]
+
+        [[roles]]
+        role = "commander"
+        owned_paths = []
+
+        [[roles]]
+        role = "backend"
+        owned_paths = ["api/", "db/"]
+        acceptance = "Tests green, migrations reversible."
+        model = "haiku"
+
+        [[roles]]
+        role = "frontend"
+        owned_paths = ["web/"]
+
+        [[roles]]
+        role = "qa"
+        owned_paths = ["tests/"]
+    "#;
+
+    #[test]
+    fn the_documented_config_produces_a_valid_crew() {
+        let config = CrewConfig::from_toml(DOCUMENTED).expect("the documented config is valid");
+        assert_eq!(config.roles.len(), 4);
+        assert_eq!(config.commander, RoleId::new("commander"));
+        assert_eq!(config.model, "sonnet");
+        assert_eq!(config.idle_stop.as_secs(), 10 * 60);
+        assert_eq!(config.repos, ["api", "web"]);
+
+        // A per-role model overrides the crew default; others fall back to it.
+        assert_eq!(config.model_for(&RoleId::new("backend")), "haiku");
+        assert_eq!(config.model_for(&RoleId::new("frontend")), "sonnet");
+
+        // It produces one role card per role, reaching the given broker.
+        let cards = config.to_cards(&BrokerEndpoint::new("127.0.0.1", 2739));
+        assert_eq!(cards.len(), 4);
+        let backend = cards
+            .iter()
+            .find(|c| c.role == RoleId::new("backend"))
+            .unwrap();
+        assert_eq!(backend.owned_paths, ["api/", "db/"]);
+        assert_eq!(backend.broker.base_url(), "http://127.0.0.1:2739");
+    }
+
+    #[test]
+    fn the_default_crew_is_valid_and_complete() {
+        let config = CrewConfig::default();
+        assert_eq!(
+            config
+                .roles
+                .iter()
+                .map(|spec| spec.role.as_str())
+                .collect::<Vec<_>>(),
+            ["commander", "backend", "frontend", "qa"],
+        );
+        assert_eq!(config.commander, RoleId::new("commander"));
+        assert_eq!(config.model, "opus");
+        assert_eq!(config.idle_stop.as_secs(), 5 * 60);
+        // The default crew round-trips through validation via an empty config document.
+        assert_eq!(CrewConfig::from_toml("").unwrap(), config);
+    }
+
+    #[test]
+    fn omitted_roles_yield_the_default_crew_with_overrides_applied() {
+        let config = CrewConfig::from_toml("model = \"haiku\"\nidle_stop = \"90s\"").unwrap();
+        assert_eq!(config.roles.len(), 4, "roles default to the standard crew");
+        assert_eq!(config.model, "haiku");
+        assert_eq!(config.idle_stop.as_secs(), 90);
+    }
+
+    #[test]
+    fn idle_stop_parses_seconds_minutes_and_hours() {
+        assert_eq!(parse_duration("30s").unwrap().as_secs(), 30);
+        assert_eq!(parse_duration("5m").unwrap().as_secs(), 300);
+        assert_eq!(parse_duration("2h").unwrap().as_secs(), 7200);
+        assert_eq!(parse_duration("300").unwrap().as_secs(), 300);
+        // An unknown unit, non-numeric text, and a blank string are all rejected.
+        parse_duration("5x").unwrap_err();
+        parse_duration("abc").unwrap_err();
+        parse_duration("").unwrap_err();
+    }
+
+    /// Parses a config expected to be invalid, returning the precise message.
+    fn invalid(toml: &str) -> String {
+        let error = CrewConfig::from_toml(toml).expect_err("should be invalid");
+        assert!(error.is_invalid(), "expected a validation error: {error}");
+        error.to_string()
+    }
+
+    #[test]
+    fn an_unknown_commander_fails_with_a_precise_message() {
+        let message = invalid(
+            "commander = \"lead\"\n\
+             [[roles]]\nrole = \"backend\"\nowned_paths = [\"api/\"]",
+        );
+        assert!(message.contains("commander `lead`"), "{message}");
+        assert!(
+            message.contains("backend"),
+            "it lists the declared roles: {message}"
+        );
+    }
+
+    #[test]
+    fn overlapping_ownership_fails_naming_both_roles_and_paths() {
+        // Nested lanes overlap: `api/` contains `api/routes/`.
+        let nested = invalid(
+            "commander = \"backend\"\n\
+             [[roles]]\nrole = \"backend\"\nowned_paths = [\"api/\"]\n\
+             [[roles]]\nrole = \"frontend\"\nowned_paths = [\"api/routes/\"]",
+        );
+        assert!(
+            nested.contains("backend") && nested.contains("frontend"),
+            "{nested}"
+        );
+        assert!(
+            nested.contains("api/") && nested.contains("api/routes/"),
+            "{nested}"
+        );
+
+        // Identical lanes overlap too, even when written differently (`api` vs `api/`).
+        let identical = invalid(
+            "commander = \"backend\"\n\
+             [[roles]]\nrole = \"backend\"\nowned_paths = [\"api\"]\n\
+             [[roles]]\nrole = \"qa\"\nowned_paths = [\"api/\"]",
+        );
+        assert!(identical.contains("overlapping"), "{identical}");
+    }
+
+    #[test]
+    fn sibling_lanes_that_only_share_a_prefix_do_not_overlap() {
+        // `api/` and `apiv2/` share a string prefix but are distinct directories.
+        let config = CrewConfig::from_toml(
+            "commander = \"backend\"\n\
+             [[roles]]\nrole = \"backend\"\nowned_paths = [\"api/\"]\n\
+             [[roles]]\nrole = \"frontend\"\nowned_paths = [\"apiv2/\"]",
+        );
+        assert!(
+            config.is_ok(),
+            "sibling directories are not an overlap: {config:?}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_or_empty_role_is_rejected() {
+        let duplicate = invalid(
+            "commander = \"backend\"\n\
+             [[roles]]\nrole = \"backend\"\n[[roles]]\nrole = \"backend\"",
+        );
+        assert!(duplicate.contains("more than once"), "{duplicate}");
+
+        let empty = invalid("commander = \"backend\"\n[[roles]]\nrole = \"  \"");
+        assert!(empty.contains("must not be empty"), "{empty}");
+    }
+
+    #[test]
+    fn a_bad_idle_stop_or_unknown_field_fails_precisely() {
+        let bad_duration = CrewConfig::from_toml("idle_stop = \"soon\"").expect_err("invalid");
+        assert!(bad_duration.is_invalid());
+        assert!(
+            bad_duration.to_string().contains("idle_stop `soon`"),
+            "{bad_duration}",
+        );
+
+        // A typo'd field is caught at parse time, naming the unknown field.
+        let typo = CrewConfig::from_toml("modle = \"opus\"").expect_err("unknown field");
+        assert!(typo.is_parse(), "unknown field is a parse error: {typo}");
+        assert!(typo.to_string().contains("modle"), "{typo}");
+    }
+}

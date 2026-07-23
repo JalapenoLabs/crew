@@ -147,6 +147,7 @@ docs/
   communication.md   topology, channels, message schema, context management
   observability.md   one event stream: task history, activity logs, live count
   roles.md           the roster and the ownership model
+  config.md          the declarative crew config `crew up` reads
   roadmap.md         phased plan
 crates/
   crew-core          shared types + the event model (the dependency-graph root)
@@ -228,6 +229,17 @@ loader and `briefing()` rendering the boot prompt (the shape the `coworker` skil
 shrinks to). One loader serves both paths: `crew_supervisor::provision` writes a
 role's card and returns the `CREW_ROLE_CARD` environment plus its briefing, and the
 `crew-mcp` binary reads the same card to boot and register. See `docs/roles.md`.
+
+`crew-core` also carries the crew config (issue #25): `CrewConfig` is the declarative
+description `crew up` reads, a TOML document naming the roles and the lane each owns,
+the model (a crew default with per-role overrides), the repos in scope, the idle-stop
+timeout, and the commander. `from_toml` resolves the defaults (an omitted `roles`
+yields the default crew: commander, backend, frontend, qa) and validates the whole,
+so a documented config produces a valid crew and an invalid one fails with a precise
+`ConfigError` (an unknown commander, an overlapping ownership boundary, a duplicate or
+empty role, or a typo'd field). `to_cards(&broker)` produces the per-role `RoleCard`s
+the supervisor spawns, and `model_for(role)` resolves the spawn model. See
+`docs/config.md`.
 
 `crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
 crew tools with no per-task approval (issue #20), the way Seraphim registers the
