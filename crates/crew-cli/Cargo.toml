@@ -31,7 +31,15 @@ clap.workspace = true
 crew-core.workspace = true
 crew-broker.workspace = true
 crew-supervisor.workspace = true
+# The agent CLI shim (`crew send`/`inbox`/`roster`/`register`, issue #28) reuses the
+# same `Broker` client the MCP server does, so a runtime without MCP maps its I/O onto
+# the broker identically to the MCP path.
+crew-mcp.workspace = true
 # `crew up` runs the broker in-process (async) and waits on a shutdown signal; ureq
 # probes an already-running broker's health before starting one.
 tokio.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+# The shim integration test starts a broker in-process and inspects its JSON.
+serde_json.workspace = true

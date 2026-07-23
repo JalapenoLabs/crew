@@ -118,7 +118,9 @@ The full design is in `docs/architecture.md`. In short:
 - **Supervisor:** spawns one agent process per role with its role card, wires
   each to the broker, and manages lifecycle (start, idle-stop, restart).
 - **MCP server:** the agent-facing surface (`crew_send`, `crew_inbox`, ...).
-- **CLI (`crew`):** the human front-end (`crew up`, `crew send`, `crew watch`).
+- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`) plus the agent
+  CLI shim (`crew register` / `crew send` / `crew inbox` / `crew roster`) for a runtime
+  without MCP.
 
 ## Roles (summary)
 
@@ -148,6 +150,7 @@ docs/
   observability.md   one event stream: task history, activity logs, live count
   roles.md           the roster and the ownership model
   config.md          the declarative crew config `crew up` reads
+  codex.md           the Codex adapter: the agent CLI shim and its MCP parity
   roadmap.md         phased plan
 crates/
   crew-core          shared types + the event model (the dependency-graph root)
@@ -332,7 +335,19 @@ broker drains) and removes its pidfile. `crew down` signals that process (`SIGTE
 the pidfile the two share under the broker state dir), so `crew down` and Ctrl-C take
 the one graceful-shutdown path and neither leaves an orphaned process. The broker
 exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` drives the
-in-process broker's shutdown itself. `crew send` and `crew watch` follow.
+in-process broker's shutdown itself.
+
+`crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
+`crew inbox`, and `crew roster` let an agent on a runtime without MCP, such as Codex,
+coordinate through subcommands instead of tools. Each boots from the same role context
+the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`
+config) and reuses the same `crew_mcp::Broker` client, so a shim agent's I/O maps onto
+the broker identically to the MCP path: it registers on boot (appearing on the roster
+and stream) and sends and reads the same way. The shim is stateless (a short-lived
+process per call), so `crew inbox` reports every message currently addressed to the
+role, not only those since a previous call; that and the other parity gaps (no push,
+operator-launched rather than supervisor-spawned) are in `docs/codex.md`. The General's
+own `crew send` / `crew watch` front-end follows.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

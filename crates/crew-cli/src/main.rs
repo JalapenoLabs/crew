@@ -1,13 +1,17 @@
 //! The `crew` command-line front-end.
 //!
-//! The human front-end to the crew substrate: `crew up` brings a crew online,
-//! `crew send` posts as the General, `crew watch` tails the conversation, and
-//! `crew down` stands the crew down (see `docs/architecture.md`).
+//! Two audiences drive the crew through this one binary:
+//!
+//! - The operator brings a unit online and stands it down: `crew up` and `crew down`
+//!   (issue #26).
+//! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
+//!   `crew register`, `crew send`, `crew inbox`, and `crew roster` act as the role the
+//!   environment names, mapping its I/O onto the broker the same way the MCP tools do
+//!   (see `docs/codex.md`).
 //!
 //! `main` establishes the application conventions (issue #4): eyre errors, the
 //! mimalloc allocator, and the shared structured-logging init, then dispatches the
-//! parsed command. `crew up` and `crew down` land here (issue #26); `crew send` and
-//! `crew watch` follow.
+//! parsed command.
 
 use std::path::PathBuf;
 
@@ -17,6 +21,7 @@ use mimalloc::MiMalloc;
 
 mod down;
 mod paths;
+mod shim;
 mod up;
 
 /// mimalloc as the global allocator (M-MIMALLOC-APPS).
@@ -41,6 +46,23 @@ enum Command {
     },
     /// Stand the running crew down gracefully: stop the agents and deregister them.
     Down,
+    /// Register this agent's role on the roster (a runtime without MCP).
+    Register,
+    /// Send a message as this agent's role to a teammate, a channel, or the commander.
+    Send {
+        /// Direct-message one role (its `@role` channel).
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+        /// Post to a named channel: `all-units`, or a pair like `frontend+backend`.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// The message text (markdown).
+        body: String,
+    },
+    /// Read the messages addressed to this agent's role.
+    Inbox,
+    /// List the unit's roster: every role, its lane, and its liveness.
+    Roster,
 }
 
 fn main() -> Result<()> {
@@ -49,5 +71,9 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Up { config } => up::run(config.as_deref()),
         Command::Down => down::run(),
+        Command::Register => shim::register(),
+        Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
+        Command::Inbox => shim::inbox(),
+        Command::Roster => shim::roster(),
     }
 }
