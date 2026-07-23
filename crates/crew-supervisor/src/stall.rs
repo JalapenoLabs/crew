@@ -673,7 +673,8 @@ mod tests {
             "ts": ts,
             "from": { "kind": "role", "id": from },
             "channel": channel,
-            "kind": { "kind": "message", "data": { "kind": "answer", "body": "here you go" } },
+            "kind": { "kind": "message", "data": { "kind": "answer",
+                "in_reply_to": "11111111-1111-1111-1111-111111111111", "body": "here you go" } },
         })
     }
 

@@ -209,8 +209,13 @@ pub enum MessageKind {
         #[serde(default)]
         options: Vec<String>,
     },
-    /// Responds to a question.
-    Answer,
+    /// Responds to a question, naming the question it replies to.
+    Answer {
+        /// The id of the [`Message`] this answers, so a front-end can thread the reply
+        /// to its question and the commander can correlate the two. An answer always
+        /// replies to a specific question, so the reference is required.
+        in_reply_to: MessageId,
+    },
     /// Reports progress without asking anything.
     Status,
     /// References a produced thing: a branch, a PR, a file, or a route.
@@ -609,7 +614,9 @@ mod tests {
             envelope(message(MessageKind::Question {
                 options: vec!["SQLite".to_owned(), "in-memory".to_owned()],
             })),
-            envelope(message(MessageKind::Answer)),
+            envelope(message(MessageKind::Answer {
+                in_reply_to: MessageId::new(),
+            })),
             envelope(message(MessageKind::Status)),
             envelope(message(MessageKind::Artifact {
                 reference: "https://github.com/JalapenoLabs/crew/pull/8".to_owned(),
@@ -697,7 +704,9 @@ mod tests {
         for kind in [
             MessageKind::Note,
             MessageKind::Status,
-            MessageKind::Answer,
+            MessageKind::Answer {
+                in_reply_to: MessageId::new(),
+            },
             MessageKind::Question { options: vec![] },
         ] {
             assert!(!kind.is_directive(), "{kind:?} is not a directive");

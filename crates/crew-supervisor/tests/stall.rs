@@ -11,7 +11,7 @@ mod common;
 use std::time::Duration;
 
 use common::start_broker;
-use crew_core::{RoleId, Timestamp};
+use crew_core::{MessageId, RoleId, Timestamp};
 use crew_supervisor::{detect_stalls, RosterClient, StallKind};
 use serde_json::json;
 
@@ -21,13 +21,18 @@ fn roster() -> Vec<RoleId> {
 }
 
 /// Posts a message of `kind` from `role` to `channel` through the broker.
+///
+/// An `answer` carries a required `in_reply_to` reference (the question it answers); the
+/// stall detector keys on the sender and the kind, not the referenced id, so a fresh id
+/// stands in here.
 fn post_message(base: &str, role: &str, channel: &str, kind: &str, body: &str) {
+    let mut payload = json!({ "from": { "kind": "role", "id": role }, "kind": kind, "body": body });
+    if kind == "answer" {
+        payload["in_reply_to"] = json!(MessageId::new());
+    }
     ureq::post(&format!("{base}/channels/{channel}/messages"))
         .set("content-type", "application/json")
-        .send_string(
-            &json!({ "from": { "kind": "role", "id": role }, "kind": kind, "body": body })
-                .to_string(),
-        )
+        .send_string(&payload.to_string())
         .unwrap();
 }
 

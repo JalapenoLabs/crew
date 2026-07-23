@@ -72,7 +72,9 @@ posts to the channel named in the path, and `GET /events` reads the log.
 - `kind`, one of:
   - `order` gives a task to a role (title, scope, owned paths, acceptance).
   - `question` asks for a decision, with optional suggested options.
-  - `answer` responds to a question.
+  - `answer` responds to a question, naming the question it replies to (`in_reply_to`,
+    the answered message's id), so a front-end threads the reply and the commander
+    correlates the two.
   - `status` reports progress without asking anything.
   - `artifact` references a produced thing (a reference plus its kind: a branch, a
     PR, a file, or a route).

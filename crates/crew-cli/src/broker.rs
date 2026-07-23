@@ -252,7 +252,7 @@ fn message_kind(kind: &MessageKind) -> &'static str {
     match kind {
         MessageKind::Order { .. } => "order",
         MessageKind::Question { .. } => "question",
-        MessageKind::Answer => "answer",
+        MessageKind::Answer { .. } => "answer",
         MessageKind::Status => "status",
         MessageKind::Artifact { .. } => "artifact",
         MessageKind::Note => "note",
