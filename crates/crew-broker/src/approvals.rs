@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::events::JsonBody;
-use crate::state::{AppState, ApprovalEntry, ApprovalError};
+use crate::state::{AppState, ApprovalEntry, ApprovalError, ApprovalOutcome};
 
 /// The approval routes: read the gate, request approval, read one, and decide one.
 pub(crate) fn routes() -> Router<AppState> {
@@ -35,7 +35,31 @@ pub(crate) fn routes() -> Router<AppState> {
 
 /// `GET /approvals`: the live approval gate, every request and its standing, oldest first.
 async fn list(State(state): State<AppState>) -> Json<ApprovalsView> {
+    apply_timeout(&state);
     Json(ApprovalsView::from_state(&state))
+}
+
+/// Applies the approval timeout policy, publishing any auto-denials, before serving the gate.
+///
+/// Under the hold policy this is a no-op; under auto-deny it resolves the forgotten requests
+/// and rides each decision on the stream, so a blocked role's next poll sees the denial and
+/// the General sees it in `crew approvals`. Lazy, so no background sweeper is needed (#40).
+fn apply_timeout(state: &AppState) {
+    for outcome in state.expire_pending_approvals() {
+        state.publish(approval_event(Sender::General, outcome_event(outcome)));
+    }
+}
+
+/// Builds the `approval` event carrying a decision outcome.
+fn outcome_event(outcome: ApprovalOutcome) -> ApprovalEvent {
+    ApprovalEvent {
+        id: outcome.id,
+        role: outcome.role,
+        action: outcome.action,
+        detail: outcome.detail,
+        decision: outcome.decision,
+        reason: outcome.reason,
+    }
 }
 
 /// The `POST /approvals` body: a role's request to take a gated action.
@@ -98,6 +122,7 @@ async fn read(
     Path(id): Path<String>,
 ) -> Result<Json<ApprovalView>, ApiError> {
     let id = parse_id(&id)?;
+    apply_timeout(&state);
     let entry = state
         .approval(id)
         .ok_or_else(|| ApiError::not_found("no such approval request"))?;
@@ -135,22 +160,14 @@ async fn decide(
             "a denial needs a `reason`, so the role learns why and abandons the action cleanly",
         ));
     }
+    // Resolve any timed-out request first, so a decision races cleanly against the timeout.
+    apply_timeout(&state);
 
     let outcome = state
         .decide_approval(id, decision.approve, reason)
         .map_err(map_approval_error)?;
 
-    state.publish(approval_event(
-        Sender::General,
-        ApprovalEvent {
-            id: outcome.id,
-            role: outcome.role.clone(),
-            action: outcome.action,
-            detail: outcome.detail.clone(),
-            decision: outcome.decision,
-            reason: outcome.reason.clone(),
-        },
-    ));
+    state.publish(approval_event(Sender::General, outcome_event(outcome)));
 
     let entry = state
         .approval(id)
@@ -450,6 +467,28 @@ mod tests {
             "the earlier request is first"
         );
         assert_eq!(requests[1]["role"], "frontend");
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_request_auto_denies_under_the_timeout_policy() {
+        // A zero timeout auto-denies a request as soon as the gate is next read (issue #40).
+        let config = Config {
+            approval_timeout: Some(std::time::Duration::from_secs(0)),
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        let (_, request) = post(
+            &state,
+            "/approvals",
+            json!({ "role": "backend", "action": "merge" }),
+        )
+        .await;
+        let id = request["id"].as_str().unwrap().to_owned();
+
+        // Polling the request applies the timeout: it auto-denies with a timeout reason.
+        let (_, view) = get(&state, &format!("/approvals/{id}")).await;
+        assert_eq!(view["decision"], "denied");
+        assert!(view["reason"].as_str().unwrap().contains("auto-denied"));
     }
 
     #[tokio::test]

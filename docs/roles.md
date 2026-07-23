@@ -135,8 +135,9 @@ General approves or denies it: on an approval the role proceeds, on a denial it 
 action and records the reason. The broker is the authority, holding every request and its
 decision, and each request and decision rides the stream as an `approval` event, so the
 General is notified and the decision flows back (see `docs/observability.md`, the approval
-gate). Answering a request from the CLI (`crew approvals` / `crew approve` / `crew deny`), the
-notification, and the timeout policy are issue #40.
+gate). The General answers from the CLI (`crew approvals` / `crew approve` / `crew deny`), is
+pulled in by a native notification on a pending request, and a hold-vs-auto-deny timeout policy
+keeps a forgotten request from stalling the crew forever (issue #40).
 
 ## Default crew (start with 3 to 4)
 
