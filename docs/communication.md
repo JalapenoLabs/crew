@@ -77,8 +77,19 @@ differently from a status ping.
 An agent subscribes to its inbox stream and receives native notifications on new
 messages, so it spends no context polling. Because the stream is self-filtered,
 there is no "ignore your own writes" rule to remember. The broker, not a
-convention in a skill, guarantees it. Today a subscriber connects to `GET /stream`,
-an SSE feed of every event; the per-role self-filtering is a later refinement.
+convention in a skill, guarantees it.
+
+Two SSE feeds serve subscribers. `GET /stream` is the whole firehose: every event,
+live. `GET /inbox?role=<role>` is a role's own view, the events addressed to it
+(its direct `@role` channel, any pair channel it belongs to, and `all-units`), with
+an event whose sender is the subscribing role dropped at the source, so self-echo is
+impossible by construction (issue #10). Each event carries its log sequence as the
+SSE `id`; on reconnect the client's `Last-Event-ID` resumes right after the last
+event it received, replaying anything missed from the log before rejoining the live
+tail, so a dropped connection loses nothing. A fresh connection with no cursor
+starts at the live tail rather than replaying the whole history (that catch-up is
+the rolling summary's job, below). The canonical channel model and membership are
+issue #11.
 
 ## Secret scrubbing
 

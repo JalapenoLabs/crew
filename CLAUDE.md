@@ -176,7 +176,7 @@ vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
-`crewd` (the broker, issues #7, #8, #9, #11, #12, #13 and #14)
+`crewd` (the broker, issues #7, #8, #9, #10, #11, #12, #13 and #14)
 starts on loopback, serves `GET /health`, and shuts down gracefully. It keeps state
 behind a swappable `Storage` trait (append, query, roster read/write; issue #13): the
 daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus an in-memory
@@ -187,8 +187,11 @@ reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
 `ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
 masks configured secret values out of the event, persists it, and fans it to every
-subscriber on the `GET /stream` SSE feed. `GET /history` reads past events filtered
-by `channel`, `role`, `kind`, `task`, and `since`, ordered by `ts` then log
+subscriber. Subscribers read either `GET /stream`, the whole live feed, or
+`GET /inbox?role=<role>`, a role's live events filtered to its direct, pair, and
+`all-units` channels with its own messages dropped at the source and resumable from
+a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
+filtered by `channel`, `role`, `kind`, `task`, and `since`, ordered by `ts` then log
 position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
 under concurrent writes; `summary=true` is reserved (a `501` hook) for the Phase 2
 compaction (issue #12). The `/roster` endpoints expose who is in the unit (issue
@@ -197,7 +200,7 @@ compaction (issue #12). The `/roster` endpoints expose who is in the unit (issue
 `DELETE /roster/{role}`, and every change publishes a `lifecycle` event to
 `all-units`, so it rides history, `/stream`, and each inbox. Its `ChannelRouter`
 resolves a channel to the roles it reaches (issue #11), filtering a supplied roster
-through the `Channel` membership test. The self-filtered per-role streams and the
+through the `Channel` membership test. The live roster that feeds routing and the
 rolling-summary history are still scaffolds waiting for the phased build in
 `docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
 
