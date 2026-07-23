@@ -14,7 +14,7 @@
 //! scans the in-memory index; a backend with a real index (a database) overrides it
 //! to push the filter down, which is why the query types here stay backend-neutral.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -57,8 +57,16 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Returns the current roster.
     fn roster(&self) -> Roster;
 
-    /// Replaces the roster.
-    fn set_roster(&self, roster: Roster);
+    /// Registers or updates a role in the roster, returning whether it was present.
+    ///
+    /// Atomic: the read, update, and (for a durable backend) persist happen under one
+    /// lock, so concurrent registrations of different roles never lose each other.
+    fn register_role(&self, role: RoleId, status: RoleStatus) -> bool;
+
+    /// Removes a role from the roster, returning its prior status if it was present.
+    ///
+    /// Atomic, like [`register_role`](Storage::register_role).
+    fn deregister_role(&self, role: &RoleId) -> Option<RoleStatus>;
 
     /// Returns one filtered, ordered page of events (see [`EventQuery`]).
     ///
@@ -73,15 +81,42 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     }
 }
 
-/// The set of roles the crew knows about.
+/// A role's liveness: the current-state projection of its lifecycle events.
 ///
-/// Minimal on purpose: the roster/liveness ticket enriches each role with liveness
-/// and owned paths. What matters here is that a backend can read and write it, and a
-/// durable backend persists it across a restart.
+/// Maps onto the [`Lifecycle`](crew_core::Lifecycle) transitions on the stream:
+/// `working` is up and active, `idle` has no work in flight, `stopped` left cleanly,
+/// and `dead` died unexpectedly (a defibrillator recovery point).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Liveness {
+    /// Up and working.
+    Working,
+    /// Registered but idle, with no work in flight.
+    Idle,
+    /// Cleanly stopped.
+    Stopped,
+    /// Died unexpectedly.
+    Dead,
+}
+
+/// A role's roster entry: the paths it owns and its current liveness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleStatus {
+    /// The directory boundaries the role owns while working.
+    pub owned_paths: Vec<String>,
+    /// The role's current liveness.
+    pub liveness: Liveness,
+}
+
+/// The roles the crew knows about, each with its owned paths and liveness.
+///
+/// The substrate for the live agent count (issue #14): register a role on join,
+/// deregister on leave, and read the current membership. A durable backend persists
+/// it across a restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roster {
-    /// The known roles, kept sorted for a stable on-disk form.
-    roles: BTreeSet<RoleId>,
+    /// The known roles, keyed and sorted by id for a stable on-disk form.
+    roles: BTreeMap<RoleId, RoleStatus>,
 }
 
 impl Roster {
@@ -91,28 +126,34 @@ impl Roster {
         Self::default()
     }
 
-    /// Adds a role, returning whether it was newly inserted.
-    pub fn insert(&mut self, role: RoleId) -> bool {
-        self.roles.insert(role)
+    /// Registers or updates `role`, returning whether it was already present.
+    pub fn register(&mut self, role: RoleId, status: RoleStatus) -> bool {
+        self.roles.insert(role, status).is_some()
     }
 
-    /// Removes a role, returning whether it was present.
-    pub fn remove(&mut self, role: &RoleId) -> bool {
+    /// Removes `role`, returning its prior status if it was present.
+    pub fn deregister(&mut self, role: &RoleId) -> Option<RoleStatus> {
         self.roles.remove(role)
     }
 
-    /// Whether `role` is in the roster.
+    /// The status of `role`, if it is registered.
     #[must_use]
-    pub fn contains(&self, role: &RoleId) -> bool {
-        self.roles.contains(role)
+    pub fn get(&self, role: &RoleId) -> Option<&RoleStatus> {
+        self.roles.get(role)
     }
 
-    /// The roles in the roster, sorted.
-    pub fn roles(&self) -> impl Iterator<Item = &RoleId> {
+    /// Whether `role` is registered.
+    #[must_use]
+    pub fn contains(&self, role: &RoleId) -> bool {
+        self.roles.contains_key(role)
+    }
+
+    /// The roles and their status, sorted by role id.
+    pub fn iter(&self) -> impl Iterator<Item = (&RoleId, &RoleStatus)> {
         self.roles.iter()
     }
 
-    /// How many roles are in the roster.
+    /// How many roles are registered.
     #[must_use]
     pub fn len(&self) -> usize {
         self.roles.len()
@@ -328,8 +369,18 @@ impl Storage for MemoryStore {
             .clone()
     }
 
-    fn set_roster(&self, roster: Roster) {
-        *self.roster.lock().unwrap_or_else(PoisonError::into_inner) = roster;
+    fn register_role(&self, role: RoleId, status: RoleStatus) -> bool {
+        self.roster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .register(role, status)
+    }
+
+    fn deregister_role(&self, role: &RoleId) -> Option<RoleStatus> {
+        self.roster
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .deregister(role)
     }
 }
 
@@ -457,17 +508,20 @@ impl Storage for LogStore {
             .clone()
     }
 
-    fn set_roster(&self, roster: Roster) {
+    fn register_role(&self, role: RoleId, status: RoleStatus) -> bool {
         let mut guard = self.roster.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Err(err) = persist_roster(&self.roster_path, &roster) {
-            event!(
-                name: "broker.store.roster.persist.failed",
-                Level::ERROR,
-                error = %err,
-                "could not persist roster; keeping it in memory only",
-            );
+        let existed = guard.register(role, status);
+        save_roster(&self.roster_path, &guard);
+        existed
+    }
+
+    fn deregister_role(&self, role: &RoleId) -> Option<RoleStatus> {
+        let mut guard = self.roster.lock().unwrap_or_else(PoisonError::into_inner);
+        let prior = guard.deregister(role);
+        if prior.is_some() {
+            save_roster(&self.roster_path, &guard);
         }
-        *guard = roster;
+        prior
     }
 }
 
@@ -533,6 +587,19 @@ fn read_roster(path: &Path) -> Result<Roster> {
     }
 }
 
+/// Persists the roster, logging (not propagating) a write failure so a roster
+/// change never fails the request; the change stays in memory until the disk recovers.
+fn save_roster(path: &Path, roster: &Roster) {
+    if let Err(err) = persist_roster(path, roster) {
+        event!(
+            name: "broker.store.roster.persist.failed",
+            Level::ERROR,
+            error = %err,
+            "could not persist roster; keeping it in memory only",
+        );
+    }
+}
+
 /// Writes the roster atomically: to a temp file, then rename over the target.
 fn persist_roster(path: &Path, roster: &Roster) -> Result<()> {
     let tmp = path.with_file_name(format!("{ROSTER_FILE}.tmp"));
@@ -554,8 +621,8 @@ mod tests {
     };
 
     use super::{
-        query_events, EventFilter, EventKindTag, EventQuery, InvalidCursor, LogStore, MemoryStore,
-        Roster, Storage,
+        query_events, EventFilter, EventKindTag, EventQuery, InvalidCursor, Liveness, LogStore,
+        MemoryStore, RoleStatus, Storage,
     };
 
     /// A unique temp directory that removes itself on drop.
@@ -737,11 +804,21 @@ mod tests {
         store.append(message("backend", "all-units", ts(1)));
         assert_eq!(store.events().len(), 1);
 
-        let mut roster = Roster::new();
-        roster.insert(RoleId::new("backend"));
-        store.set_roster(roster.clone());
-        assert_eq!(store.roster(), roster);
-        assert!(store.roster().contains(&RoleId::new("backend")));
+        let backend = RoleId::new("backend");
+        let status = RoleStatus {
+            owned_paths: vec!["crates/crew-broker".to_owned()],
+            liveness: Liveness::Working,
+        };
+        assert!(
+            !store.register_role(backend.clone(), status.clone()),
+            "a fresh role is newly registered"
+        );
+        assert_eq!(store.roster().get(&backend), Some(&status));
+        assert!(store.deregister_role(&backend).is_some());
+        assert!(
+            !store.roster().contains(&backend),
+            "deregister removes the role"
+        );
     }
 
     #[test]
@@ -775,17 +852,33 @@ mod tests {
     fn log_store_persists_the_roster_across_a_restart() {
         let dir = TempDir::new();
         let store = LogStore::open(dir.path()).unwrap();
-        let mut roster = Roster::new();
-        roster.insert(RoleId::new("backend"));
-        roster.insert(RoleId::new("frontend"));
-        store.set_roster(roster);
+        store.register_role(
+            RoleId::new("backend"),
+            RoleStatus {
+                owned_paths: vec!["crates/crew-broker".to_owned()],
+                liveness: Liveness::Working,
+            },
+        );
+        store.register_role(
+            RoleId::new("frontend"),
+            RoleStatus {
+                owned_paths: vec![],
+                liveness: Liveness::Idle,
+            },
+        );
         drop(store);
 
         let reopened = LogStore::open(dir.path()).unwrap();
         let roster = reopened.roster();
         assert_eq!(roster.len(), 2);
         assert!(roster.contains(&RoleId::new("backend")));
-        assert!(roster.contains(&RoleId::new("frontend")));
+        assert_eq!(
+            roster
+                .get(&RoleId::new("frontend"))
+                .map(|status| status.liveness),
+            Some(Liveness::Idle),
+            "liveness persists across a restart",
+        );
     }
 
     #[test]

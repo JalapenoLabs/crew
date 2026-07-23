@@ -11,7 +11,9 @@
 //! `GET /inbox?role=<role>`, a role's live, self-filtered events resumable from a
 //! `Last-Event-ID` cursor (issue #10). A `GET /history` reads past events, filtered,
 //! time-ordered, and paginated with a cursor stable under concurrent writes
-//! (issue #12). The roster and the rolling-summary history come in later tickets.
+//! (issue #12), and the `/roster` endpoints expose the unit's roles and liveness,
+//! publishing each change as a lifecycle event (issue #14). The rolling-summary
+//! history comes in a later ticket.
 //!
 //! Run it with the `crewd` binary, or drive it as a library through [`run`].
 //!
@@ -23,6 +25,7 @@ mod error;
 mod events;
 mod history;
 mod inbox;
+mod roster;
 mod router;
 mod secrets;
 mod serve;
@@ -36,6 +39,6 @@ pub use secrets::{mask, Scrubber};
 pub use serve::run;
 pub use state::{AppState, Sequenced};
 pub use store::{
-    EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, LogStore, MemoryStore, Roster,
-    Storage,
+    EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, Liveness, LogStore,
+    MemoryStore, RoleStatus, Roster, Storage,
 };

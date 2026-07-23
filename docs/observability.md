@@ -73,9 +73,19 @@ open. A `summary=true` rolling compaction is reserved for Phase 2.
 ## Live agent count and roster
 
 The supervisor knows the roster and each agent's liveness, so the broker exposes
-it (`GET /roster`) plus a roster-change SSE event on every transition. A UI shows
-the live agent count and per-role status (working, idle, stopped, dead) cheaply,
-with no polling. The count is simply the current liveness projection.
+it (`GET /roster`) plus a roster-change event on every transition. A UI shows the
+live agent count and per-role status (working, idle, stopped, dead) cheaply, with
+no polling. The count is simply the current liveness projection.
+
+The broker implements the substrate (issue #14): `GET /roster` lists roles with
+their owned paths and liveness; a role or the supervisor registers on join with
+`POST /roster` (body `{role, owned_paths?, liveness?}`, defaulting to `working`)
+and leaves with `DELETE /roster/{role}`. Every change is a first-class event on the
+stream, published as a `lifecycle` event (`started` / `restarted` / `idle` /
+`stopped` / `died`) to `all-units`, so it rides `/history`, `/stream`, and each
+role's inbox with no separate capture path. The roster lives behind the storage
+trait, so a durable backend keeps it across a restart. The live count is the
+projection of these lifecycle events, computed by any consumer from the stream.
 
 ## Runewood
 

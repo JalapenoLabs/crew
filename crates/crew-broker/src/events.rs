@@ -37,7 +37,7 @@ pub(crate) fn routes() -> Router<AppState> {
 /// Unlike axum's built-in `Json`, a bad body (invalid JSON, wrong types, an
 /// unknown message kind, a missing per-kind field) yields a 400 with a
 /// `{ "error": ... }` body instead of a plain-text rejection, and never a panic.
-struct JsonBody<T>(T);
+pub(crate) struct JsonBody<T>(pub T);
 
 impl<S, T> FromRequest<S> for JsonBody<T>
 where

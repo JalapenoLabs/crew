@@ -85,12 +85,12 @@ impl AppState {
 
     /// Scrubs an event of secrets, appends it to the log, and fans it to subscribers.
     ///
-    /// Returns the stored event with the sequence number it was assigned. Masks any
-    /// configured secret first, so a leaked value reaches neither the log nor a
-    /// subscriber, then appends and broadcasts under one lock, so events reach
-    /// subscribers in the same order they are stored and every `Last-Event-ID` cursor
-    /// stays monotonic. A send with no live subscribers is not an error: the event is
-    /// stored, so a later subscriber replays it from the log.
+    /// The one path every emitter shares (a posted message, a roster change). Returns
+    /// the stored event with the sequence number it was assigned. Masks any configured
+    /// secret first, so a leaked value reaches neither the log nor a subscriber, then
+    /// appends and broadcasts under one lock, so events reach subscribers in the same
+    /// order they are stored and every `Last-Event-ID` cursor stays monotonic. A send
+    /// with no live subscribers is not an error: the event is stored for a later reader.
     pub fn publish(&self, mut event: Event) -> Sequenced {
         // Mask before either sink, so the persisted log and every live stream carry
         // the same scrubbed event.
