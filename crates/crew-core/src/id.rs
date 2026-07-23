@@ -139,7 +139,8 @@ uuid_id! {
 /// Who emitted an event: a role-scoped agent, or the General (the human).
 ///
 /// Modeling the human as a distinct variant lets a consumer tell an order from
-/// the General apart from one relayed by the commander, without string matching.
+/// the General apart from one relayed by the commander, without string
+/// matching.
 ///
 /// # Examples
 /// ```

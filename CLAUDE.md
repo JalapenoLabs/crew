@@ -661,8 +661,15 @@ already-running `crewd` or starts its own.
   `clippy`), so a fresh clone, CI, and any container all build with the same
   compiler. rustup selects it automatically inside the repo; pass `cargo
   +<pinned>` (e.g. `cargo +1.88 build`) when you need it explicitly from outside.
-- **Formatting** is pinned in `rustfmt.toml` (stable options only). Run
-  `cargo fmt` to apply it and `cargo fmt --check` to verify.
+- **Formatting** is pinned in `rustfmt.toml`. The stable options apply on the pinned
+  build toolchain; run `cargo fmt` to apply them and `cargo fmt --check` to verify.
+  The richer import-grouping and comment options (`group_imports`,
+  `imports_granularity`, `wrap_comments`, `format_code_in_doc_comments`) are
+  nightly-only (issue #60): run `cargo +<nightly> fmt` to apply them, where
+  `<nightly>` is the date pinned as `NIGHTLY` in `.github/workflows/ci.yml`. The
+  stable `cargo fmt` ignores those options (it warns and passes), so both toolchains
+  agree on the committed formatting. `wrap_comments` needs a second `fmt` pass to
+  settle; run it until `--check` is clean.
 - **Application conventions** (issue #4): **eyre** is the single application error
   type (M-APP-ERROR); **mimalloc** is the global allocator in every binary
   (M-MIMALLOC-APPS); logging is **tracing** with structured, named events
@@ -673,10 +680,12 @@ already-running `crewd` or starts its own.
   `[workspace.lints]` and every crate inherits them. Override a lint locally with
   `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
 - **CI gate** (`.github/workflows/ci.yml`): every pull request and every push to
-  `main` and `develop` runs three independent jobs on the pinned toolchain, so
-  each reports its own status and one failure never blocks the rest: `cargo fmt
-  --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`. Keep the
-  tree clippy-clean at that level.
+  `main` and `develop` runs four independent jobs, so each reports its own status
+  and one failure never blocks the rest. Three run on the pinned build toolchain:
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+  The fourth, `Format (nightly)`, runs `cargo +<nightly> fmt --all --check` on the
+  date-pinned nightly (the `NIGHTLY` env) to enforce the nightly-only formatting
+  options (issue #60). Keep the tree clippy-clean and formatted at that level.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
 - **Git:** commit and push only when asked. Never add a co-author trailer. Never
   self-assign PR credit.

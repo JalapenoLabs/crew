@@ -1,20 +1,24 @@
 //! Per-role git worktree isolation (issue #43).
 //!
-//! Parallel roles editing the same repo clobber each other's working tree. A git
-//! **worktree** gives each role its own checked-out copy of a repo on its own branch,
-//! so two roles editing at once never corrupt each other: git keeps each worktree's
-//! index and files separate, sharing only the object store. The supervisor creates one
-//! per role of each repo the crew is configured to touch, points the agent's working
-//! directory at it, and cleans it up on stand-down.
+//! Parallel roles editing the same repo clobber each other's working tree. A
+//! git **worktree** gives each role its own checked-out copy of a repo on its
+//! own branch, so two roles editing at once never corrupt each other: git keeps
+//! each worktree's index and files separate, sharing only the object store. The
+//! supervisor creates one per role of each repo the crew is configured to
+//! touch, points the agent's working directory at it, and cleans it up on
+//! stand-down.
 //!
-//! Cleanup preserves work: [`remove`](Worktree::remove) runs `git worktree remove`
-//! without `--force`, so an **unchanged** worktree is removed and one with uncommitted
-//! changes is kept, since integrating a role's work is a deliberate later step (#48).
-//! A role that commits its work to its branch leaves a clean worktree, so removing it
-//! drops only the checkout while the branch (and its commits) survive for integration.
+//! Cleanup preserves work: [`remove`](Worktree::remove) runs `git worktree
+//! remove` without `--force`, so an **unchanged** worktree is removed and one
+//! with uncommitted changes is kept, since integrating a role's work is a
+//! deliberate later step (#48). A role that commits its work to its branch
+//! leaves a clean worktree, so removing it drops only the checkout while the
+//! branch (and its commits) survive for integration.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use crew_core::RoleId;
 use eyre::{bail, Result, WrapErr};
@@ -39,13 +43,15 @@ impl Worktree {
     /// Creates an isolated worktree of `repo` for `role` at `path`, on branch
     /// `crew/<role>`.
     ///
-    /// The branch is created from the repo's current `HEAD`. A stale worktree left by a
-    /// prior run is pruned first, and an existing `crew/<role>` branch is reused rather
-    /// than duplicated, so bringing the same crew up twice is idempotent.
+    /// The branch is created from the repo's current `HEAD`. A stale worktree
+    /// left by a prior run is pruned first, and an existing `crew/<role>`
+    /// branch is reused rather than duplicated, so bringing the same crew
+    /// up twice is idempotent.
     ///
     /// # Errors
-    /// Returns an error if `repo` is not a git repository, or git cannot add the
-    /// worktree (for example the branch is already checked out elsewhere).
+    /// Returns an error if `repo` is not a git repository, or git cannot add
+    /// the worktree (for example the branch is already checked out
+    /// elsewhere).
     pub fn create(repo: &Path, role: &RoleId, path: &Path) -> Result<Self> {
         let repo = repo
             .canonicalize()
@@ -97,7 +103,8 @@ impl Worktree {
         &self.branch
     }
 
-    /// Whether the worktree has uncommitted changes (tracked edits or untracked files).
+    /// Whether the worktree has uncommitted changes (tracked edits or untracked
+    /// files).
     ///
     /// # Errors
     /// Returns an error if git cannot read the worktree's status.
@@ -106,16 +113,18 @@ impl Worktree {
         Ok(!out.trim().is_empty())
     }
 
-    /// Removes the worktree if it has no uncommitted changes, returning whether it was
-    /// removed.
+    /// Removes the worktree if it has no uncommitted changes, returning whether
+    /// it was removed.
     ///
-    /// A clean worktree is removed (its branch, and any commits on it, survive); one
-    /// with uncommitted changes is kept, so a role's unintegrated work is never
-    /// discarded. This is the automatic cleanup of an unchanged worktree.
+    /// A clean worktree is removed (its branch, and any commits on it,
+    /// survive); one with uncommitted changes is kept, so a role's
+    /// unintegrated work is never discarded. This is the automatic cleanup
+    /// of an unchanged worktree.
     ///
     /// # Errors
-    /// Returns an error only if git fails for a reason other than the worktree being
-    /// dirty; a dirty worktree is reported as kept (`Ok(false)`), not an error.
+    /// Returns an error only if git fails for a reason other than the worktree
+    /// being dirty; a dirty worktree is reported as kept (`Ok(false)`), not
+    /// an error.
     pub fn remove(&self) -> Result<bool> {
         // `git worktree remove` (without --force) refuses a dirty worktree, which is
         // exactly the policy: unchanged is cleaned, changed is preserved.
@@ -150,8 +159,8 @@ impl Worktree {
     }
 }
 
-/// Removes every worktree, best-effort: a changed one is kept and a hard failure is
-/// logged, so cleaning up the crew never fails a stand-down.
+/// Removes every worktree, best-effort: a changed one is kept and a hard
+/// failure is logged, so cleaning up the crew never fails a stand-down.
 pub(crate) fn clean_all(worktrees: &[Worktree]) {
     for tree in worktrees {
         if let Err(err) = tree.remove() {
@@ -167,7 +176,8 @@ pub(crate) fn clean_all(worktrees: &[Worktree]) {
     }
 }
 
-/// Runs a git command in `dir`, returning its stdout or an error carrying stderr.
+/// Runs a git command in `dir`, returning its stdout or an error carrying
+/// stderr.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -184,8 +194,9 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{git, Worktree};
     use crew_core::RoleId;
+
+    use super::{git, Worktree};
 
     /// A fresh temp directory unique to a test, cleaned on entry.
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -195,7 +206,8 @@ mod tests {
         dir
     }
 
-    /// Initializes a git repo with one commit, so a worktree can branch off HEAD.
+    /// Initializes a git repo with one commit, so a worktree can branch off
+    /// HEAD.
     fn init_repo(dir: &std::path::Path) {
         git(dir, &["init", "-q", "-b", "main"]).unwrap();
         git(dir, &["config", "user.email", "crew@test"]).unwrap();
@@ -282,7 +294,8 @@ mod tests {
         let role = RoleId::new("docs");
         let first = Worktree::create(&repo, &role, &root.join("docs")).unwrap();
         first.remove().unwrap();
-        // The branch `crew/docs` now exists; creating again reuses it rather than failing.
+        // The branch `crew/docs` now exists; creating again reuses it rather than
+        // failing.
         let second = Worktree::create(&repo, &role, &root.join("docs")).unwrap();
         assert_eq!(second.branch(), "crew/docs");
         assert!(second.path().exists());

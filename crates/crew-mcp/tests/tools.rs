@@ -1,15 +1,18 @@
 //! End-to-end test of the MCP tools against a real broker (issue #17).
 //!
-//! It starts a `crewd` instance in-process on an ephemeral loopback port, then drives
-//! the synchronous [`Broker`] client the MCP server uses. Together the assertions
-//! prove the acceptance: an agent can send, receive its addressed messages (with its
-//! own filtered out), and list the roster.
+//! It starts a `crewd` instance in-process on an ephemeral loopback port, then
+//! drives the synchronous [`Broker`] client the MCP server uses. Together the
+//! assertions prove the acceptance: an agent can send, receive its addressed
+//! messages (with its own filtered out), and list the roster.
 //!
-//! The broker runs on a background thread with its own tokio runtime, so the test body
-//! stays synchronous and can call the blocking `ureq`-based client directly.
+//! The broker runs on a background thread with its own tokio runtime, so the
+//! test body stays synchronous and can call the blocking `ureq`-based client
+//! directly.
 
-use std::net::{Ipv4Addr, TcpListener};
-use std::thread;
+use std::{
+    net::{Ipv4Addr, TcpListener},
+    thread,
+};
 
 use crew_broker::{AppState, Config};
 use crew_core::{Channel, RoleId};
@@ -17,8 +20,8 @@ use crew_mcp::Broker;
 
 /// A broker serving on an ephemeral loopback port, driven over HTTP.
 ///
-/// The serve thread is detached: it lives until the test process exits, which is all
-/// the request/response tools need (none hold a long-lived stream open).
+/// The serve thread is detached: it lives until the test process exits, which
+/// is all the request/response tools need (none hold a long-lived stream open).
 struct TestBroker {
     base: String,
 }
@@ -63,7 +66,8 @@ impl TestBroker {
             .unwrap();
     }
 
-    /// Posts a plain note as the General to `channel`, standing in for a human brief.
+    /// Posts a plain note as the General to `channel`, standing in for a human
+    /// brief.
     fn general_note(&self, channel: &str, body: &str) {
         let payload = serde_json::json!({
             "from": { "kind": "general" },
@@ -111,8 +115,8 @@ fn an_agent_sends_receives_self_filtered_and_lists_the_roster() {
     );
 
     // The broadcast does reach a different teammate. Frontend's own earlier direct
-    // message went to `@backend`, which does not address frontend, so its inbox holds
-    // only the broadcast.
+    // message went to `@backend`, which does not address frontend, so its inbox
+    // holds only the broadcast.
     let broadcast = frontend.inbox().unwrap();
     assert_eq!(
         broadcast.len(),
@@ -148,8 +152,8 @@ fn a_brief_defaults_to_the_commander_who_fans_orders_out() {
     let mut commander = broker.client("commander");
     let mut backend = broker.client("backend");
 
-    // The General briefs the crew without naming a target: the shared rule resolves it
-    // to the commander's channel, and only the commander receives it.
+    // The General briefs the crew without naming a target: the shared rule resolves
+    // it to the commander's channel, and only the commander receives it.
     let default_channel = Channel::resolve(None, None, &RoleId::new("commander"))
         .expect("an unaddressed brief resolves to the commander")
         .name();

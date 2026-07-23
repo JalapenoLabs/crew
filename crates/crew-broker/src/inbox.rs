@@ -1,43 +1,49 @@
-//! A role's live event streams over Server-Sent Events: its inbox, and its timeline.
+//! A role's live event streams over Server-Sent Events: its inbox, and its
+//! timeline.
 //!
-//! `GET /inbox?role=<role>` delivers the events **addressed to** a role: its direct
-//! `@role` channel, any pair channel it belongs to, and `all-units`. The role's own
-//! messages are filtered out at the source, so the old tail self-echo hack is gone by
-//! construction, not by convention. This is the delivery stream: what a role must act
-//! on.
+//! `GET /inbox?role=<role>` delivers the events **addressed to** a role: its
+//! direct `@role` channel, any pair channel it belongs to, and `all-units`. The
+//! role's own messages are filtered out at the source, so the old tail
+//! self-echo hack is gone by construction, not by convention. This is the
+//! delivery stream: what a role must act on.
 //!
-//! `GET /activity?agent=<role>` delivers the role's full **activity timeline** (issue
-//! #30): what it sent (messages, its lifecycle, its activity) plus what it received.
-//! Unlike the inbox it is not self-filtered, since a timeline is what the role does as
-//! well as what reaches it. It is the live counterpart of `GET /history?agent=<role>`.
+//! `GET /activity?agent=<role>` delivers the role's full **activity timeline**
+//! (issue #30): what it sent (messages, its lifecycle, its activity) plus what
+//! it received. Unlike the inbox it is not self-filtered, since a timeline is
+//! what the role does as well as what reaches it. It is the live counterpart of
+//! `GET /history?agent=<role>`.
 //!
-//! Both share one SSE engine ([`role_stream`]) parameterized by a per-event predicate,
-//! so the replay-from-`Last-Event-ID` and live-tail machinery is written once. Each
-//! event carries its log sequence as the SSE `id`, so a reconnecting client resumes
-//! without loss.
+//! Both share one SSE engine ([`role_stream`]) parameterized by a per-event
+//! predicate, so the replay-from-`Last-Event-ID` and live-tail machinery is
+//! written once. Each event carries its log sequence as the SSE `id`, so a
+//! reconnecting client resumes without loss.
 //!
-//! The channel-naming model here is the minimal resolution the inbox needs; issue
-//! #11 owns the canonical channel model and membership.
+//! The channel-naming model here is the minimal resolution the inbox needs;
+//! issue #11 owns the canonical channel model and membership.
 
 use std::convert::Infallible;
 
-use axum::extract::{Query, State};
-use axum::http::HeaderMap;
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::routing::get;
-use axum::Router;
+use axum::{
+    extract::{Query, State},
+    http::HeaderMap,
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
+    routing::get,
+    Router,
+};
 use crew_core::{ChannelId, Event, RoleId, Sender};
 use serde::Deserialize;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
-use crate::error::ApiError;
-use crate::state::{AppState, Sequenced};
+use crate::{
+    error::ApiError,
+    state::{AppState, Sequenced},
+};
 
 /// The channel that reaches every live role (see `docs/communication.md`).
 const ALL_UNITS: &str = "all-units";
 
-/// The per-role stream routes: the self-filtered inbox and the full activity timeline.
+/// The per-role stream routes: the self-filtered inbox and the full activity
+/// timeline.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/inbox", get(inbox))
@@ -65,13 +71,14 @@ type Keep = fn(&Event, &RoleId) -> bool;
 ///
 /// Delivers direct (`@role`), pair, and `all-units` events, filtering out the
 /// role's own messages. On reconnect the client's `Last-Event-ID` resumes the
-/// stream right after the last event it received, replaying anything it missed from
-/// the log before switching to the live tail, so no addressed event is lost. A
-/// fresh connection with no cursor starts at the live tail rather than replaying the
-/// whole history.
+/// stream right after the last event it received, replaying anything it missed
+/// from the log before switching to the live tail, so no addressed event is
+/// lost. A fresh connection with no cursor starts at the live tail rather than
+/// replaying the whole history.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] if the `role` query parameter is missing or empty.
+/// Returns a 400 [`ApiError`] if the `role` query parameter is missing or
+/// empty.
 async fn inbox(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -81,16 +88,19 @@ async fn inbox(
     Ok(role_stream(&state, &headers, role, event_reaches_role))
 }
 
-/// `GET /activity?agent=<role>`: stream a role's full activity timeline over SSE.
+/// `GET /activity?agent=<role>`: stream a role's full activity timeline over
+/// SSE.
 ///
-/// Delivers the role's own events (messages it sent, its lifecycle, its activity) and
-/// the messages addressed to it. Unlike the inbox it is not self-filtered, since a
-/// timeline is what the role does as well as what reaches it. It resumes from
-/// `Last-Event-ID` and starts a fresh connection at the live tail, exactly as the
-/// inbox does. This is the live counterpart of `GET /history?agent=<role>`.
+/// Delivers the role's own events (messages it sent, its lifecycle, its
+/// activity) and the messages addressed to it. Unlike the inbox it is not
+/// self-filtered, since a timeline is what the role does as well as what
+/// reaches it. It resumes from `Last-Event-ID` and starts a fresh connection at
+/// the live tail, exactly as the inbox does. This is the live counterpart of
+/// `GET /history?agent=<role>`.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] if the `agent` query parameter is missing or empty.
+/// Returns a 400 [`ApiError`] if the `agent` query parameter is missing or
+/// empty.
 async fn activity(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -100,7 +110,8 @@ async fn activity(
     Ok(role_stream(&state, &headers, role, Event::in_timeline_of))
 }
 
-/// Validates the required role-naming query parameter, rejecting a missing or blank one.
+/// Validates the required role-naming query parameter, rejecting a missing or
+/// blank one.
 fn require_role(value: Option<&str>, param: &str) -> Result<RoleId, ApiError> {
     let role = value.unwrap_or_default().trim();
     if role.is_empty() {
@@ -111,12 +122,13 @@ fn require_role(value: Option<&str>, param: &str) -> Result<RoleId, ApiError> {
     Ok(RoleId::new(role))
 }
 
-/// The shared per-role SSE engine: replay the matching backlog, then stream live.
+/// The shared per-role SSE engine: replay the matching backlog, then stream
+/// live.
 ///
-/// Subscribes before snapshotting the log, so an event appended while the backlog is
-/// read is buffered on the receiver and delivered live rather than missed. `keep`
-/// decides which events reach this role's stream, so the inbox and the activity
-/// timeline share one replay-and-live implementation.
+/// Subscribes before snapshotting the log, so an event appended while the
+/// backlog is read is buffered on the receiver and delivered live rather than
+/// missed. `keep` decides which events reach this role's stream, so the inbox
+/// and the activity timeline share one replay-and-live implementation.
 fn role_stream(
     state: &AppState,
     headers: &HeaderMap,
@@ -163,8 +175,8 @@ fn role_stream(
 
 /// Parses the `Last-Event-ID` reconnect cursor from the request headers.
 ///
-/// Returns `None` when the header is absent or not a sequence number, so a client
-/// with no valid cursor starts from the live tail.
+/// Returns `None` when the header is absent or not a sequence number, so a
+/// client with no valid cursor starts from the live tail.
 fn last_event_id(headers: &HeaderMap) -> Option<u64> {
     headers
         .get("last-event-id")
@@ -174,8 +186,8 @@ fn last_event_id(headers: &HeaderMap) -> Option<u64> {
 
 /// Whether `event` should be delivered to `role`'s inbox.
 ///
-/// True when the event's channel addresses the role and the role is not the sender:
-/// a role never receives its own messages.
+/// True when the event's channel addresses the role and the role is not the
+/// sender: a role never receives its own messages.
 fn event_reaches_role(event: &Event, role: &RoleId) -> bool {
     if let Sender::Role(from) = &event.from {
         if from == role {
@@ -185,11 +197,12 @@ fn event_reaches_role(event: &Event, role: &RoleId) -> bool {
     channel_addresses_role(&event.channel, role)
 }
 
-/// Whether a channel addresses `role`, by the naming model in `docs/communication.md`.
+/// Whether a channel addresses `role`, by the naming model in
+/// `docs/communication.md`.
 ///
-/// `all-units` reaches every role, `@role` is a direct point-to-point channel, and a
-/// `a+b` pair channel reaches its two named members. Any other name reaches no one
-/// until issue #11 lands the canonical channel model.
+/// `all-units` reaches every role, `@role` is a direct point-to-point channel,
+/// and a `a+b` pair channel reaches its two named members. Any other name
+/// reaches no one until issue #11 lands the canonical channel model.
 fn channel_addresses_role(channel: &ChannelId, role: &RoleId) -> bool {
     let channel = channel.as_str();
     let role = role.as_str();
@@ -207,8 +220,9 @@ fn channel_addresses_role(channel: &ChannelId, role: &RoleId) -> bool {
 
 /// Renders an event as a Server-Sent Event carrying its sequence as the `id`.
 ///
-/// Returns `None` only if the event fails to serialize, which cannot happen for a
-/// well-formed [`Event`]; such an event is skipped rather than closing the stream.
+/// Returns `None` only if the event fails to serialize, which cannot happen for
+/// a well-formed [`Event`]; such an event is skipped rather than closing the
+/// stream.
 fn to_sse(seq: u64, event: &Event) -> Option<SseEvent> {
     SseEvent::default()
         .id(seq.to_string())
@@ -220,23 +234,24 @@ fn to_sse(seq: u64, event: &Event) -> Option<SseEvent> {
 mod tests {
     use std::time::Duration;
 
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender};
     use serde_json::{json, Value};
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     use super::{channel_addresses_role, event_reaches_role};
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     fn role(name: &str) -> RoleId {
         RoleId::new(name)
     }
 
-    /// A message event on `channel` from role `from`, for the addressing unit tests.
+    /// A message event on `channel` from role `from`, for the addressing unit
+    /// tests.
     fn message_from(from: &str, channel: &str) -> Event {
         Event {
             ts: crew_core::Timestamp::now(),
@@ -295,8 +310,8 @@ mod tests {
         assert!(event_reaches_role(&from_general, &role("backend")));
     }
 
-    /// Posts a note from `from` to `channel`, asserting it is accepted. The channel
-    /// travels in the path, so it is not a body field.
+    /// Posts a note from `from` to `channel`, asserting it is accepted. The
+    /// channel travels in the path, so it is not a body field.
     async fn post(state: &AppState, from: &str, channel: &str, body: &str) {
         let message = json!({
             "from": { "kind": "role", "id": from },
@@ -342,8 +357,8 @@ mod tests {
         api::build(state.clone()).oneshot(request).await.unwrap()
     }
 
-    /// Reads up to `want` Server-Sent Events `(id, data)` from a body, giving up
-    /// after a short budget since the live tail never closes the stream.
+    /// Reads up to `want` Server-Sent Events `(id, data)` from a body, giving
+    /// up after a short budget since the live tail never closes the stream.
     async fn read_events(body: Body, want: usize) -> Vec<(u64, Value)> {
         let mut stream = body.into_data_stream();
         let mut buffer: Vec<u8> = Vec::new();
@@ -360,7 +375,8 @@ mod tests {
         events
     }
 
-    /// Drains whole SSE blocks (double-newline separated) from `buffer` into `events`.
+    /// Drains whole SSE blocks (double-newline separated) from `buffer` into
+    /// `events`.
     fn drain_events(buffer: &mut Vec<u8>, events: &mut Vec<(u64, Value)>) {
         while let Some(pos) = buffer.windows(2).position(|window| window == b"\n\n") {
             let block: Vec<u8> = buffer.drain(..pos + 2).collect();

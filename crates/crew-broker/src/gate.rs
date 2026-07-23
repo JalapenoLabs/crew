@@ -1,33 +1,39 @@
-//! The adversarial done-gate: submit work for verification, and record the verdict
-//! (issue #47).
+//! The adversarial done-gate: submit work for verification, and record the
+//! verdict (issue #47).
 //!
-//! "Done" is verified, not asserted. A role does not report its own task done; when it
-//! believes the work meets the acceptance criteria it submits it here (`POST
-//! /gate/submit`), and an independent role then tries to break it against those criteria
-//! and records a verdict (`POST /gate/verdict`). The gate refuses a verdict from the
-//! task's own owner and one on a task that is not awaiting verification, so a task
-//! reaches [`Passed`](Verdict::Passed) only when a role other than the owner could not
-//! break it. A [`Failed`](Verdict::Failed) verdict returns the work to the owner with the
+//! "Done" is verified, not asserted. A role does not report its own task done;
+//! when it believes the work meets the acceptance criteria it submits it here
+//! (`POST /gate/submit`), and an independent role then tries to break it
+//! against those criteria and records a verdict (`POST /gate/verdict`). The
+//! gate refuses a verdict from the task's own owner and one on a task that is
+//! not awaiting verification, so a task reaches [`Passed`](Verdict::Passed)
+//! only when a role other than the owner could not break it. A
+//! [`Failed`](Verdict::Failed) verdict returns the work to the owner with the
 //! specific failure, as an actionable handback in its inbox.
 //!
-//! Every step is a first-class `verification` event on the stream (to `all-units`), so
-//! the operator sees the gate in action and `GET /gate` reads live ownership (see
-//! `docs/observability.md`). The gate state lives in the broker ([`AppState`]).
+//! Every step is a first-class `verification` event on the stream (to
+//! `all-units`), so the operator sees the gate in action and `GET /gate` reads
+//! live ownership (see `docs/observability.md`). The gate state lives in the
+//! broker ([`AppState`]).
 
 use std::fmt::Write as _;
 
-use axum::extract::State;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use crew_core::{
     Channel, ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender,
     Timestamp, Verdict, VerificationEvent, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::{AppState, VerdictError, VerdictOutcome};
+use crate::{
+    error::ApiError,
+    events::JsonBody,
+    state::{AppState, VerdictError, VerdictOutcome},
+};
 
 /// The done-gate routes: read the gate, submit work, and record a verdict.
 pub(crate) fn routes() -> Router<AppState> {
@@ -37,7 +43,8 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/gate/verdict", post(verdict))
 }
 
-/// `GET /gate`: the live done-gate, every task under verification and its standing.
+/// `GET /gate`: the live done-gate, every task under verification and its
+/// standing.
 async fn read(State(state): State<AppState>) -> Json<GateView> {
     Json(GateView::from_state(&state))
 }
@@ -49,21 +56,21 @@ struct Submission {
     role: String,
     /// The task, named by its title (the order's title).
     task: String,
-    /// The acceptance criteria the work claims to meet; the verifier tries to break it
-    /// against these.
+    /// The acceptance criteria the work claims to meet; the verifier tries to
+    /// break it against these.
     #[serde(default)]
     acceptance: String,
-    /// An optional reviewer to notify, so the request reaches its inbox; omit for an
-    /// open call the crew picks up off the stream.
+    /// An optional reviewer to notify, so the request reaches its inbox; omit
+    /// for an open call the crew picks up off the stream.
     #[serde(default)]
     to: Option<String>,
 }
 
 /// `POST /gate/submit`: submit work for adversarial verification.
 ///
-/// Records the task as awaiting an independent verifier and announces it on the stream.
-/// This does not mark the work done: only an independent [`Passed`](Verdict::Passed)
-/// verdict does.
+/// Records the task as awaiting an independent verifier and announces it on the
+/// stream. This does not mark the work done: only an independent
+/// [`Passed`](Verdict::Passed) verdict does.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if the role or task is empty.
@@ -87,8 +94,8 @@ async fn submit(
         },
     ));
 
-    // A named reviewer is notified in its inbox; otherwise the submission is an open
-    // call the commander or a verifier picks up off the stream.
+    // A named reviewer is notified in its inbox; otherwise the submission is an
+    // open call the commander or a verifier picks up off the stream.
     if let Some(reviewer) = request
         .to
         .as_deref()
@@ -110,22 +117,25 @@ struct VerdictReport {
     role: String,
     /// The task under verification, by title.
     task: String,
-    /// Whether the verifier could not break it (`true`: done) or broke it (`false`).
+    /// Whether the verifier could not break it (`true`: done) or broke it
+    /// (`false`).
     pass: bool,
     /// The specific failure on a failed verdict; required when `pass` is false.
     #[serde(default)]
     failure: String,
 }
 
-/// `POST /gate/verdict`: record an independent verifier's verdict on a submitted task.
+/// `POST /gate/verdict`: record an independent verifier's verdict on a
+/// submitted task.
 ///
-/// A pass marks the task done; a failure returns it to the owner with the specific
-/// failure as a handback in its inbox. Every verdict is announced on the stream.
+/// A pass marks the task done; a failure returns it to the owner with the
+/// specific failure as a handback in its inbox. Every verdict is announced on
+/// the stream.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] if a field is empty or a failing verdict carries no
-/// failure, a 404 if the task was never submitted, or a 409 if the verifier is the owner
-/// or the task is not awaiting a verdict.
+/// Returns a 400 [`ApiError`] if a field is empty or a failing verdict carries
+/// no failure, a 404 if the task was never submitted, or a 409 if the verifier
+/// is the owner or the task is not awaiting a verdict.
 async fn verdict(
     State(state): State<AppState>,
     JsonBody(request): JsonBody<VerdictReport>,
@@ -154,7 +164,8 @@ async fn verdict(
         },
     ));
 
-    // A failure returns the work to the owner with the specific failure, in its inbox.
+    // A failure returns the work to the owner with the specific failure, in its
+    // inbox.
     if outcome.verdict == Verdict::Failed {
         state.publish(handback_note(&outcome, &task));
     }
@@ -162,7 +173,8 @@ async fn verdict(
     Ok(Json(GateView::from_state(&state)))
 }
 
-/// A verification step as a first-class stream event, `from` a role, to `all-units`.
+/// A verification step as a first-class stream event, `from` a role, to
+/// `all-units`.
 fn verification_event(from: RoleId, event: VerificationEvent) -> Event {
     Event {
         ts: Timestamp::now(),
@@ -282,15 +294,15 @@ impl GateView {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{Channel, EventKind, RoleId};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn post(state: &AppState, path: &str, body: Value) -> (StatusCode, Value) {
         send(state, "POST", path, Some(body)).await

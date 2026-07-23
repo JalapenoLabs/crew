@@ -1,18 +1,22 @@
 //! The supervisor threads the task id onto lifecycle events (issue #29).
 //!
 //! It starts a real `crewd` in-process on an ephemeral loopback port, drives a
-//! `RosterClient` carrying a task context, and reads the broker's history back to
-//! prove every lifecycle event the supervisor produced correlates to that task.
+//! `RosterClient` carrying a task context, and reads the broker's history back
+//! to prove every lifecycle event the supervisor produced correlates to that
+//! task.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    net::{Ipv4Addr, SocketAddr, TcpListener},
+    thread,
+    time::{Duration, Instant},
+};
 
 use crew_broker::{AppState, Config};
 use crew_core::{RoleId, TaskId};
 use crew_supervisor::{Liveness, RosterClient};
 
-/// Starts a broker over a fresh in-memory store, returning the base URL it serves on.
+/// Starts a broker over a fresh in-memory store, returning the base URL it
+/// serves on.
 fn start_broker() -> String {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -80,7 +84,8 @@ fn the_supervisor_threads_the_task_onto_lifecycle_events() {
         "each lifecycle event carries the threaded task id",
     );
 
-    // A client with no task context threads none, so its events correlate to nothing.
+    // A client with no task context threads none, so its events correlate to
+    // nothing.
     let untasked = RosterClient::new(base.clone());
     untasked
         .register(&RoleId::new("frontend"), &["web/".to_owned()])

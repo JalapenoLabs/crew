@@ -2,26 +2,27 @@
 //!
 //! Two audiences drive the crew through this one binary:
 //!
-//! - The operator brings a unit online and stands it down: `crew up` and `crew down`
-//!   (issue #26), and gates its work with `crew pause` / `crew resume` / `crew standdown`
-//!   (issue #41).
-//! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
-//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew lane`, `crew claim`,
-//!   `crew ledger` (issue #45), the done-gate trio `crew submit` / `crew verdict` /
-//!   `crew gate` (issue #47), the situation-board pair `crew board` / `crew record`
-//!   (issue #49), and `crew briefing` (issue #50) act as the role the
-//!   environment names, mapping its I/O onto the broker the same way the MCP tools do
-//!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
-//!   stream live, so a peer sees a teammate's messages without polling and never its
-//!   own; the upgraded `coworker` skill replaces its `tail -F` monitor with it (see
+//! - The operator brings a unit online and stands it down: `crew up` and `crew
+//!   down` (issue #26), and gates its work with `crew pause` / `crew resume` /
+//!   `crew standdown` (issue #41).
+//! - An agent on a runtime without MCP coordinates through the CLI shim (issue
+//!   #28): `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew
+//!   lane`, `crew claim`, `crew ledger` (issue #45), the done-gate trio `crew
+//!   submit` / `crew verdict` / `crew gate` (issue #47), the situation-board
+//!   pair `crew board` / `crew record` (issue #49), and `crew briefing` (issue
+//!   #50) act as the role the environment names, mapping its I/O onto the
+//!   broker the same way the MCP tools do (see `docs/codex.md`). `crew watch`
+//!   (issue #15) tails a role's self-filtered inbox stream live, so a peer sees
+//!   a teammate's messages without polling and never its own; the upgraded
+//!   `coworker` skill replaces its `tail -F` monitor with it (see
 //!   `docs/communication.md`).
-//! - The General steers a running agent with `crew redirect` and `crew belay` (issue
-//!   #38): each posts a directive to a role's inbox that the role honors at once,
-//!   without tearing the crew down (see `docs/communication.md`).
+//! - The General steers a running agent with `crew redirect` and `crew belay`
+//!   (issue #38): each posts a directive to a role's inbox that the role honors
+//!   at once, without tearing the crew down (see `docs/communication.md`).
 //!
 //! `main` establishes the application conventions (issue #4): eyre errors, the
-//! mimalloc allocator, and the shared structured-logging init, then dispatches the
-//! parsed command.
+//! mimalloc allocator, and the shared structured-logging init, then dispatches
+//! the parsed command.
 
 use std::path::PathBuf;
 
@@ -44,7 +45,8 @@ mod usage;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/// Command a unit of role-scoped agents as if you were a general directing a team.
+/// Command a unit of role-scoped agents as if you were a general directing a
+/// team.
 #[derive(Debug, Parser)]
 #[command(name = "crew", version, about)]
 struct Cli {
@@ -56,20 +58,24 @@ struct Cli {
 enum Command {
     /// Bring the whole unit online from the crew config, with roles assigned.
     Up {
-        /// The crew config to read. Defaults to `./crew.toml`, then the default crew.
+        /// The crew config to read. Defaults to `./crew.toml`, then the default
+        /// crew.
         #[arg(short, long, value_name = "PATH")]
         config: Option<PathBuf>,
     },
-    /// Stand the running crew down gracefully: stop the agents and deregister them.
+    /// Stand the running crew down gracefully: stop the agents and deregister
+    /// them.
     Down,
     /// Register this agent's role on the roster (a runtime without MCP).
     Register,
-    /// Send a message as this agent's role to a teammate, a channel, or the commander.
+    /// Send a message as this agent's role to a teammate, a channel, or the
+    /// commander.
     Send {
         /// Direct-message one role (its `@role` channel).
         #[arg(long, value_name = "ROLE")]
         to: Option<String>,
-        /// Post to a named channel: `all-units`, or a pair like `frontend+backend`.
+        /// Post to a named channel: `all-units`, or a pair like
+        /// `frontend+backend`.
         #[arg(long, value_name = "CHANNEL")]
         channel: Option<String>,
         /// The message text (markdown).
@@ -82,29 +88,36 @@ enum Command {
         /// Watch one role's self-filtered inbox instead of the whole firehose.
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
-    /// Push a native notification on each actionable moment: a question, a death, a stand-down.
+    /// Push a native notification on each actionable moment: a question, a
+    /// death, a stand-down.
     Notify {
-        /// Mute one or more moments (comma-separated): `question`, `died`, `stood-down`.
+        /// Mute one or more moments (comma-separated): `question`, `died`,
+        /// `stood-down`.
         #[arg(long, value_delimiter = ',', value_name = "MOMENT")]
         mute: Vec<notify::Moment>,
-        /// Skip the terminal bell; still show the desktop notification and the log line.
+        /// Skip the terminal bell; still show the desktop notification and the
+        /// log line.
         #[arg(long)]
         no_sound: bool,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
-    /// Redirect a role mid-task: inject a steering message it honors immediately.
+    /// Redirect a role mid-task: inject a steering message it honors
+    /// immediately.
     Redirect {
         /// The role to steer (its `@role` channel).
         role: String,
         /// The steering message (markdown).
         message: String,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
@@ -114,12 +127,14 @@ enum Command {
         role: String,
         /// The new order (markdown).
         order: String,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
-    /// Command a role directly, bypassing the commander: order a specialist yourself, and
-    /// the commander is informed rather than bypassed silently (issue #42).
+    /// Command a role directly, bypassing the commander: order a specialist
+    /// yourself, and the commander is informed rather than bypassed
+    /// silently (issue #42).
     Override {
         /// The role to command (its `@role` channel).
         role: String,
@@ -134,7 +149,8 @@ enum Command {
         /// The crew's commander to inform. Defaults to `commander`.
         #[arg(long, value_name = "ROLE")]
         commander: Option<String>,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
@@ -142,7 +158,8 @@ enum Command {
     Pause {
         /// The role to pause; omit to pause the whole crew.
         role: Option<String>,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
@@ -150,34 +167,42 @@ enum Command {
     Resume {
         /// The role to resume; omit to resume the whole crew.
         role: Option<String>,
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
     /// Stand the crew down: halt every role now, preserving state for recovery.
     Standdown {
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
-    /// Show the shared-subscription usage gauge: the reading, threshold, and any auto-pause.
+    /// Show the shared-subscription usage gauge: the reading, threshold, and
+    /// any auto-pause.
     Usage {
-        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
-    /// Integrate the roles' `crew/<role>` branches into one coherent, green branch (issue #44).
+    /// Integrate the roles' `crew/<role>` branches into one coherent, green
+    /// branch (issue #44).
     Integrate {
-        /// The repo whose `crew/<role>` branches to merge. Defaults to the current directory.
+        /// The repo whose `crew/<role>` branches to merge. Defaults to the
+        /// current directory.
         #[arg(long, value_name = "PATH", default_value = ".")]
         repo: String,
         /// The base ref the integration branch is cut from. Defaults to `HEAD`.
         #[arg(long, value_name = "REF", default_value = "HEAD")]
         base: String,
-        /// The integration branch to merge onto. Defaults to `crew/integration`.
+        /// The integration branch to merge onto. Defaults to
+        /// `crew/integration`.
         #[arg(long, value_name = "NAME", default_value = "crew/integration")]
         branch: String,
-        /// An acceptance check to run on the merged result, a shell command, e.g. "cargo test".
+        /// An acceptance check to run on the merged result, a shell command,
+        /// e.g. "cargo test".
         #[arg(long, value_name = "CMD")]
         check: Option<String>,
     },
@@ -188,11 +213,13 @@ enum Command {
         /// The repo-relative file path to check against this role's owned lane.
         path: String,
     },
-    /// Claim a task on the work ledger, or move this role's claim to a new state.
+    /// Claim a task on the work ledger, or move this role's claim to a new
+    /// state.
     Claim {
         /// The task key to claim (a path, a feature, or an order's title).
         task: String,
-        /// The state to move it to: `claimed`, `in_progress`, `blocked`, or `done`.
+        /// The state to move it to: `claimed`, `in_progress`, `blocked`, or
+        /// `done`.
         #[arg(long, default_value = "claimed")]
         state: String,
         /// An optional short label for the ledger.
@@ -201,7 +228,8 @@ enum Command {
     },
     /// Show the work ledger: every claimed task, its owner, and its state.
     Ledger,
-    /// Submit finished work for adversarial verification (not done until it passes).
+    /// Submit finished work for adversarial verification (not done until it
+    /// passes).
     Submit {
         /// The task title, matching the order it came from.
         task: String,
@@ -212,24 +240,28 @@ enum Command {
         #[arg(long, value_name = "ROLE")]
         to: Option<String>,
     },
-    /// Return a verdict on a task another role submitted: try to break it, then judge.
+    /// Return a verdict on a task another role submitted: try to break it, then
+    /// judge.
     Verdict {
         /// The task title under verification.
         task: String,
         /// Pass the task: mark it done because you could not break it.
         #[arg(long)]
         pass: bool,
-        /// The specific failure when the task does not pass (required to fail it).
+        /// The specific failure when the task does not pass (required to fail
+        /// it).
         #[arg(long, value_name = "TEXT")]
         failure: Option<String>,
     },
     /// Read the done-gate: tasks under verification and their standing.
     Gate,
-    /// Record or retract a shared situation board entry: a decision, interface, or gotcha.
+    /// Record or retract a shared situation board entry: a decision, interface,
+    /// or gotcha.
     Record {
         /// The entry's stable key (its topic), for example `auth-strategy`.
         key: String,
-        /// The section: `decision`, `interface`, or `gotcha` (required unless retracting).
+        /// The section: `decision`, `interface`, or `gotcha` (required unless
+        /// retracting).
         #[arg(long, value_name = "SECTION")]
         section: Option<String>,
         /// The entry's content (required unless retracting).
@@ -245,7 +277,8 @@ enum Command {
         #[arg(long, value_name = "SECTION")]
         section: Option<String>,
     },
-    /// Get this role's bounded briefing packet: catch up without reading the whole log.
+    /// Get this role's bounded briefing packet: catch up without reading the
+    /// whole log.
     Briefing {
         /// Narrow the summary to this task id, if you have one.
         #[arg(long, value_name = "TASK")]

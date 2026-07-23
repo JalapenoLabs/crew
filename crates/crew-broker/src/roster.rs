@@ -1,31 +1,36 @@
-//! The roster endpoints: who is in the unit, whether each role is live, and how many.
+//! The roster endpoints: who is in the unit, whether each role is live, and how
+//! many.
 //!
-//! `GET /roster` reports the live agent count and lists the registered roles with
-//! their owned paths and current liveness (working / idle / stopped / dead), so a UI
-//! shows the count and per-role status with no polling (issue #32). A role or the
-//! supervisor registers on join with `POST /roster` and leaves with
-//! `DELETE /roster/{role}`. Every change is a first-class event on the stream: the
-//! transition publishes a [`Lifecycle`] event to `all-units`, so history, the
-//! `/stream` feed, and each role's inbox all see who came and went, and a subscriber
-//! keeps the count current from those events (see `docs/observability.md`). The roster
-//! itself lives behind the storage trait, so a durable backend keeps it across a
-//! restart.
+//! `GET /roster` reports the live agent count and lists the registered roles
+//! with their owned paths and current liveness (working / idle / stopped /
+//! dead), so a UI shows the count and per-role status with no polling (issue
+//! #32). A role or the supervisor registers on join with `POST /roster` and
+//! leaves with `DELETE /roster/{role}`. Every change is a first-class event on
+//! the stream: the transition publishes a [`Lifecycle`] event to `all-units`,
+//! so history, the `/stream` feed, and each role's inbox all see who came and
+//! went, and a subscriber keeps the count current from those events (see
+//! `docs/observability.md`). The roster itself lives behind the storage trait,
+//! so a durable backend keeps it across a restart.
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::routing::{delete, get};
-use axum::{Json, Router};
+use std::collections::BTreeSet;
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{delete, get},
+    Json, Router,
+};
 use crew_core::{
     ChannelId, Event, EventKind, Lifecycle, RoleId, Sender, TaskId, Timestamp, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
-use std::collections::BTreeSet;
-
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::{AppState, Standing};
-use crate::store::{Liveness, RoleStatus, Roster};
+use crate::{
+    error::ApiError,
+    events::JsonBody,
+    state::{AppState, Standing},
+    store::{Liveness, RoleStatus, Roster},
+};
 
 /// The roster routes: list, register/update, and deregister a role.
 pub(crate) fn routes() -> Router<AppState> {
@@ -34,14 +39,16 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/roster/{role}", delete(deregister))
 }
 
-/// The `GET /roster` response: the crew standing, the live agent count, and the roles.
+/// The `GET /roster` response: the crew standing, the live agent count, and the
+/// roles.
 #[derive(Debug, Serialize)]
 pub(crate) struct RosterView {
     /// The crew's control standing: running, paused, or stood down (issue #41).
     standing: Standing,
-    /// Whether new work is auto-paused on shared-subscription usage (issue #56). Gates
-    /// every role while set, since the crew shares one subscription; distinct from the
-    /// manual `standing`, so a role honors either. Read the gauge with `GET /usage`.
+    /// Whether new work is auto-paused on shared-subscription usage (issue
+    /// #56). Gates every role while set, since the crew shares one
+    /// subscription; distinct from the manual `standing`, so a role honors
+    /// either. Read the gauge with `GET /usage`.
     usage_paused: bool,
     /// The live agent count and its per-liveness breakdown.
     count: Count,
@@ -51,14 +58,15 @@ pub(crate) struct RosterView {
 
 /// The live agent count and the per-liveness breakdown behind it (issue #32).
 ///
-/// The count is the current liveness projection, so a UI shows it with no polling: it
-/// reads this snapshot once and keeps it current from the `lifecycle` events every
-/// roster change publishes to the stream (see `docs/observability.md`).
+/// The count is the current liveness projection, so a UI shows it with no
+/// polling: it reads this snapshot once and keeps it current from the
+/// `lifecycle` events every roster change publishes to the stream (see
+/// `docs/observability.md`).
 #[derive(Debug, Default, Serialize)]
 struct Count {
-    /// Agents present and up or resumable, `working` + `idle`: the headline live
-    /// count. A `stopped` role has cleanly left the field and a `dead` one gave up,
-    /// so neither is counted.
+    /// Agents present and up or resumable, `working` + `idle`: the headline
+    /// live count. A `stopped` role has cleanly left the field and a `dead`
+    /// one gave up, so neither is counted.
     live: usize,
     /// Agents up and working.
     working: usize,
@@ -79,13 +87,14 @@ struct RoleView {
     owned_paths: Vec<String>,
     /// The role's current liveness.
     liveness: Liveness,
-    /// Whether the role is paused on its own (issue #41). It is also gated whenever the
-    /// crew `standing` is not `running`.
+    /// Whether the role is paused on its own (issue #41). It is also gated
+    /// whenever the crew `standing` is not `running`.
     paused: bool,
 }
 
 impl RosterView {
-    /// The roster view for the current state: the roster snapshot and the control state.
+    /// The roster view for the current state: the roster snapshot and the
+    /// control state.
     pub(crate) fn from_state(state: &AppState) -> Self {
         let (standing, paused) = state.control_snapshot();
         Self::of(
@@ -96,7 +105,8 @@ impl RosterView {
         )
     }
 
-    /// Renders a roster snapshot as the wire view, tallying the live count as it goes.
+    /// Renders a roster snapshot as the wire view, tallying the live count as
+    /// it goes.
     fn of(
         roster: &Roster,
         standing: Standing,
@@ -136,25 +146,29 @@ impl RosterView {
 struct Register {
     /// The role to register or update.
     role: String,
-    /// The paths the role owns; if omitted, an existing role keeps its current paths.
+    /// The paths the role owns; if omitted, an existing role keeps its current
+    /// paths.
     owned_paths: Option<Vec<String>>,
     /// The role's liveness; defaults to `working`.
     liveness: Option<Liveness>,
-    /// The task this transition belongs to, when the supervisor threads one (issue
-    /// #29), so the lifecycle event correlates to the task the role is working.
+    /// The task this transition belongs to, when the supervisor threads one
+    /// (issue #29), so the lifecycle event correlates to the task the role is
+    /// working.
     #[serde(default)]
     task: Option<TaskId>,
 }
 
-/// `GET /roster`: list the registered roles, their owned paths, and their liveness.
+/// `GET /roster`: list the registered roles, their owned paths, and their
+/// liveness.
 async fn list(State(state): State<AppState>) -> Json<RosterView> {
     Json(RosterView::from_state(&state))
 }
 
-/// `POST /roster`: register a role (on join) or update its liveness and owned paths.
+/// `POST /roster`: register a role (on join) or update its liveness and owned
+/// paths.
 ///
-/// Returns `201 Created` for a newly registered role, `200 OK` for an update, and
-/// publishes the matching [`Lifecycle`] event to the stream.
+/// Returns `201 Created` for a newly registered role, `200 OK` for an update,
+/// and publishes the matching [`Lifecycle`] event to the stream.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if the body is malformed or the role is empty.
@@ -164,8 +178,9 @@ async fn register(
 ) -> Result<(StatusCode, Json<RosterView>), ApiError> {
     let role = parse_role(&request.role)?;
     let liveness = request.liveness.unwrap_or(Liveness::Working);
-    // Read the prior status once, before the update, for both the retained paths and
-    // the lifecycle transition (a `dead` role coming back is a recovery, not a restart).
+    // Read the prior status once, before the update, for both the retained paths
+    // and the lifecycle transition (a `dead` role coming back is a recovery,
+    // not a restart).
     let prior = state.storage.roster().get(&role).cloned();
     // A liveness-only update (no `owned_paths`) keeps the role's current paths.
     let owned_paths = match request.owned_paths {
@@ -212,7 +227,8 @@ async fn deregister(
             "role `{role}` is not registered"
         )));
     }
-    // A role leaving the unit is not scoped to a task, so its `stopped` carries none.
+    // A role leaving the unit is not scoped to a task, so its `stopped` carries
+    // none.
     state.publish(roster_event(&role, Lifecycle::Stopped, None));
     Ok(Json(RosterView::from_state(&state)))
 }
@@ -226,11 +242,13 @@ fn parse_role(role: &str) -> Result<RoleId, ApiError> {
     Ok(RoleId::new(role))
 }
 
-/// The lifecycle transition a liveness change emits, given the role's prior liveness.
+/// The lifecycle transition a liveness change emits, given the role's prior
+/// liveness.
 ///
-/// A role reaching `working` for the first time `started`; coming back from `dead`
-/// (the defibrillator revived it) `recovered`; reaching it again from any other state
-/// (idle, or after a stop) `restarted`. The other states map directly.
+/// A role reaching `working` for the first time `started`; coming back from
+/// `dead` (the defibrillator revived it) `recovered`; reaching it again from
+/// any other state (idle, or after a stop) `restarted`. The other states map
+/// directly.
 fn lifecycle_for(liveness: Liveness, prior: Option<Liveness>) -> Lifecycle {
     match liveness {
         Liveness::Working => match prior {
@@ -244,9 +262,9 @@ fn lifecycle_for(liveness: Liveness, prior: Option<Liveness>) -> Lifecycle {
     }
 }
 
-/// A roster change as a first-class stream event: the role's lifecycle transition,
-/// addressed to `all-units` so the whole unit sees who is live, correlated to `task`
-/// when the supervisor threads one (issue #29).
+/// A roster change as a first-class stream event: the role's lifecycle
+/// transition, addressed to `all-units` so the whole unit sees who is live,
+/// correlated to `task` when the supervisor threads one (issue #29).
 fn roster_event(role: &RoleId, lifecycle: Lifecycle, task: Option<TaskId>) -> Event {
     Event {
         ts: Timestamp::now(),
@@ -259,15 +277,15 @@ fn roster_event(role: &RoleId, lifecycle: Lifecycle, task: Option<TaskId>) -> Ev
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{EventKind, Lifecycle, RoleId, Sender};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, Value) {
         let response = api::build(state.clone()).oneshot(request).await.unwrap();

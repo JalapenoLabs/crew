@@ -1,50 +1,55 @@
 //! Push notifications on the actionable moments (`crew notify`).
 //!
-//! `crew notify` lets the General walk away and be pulled back only when it matters. It
-//! subscribes to the broker firehose (`GET /stream`, the same event stream every reader
-//! consumes, so there is no separate signal path) and, for each event, decides whether it
-//! is an *actionable moment*: something that changes what the General would do next. On a
-//! match it fires a push; routine chatter passes silently.
+//! `crew notify` lets the General walk away and be pulled back only when it
+//! matters. It subscribes to the broker firehose (`GET /stream`, the same event
+//! stream every reader consumes, so there is no separate signal path) and, for
+//! each event, decides whether it is an *actionable moment*: something that
+//! changes what the General would do next. On a match it fires a push; routine
+//! chatter passes silently.
 //!
 //! ## Actionable moments
 //!
-//! The moments below are the ones the event stream carries today. Each maps to one event
-//! kind, classified by [`moment_of`]:
+//! The moments below are the ones the event stream carries today. Each maps to
+//! one event kind, classified by [`moment_of`]:
 //!
-//! - **A question is asked** ([`MessageKind::Question`]): a role wants a decision.
-//! - **A role dies** ([`Lifecycle::Died`]): a role crashed or hung past recovery.
-//! - **The crew stands down** ([`Lifecycle::StoodDown`]): every role halts and the mission
-//!   is on hold.
+//! - **A question is asked** ([`MessageKind::Question`]): a role wants a
+//!   decision.
+//! - **A role dies** ([`Lifecycle::Died`]): a role crashed or hung past
+//!   recovery.
+//! - **The crew stands down** ([`Lifecycle::StoodDown`]): every role halts and
+//!   the mission is on hold.
 //!
-//! Everything else (status, notes, orders, answers, artifacts, ordinary lifecycle such as
-//! `started` or `idle`, activity, board, boundary, and verification events) is routine and
-//! stays quiet by default. Two further moments in the issue's scope, an approval pending
-//! (issue #40) and a role stalled (surfaced on the stream as a later refinement of issue
-//! #48), light up here for free once their events reach the stream: extend [`moment_of`]
+//! Everything else (status, notes, orders, answers, artifacts, ordinary
+//! lifecycle such as `started` or `idle`, activity, board, boundary, and
+//! verification events) is routine and stays quiet by default. Two further
+//! moments in the issue's scope, an approval pending (issue #40) and a role
+//! stalled (surfaced on the stream as a later refinement of issue #48), light
+//! up here for free once their events reach the stream: extend [`moment_of`]
 //! and [`Moment`] and the rest of the pipeline carries them.
 //!
 //! ## Configurable, quiet by default
 //!
-//! The default policy notifies on every actionable moment with the terminal bell on;
-//! routine events never notify. `--mute <moment>` suppresses a specific moment (for a
-//! General who does not want peer questions, say), and `--no-sound` drops the bell while
-//! keeping the desktop notification and the log line.
+//! The default policy notifies on every actionable moment with the terminal
+//! bell on; routine events never notify. `--mute <moment>` suppresses a
+//! specific moment (for a General who does not want peer questions, say), and
+//! `--no-sound` drops the bell while keeping the desktop notification and the
+//! log line.
 //!
 //! ## How a push is delivered
 //!
 //! Each push does three things, so it lands whatever the environment:
 //!
 //! - a printed log line, always, the durable record even on a headless server;
-//! - the terminal bell, the audible pull (mirroring Seraphim's notification sound), unless
-//!   `--no-sound`;
-//! - a native desktop notification via the platform notifier (`notify-send` on Linux,
-//!   `osascript` on macOS).
+//! - the terminal bell, the audible pull (mirroring Seraphim's notification
+//!   sound), unless `--no-sound`;
+//! - a native desktop notification via the platform notifier (`notify-send` on
+//!   Linux, `osascript` on macOS).
 //!
-//! A missing or failing notifier is not an error: the printed line and the bell already
-//! carry the alert, so delivery degrades quietly rather than taking the watcher down.
+//! A missing or failing notifier is not an error: the printed line and the bell
+//! already carry the alert, so delivery degrades quietly rather than taking the
+//! watcher down.
 
-use std::io::Write;
-use std::process::Command;
+use std::{io::Write, process::Command};
 
 use crew_substrate::core::{Event, EventKind, Lifecycle, MessageKind, Sender};
 use eyre::Result;
@@ -53,15 +58,16 @@ use crate::broker;
 
 /// The most detail text a notification body carries before it is elided.
 ///
-/// Long enough to convey the gist of a question, short enough that a desktop notification
-/// and a log line stay one glance. Desktop notifiers truncate long bodies anyway; this
-/// keeps the printed line tidy too.
+/// Long enough to convey the gist of a question, short enough that a desktop
+/// notification and a log line stay one glance. Desktop notifiers truncate long
+/// bodies anyway; this keeps the printed line tidy too.
 const MAX_DETAIL: usize = 160;
 
-/// An actionable moment: a stream event that changes what the General would do next.
+/// An actionable moment: a stream event that changes what the General would do
+/// next.
 ///
-/// The `clap` value names (`question`, `died`, `stood-down`) are the tokens `--mute`
-/// accepts.
+/// The `clap` value names (`question`, `died`, `stood-down`) are the tokens
+/// `--mute` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Moment {
     /// A role asked a question and is waiting on a decision.
@@ -77,11 +83,12 @@ pub(crate) enum Moment {
 
 /// Which moments push a notification, and whether a push sounds the bell.
 ///
-/// The default notifies on every actionable moment with the bell on; routine events stay
-/// quiet. Muting narrows the set.
+/// The default notifies on every actionable moment with the bell on; routine
+/// events stay quiet. Muting narrows the set.
 #[derive(Debug, Clone)]
 pub(crate) struct NotifyPolicy {
-    /// Moments the General has muted; every other actionable moment still notifies.
+    /// Moments the General has muted; every other actionable moment still
+    /// notifies.
     muted: Vec<Moment>,
     /// Whether a push sounds the terminal bell.
     sound: bool,
@@ -99,7 +106,8 @@ impl NotifyPolicy {
     }
 }
 
-/// A rendered push: the title and body shown in the notification and the log line.
+/// A rendered push: the title and body shown in the notification and the log
+/// line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Notification {
     /// The headline: what happened, at a glance.
@@ -108,14 +116,16 @@ struct Notification {
     body: String,
 }
 
-/// Watches the event stream and pushes a notification on each actionable moment.
+/// Watches the event stream and pushes a notification on each actionable
+/// moment.
 ///
-/// Reuses the broker firehose (`GET /stream`), so it needs no separate signal path and
-/// updates live without polling. Runs until the stream closes or the user interrupts.
+/// Reuses the broker firehose (`GET /stream`), so it needs no separate signal
+/// path and updates live without polling. Runs until the stream closes or the
+/// user interrupts.
 ///
 /// # Errors
-/// Returns an error if the broker configuration is invalid, or the broker cannot be
-/// reached or refuses the stream.
+/// Returns an error if the broker configuration is invalid, or the broker
+/// cannot be reached or refuses the stream.
 pub(crate) fn notify(broker: Option<&str>, policy: &NotifyPolicy) -> Result<()> {
     let base = broker::resolve_base(broker)?;
     broker::tail_events(&base, "/stream", |event| {
@@ -125,7 +135,8 @@ pub(crate) fn notify(broker: Option<&str>, policy: &NotifyPolicy) -> Result<()> 
     })
 }
 
-/// The notification to push for `event`, or `None` if it is routine or a muted moment.
+/// The notification to push for `event`, or `None` if it is routine or a muted
+/// moment.
 fn notification_for(event: &Event, policy: &NotifyPolicy) -> Option<Notification> {
     let moment = moment_of(event)?;
     policy.wants(moment).then(|| render(event, moment))
@@ -186,7 +197,8 @@ fn message_body(event: &Event) -> Option<&str> {
     }
 }
 
-/// Shortens `text` to [`MAX_DETAIL`] characters, appending an ellipsis when it is cut.
+/// Shortens `text` to [`MAX_DETAIL`] characters, appending an ellipsis when it
+/// is cut.
 fn elide(text: &str) -> String {
     if text.chars().count() <= MAX_DETAIL {
         return text.to_owned();
@@ -195,9 +207,11 @@ fn elide(text: &str) -> String {
     format!("{head}...")
 }
 
-/// Fires a notification: the printed log line, the optional bell, and the desktop notifier.
+/// Fires a notification: the printed log line, the optional bell, and the
+/// desktop notifier.
 fn push(notification: &Notification, sound: bool) {
-    // The printed line is the durable record, shown even where no desktop notifier exists.
+    // The printed line is the durable record, shown even where no desktop notifier
+    // exists.
     println!("[notify] {}: {}", notification.title, notification.body);
     if sound {
         // The terminal bell is the audible pull; flush so it rings without waiting on a
@@ -208,29 +222,34 @@ fn push(notification: &Notification, sound: bool) {
     deliver_native(notification);
 }
 
-/// Shows `notification` through the platform desktop notifier, ignoring absence or failure.
+/// Shows `notification` through the platform desktop notifier, ignoring absence
+/// or failure.
 ///
-/// A notifier that is absent or fails must not take the watcher down: the printed line and
-/// bell already recorded the moment, so delivery degrades quietly.
+/// A notifier that is absent or fails must not take the watcher down: the
+/// printed line and bell already recorded the moment, so delivery degrades
+/// quietly.
 #[cfg(target_os = "linux")]
 fn deliver_native(notification: &Notification) {
-    // `notify-send` takes the title and body as separate arguments, so no shell quoting
-    // and no injection risk.
+    // `notify-send` takes the title and body as separate arguments, so no shell
+    // quoting and no injection risk.
     let _ = Command::new("notify-send")
         .arg(&notification.title)
         .arg(&notification.body)
         .status();
 }
 
-/// Shows `notification` through the platform desktop notifier, ignoring absence or failure.
+/// Shows `notification` through the platform desktop notifier, ignoring absence
+/// or failure.
 ///
-/// A notifier that is absent or fails must not take the watcher down: the printed line and
-/// bell already recorded the moment, so delivery degrades quietly.
+/// A notifier that is absent or fails must not take the watcher down: the
+/// printed line and bell already recorded the moment, so delivery degrades
+/// quietly.
 #[cfg(target_os = "macos")]
 fn deliver_native(notification: &Notification) {
-    // Pass the text through `argv` rather than interpolating it into the AppleScript, so
-    // quotes and backslashes never need escaping and cannot alter the script. Every title
-    // and body starts with a letter, so no argument is mistaken for an option.
+    // Pass the text through `argv` rather than interpolating it into the
+    // AppleScript, so quotes and backslashes never need escaping and cannot
+    // alter the script. Every title and body starts with a letter, so no
+    // argument is mistaken for an option.
     let _ = Command::new("osascript")
         .arg("-e")
         .arg("on run argv")
@@ -243,9 +262,11 @@ fn deliver_native(notification: &Notification) {
         .status();
 }
 
-/// Shows `notification` through the platform desktop notifier, ignoring absence or failure.
+/// Shows `notification` through the platform desktop notifier, ignoring absence
+/// or failure.
 ///
-/// No native notifier is wired for this platform, so the printed line and bell carry it.
+/// No native notifier is wired for this platform, so the printed line and bell
+/// carry it.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn deliver_native(_notification: &Notification) {}
 

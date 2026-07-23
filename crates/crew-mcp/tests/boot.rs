@@ -1,25 +1,29 @@
 //! End-to-end test of booting a role from its card (issue #18).
 //!
-//! It starts a `crewd` instance in-process on an ephemeral loopback port, then boots a
-//! role the way the `crew-mcp` binary does: parse a role card with the shared loader,
-//! build the broker client from the card's address, and register the role on the
-//! roster. The assertions prove the acceptance: a role boots knowing its lane and
-//! reaches the broker with no extra prompt.
+//! It starts a `crewd` instance in-process on an ephemeral loopback port, then
+//! boots a role the way the `crew-mcp` binary does: parse a role card with the
+//! shared loader, build the broker client from the card's address, and register
+//! the role on the roster. The assertions prove the acceptance: a role boots
+//! knowing its lane and reaches the broker with no extra prompt.
 //!
-//! The broker runs on a background thread with its own tokio runtime, so the test body
-//! stays synchronous and can call the blocking `ureq`-based client directly.
+//! The broker runs on a background thread with its own tokio runtime, so the
+//! test body stays synchronous and can call the blocking `ureq`-based client
+//! directly.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::thread;
+use std::{
+    net::{Ipv4Addr, SocketAddr, TcpListener},
+    thread,
+};
 
 use crew_broker::{AppState, Config};
 use crew_core::RoleCard;
 use crew_mcp::Broker;
 
-/// Starts a broker over a fresh in-memory store, returning the address it serves on.
+/// Starts a broker over a fresh in-memory store, returning the address it
+/// serves on.
 ///
-/// The serve thread is detached: it lives until the test process exits, which is all
-/// a request/response boot needs (it holds no long-lived stream open).
+/// The serve thread is detached: it lives until the test process exits, which
+/// is all a request/response boot needs (it holds no long-lived stream open).
 fn start_broker() -> SocketAddr {
     // Bind synchronously so the address is known before the runtime thread starts;
     // hand the socket to tokio inside the thread.

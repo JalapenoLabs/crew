@@ -1,27 +1,32 @@
 //! The shared situation board: the crew's durable memory (issue #49).
 //!
-//! The board is distinct from the transient message stream: it holds agreed interfaces,
-//! decisions and their rationale, and known gotchas, so the crew stops re-deriving and
-//! re-litigating what is settled. `POST /board` records an entry (or retracts one) and
-//! `GET /board` reads the live board; every change is a first-class `board` event on the
-//! stream (to `all-units`), so the board is auditable and, because it is a projection of
-//! those durable events, it survives a restart (see `docs/communication.md`, context
-//! management, and `docs/observability.md`).
+//! The board is distinct from the transient message stream: it holds agreed
+//! interfaces, decisions and their rationale, and known gotchas, so the crew
+//! stops re-deriving and re-litigating what is settled. `POST /board` records
+//! an entry (or retracts one) and `GET /board` reads the live board; every
+//! change is a first-class `board` event on the stream (to `all-units`), so the
+//! board is auditable and, because it is a projection of those durable events,
+//! it survives a restart (see `docs/communication.md`, context management, and
+//! `docs/observability.md`).
 //!
-//! The whole crew reads and writes it; the commander curates it. The board state lives in
-//! the broker ([`AppState`]).
+//! The whole crew reads and writes it; the commander curates it. The board
+//! state lives in the broker ([`AppState`]).
 
-use axum::extract::{Query, State};
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{
+    extract::{Query, State},
+    routing::get,
+    Json, Router,
+};
 use crew_core::{
     BoardEvent, BoardSection, ChannelId, Event, EventKind, RoleId, Sender, Timestamp, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::{AppState, BoardEntry};
+use crate::{
+    error::ApiError,
+    events::JsonBody,
+    state::{AppState, BoardEntry},
+};
 
 /// The board routes: read the board, and record or retract an entry.
 pub(crate) fn routes() -> Router<AppState> {
@@ -48,7 +53,8 @@ struct BoardChange {
     role: String,
     /// The entry's stable key: the topic it concerns.
     key: String,
-    /// The section for a recorded entry; ignored (and unnecessary) on a retraction.
+    /// The section for a recorded entry; ignored (and unnecessary) on a
+    /// retraction.
     #[serde(default)]
     section: Option<BoardSection>,
     /// The entry's content on a recording; unused on a retraction.
@@ -59,14 +65,16 @@ struct BoardChange {
     retract: bool,
 }
 
-/// `POST /board`: record or replace an entry, or retract one (with `retract: true`).
+/// `POST /board`: record or replace an entry, or retract one (with `retract:
+/// true`).
 ///
-/// Recording needs a `section` and a `body`; retracting needs only the `key`. The change
-/// updates the live board and publishes a `board` event, so it is durable and auditable.
+/// Recording needs a `section` and a `body`; retracting needs only the `key`.
+/// The change updates the live board and publishes a `board` event, so it is
+/// durable and auditable.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] if a required field is empty, or a 404 if a retraction names
-/// an entry that is not on the board.
+/// Returns a 400 [`ApiError`] if a required field is empty, or a 404 if a
+/// retraction names an entry that is not on the board.
 async fn record(
     State(state): State<AppState>,
     JsonBody(change): JsonBody<BoardChange>,
@@ -97,7 +105,8 @@ async fn record(
     Ok(Json(BoardView::from_state(&state, None)))
 }
 
-/// A board change as a first-class stream event, `from` its author, to `all-units`.
+/// A board change as a first-class stream event, `from` its author, to
+/// `all-units`.
 fn board_event(
     author: RoleId,
     key: String,
@@ -150,10 +159,12 @@ struct EntryView {
 }
 
 impl BoardView {
-    /// Builds the view from the live board, optionally filtered to one `section`.
+    /// Builds the view from the live board, optionally filtered to one
+    /// `section`.
     ///
-    /// Entries are ordered by section (decisions, then interfaces, then gotchas) and then
-    /// by topic within a section, so the board reads as a grouped document.
+    /// Entries are ordered by section (decisions, then interfaces, then
+    /// gotchas) and then by topic within a section, so the board reads as a
+    /// grouped document.
     fn from_state(state: &AppState, section: Option<BoardSection>) -> Self {
         let mut entries: Vec<EntryView> = state
             .board_snapshot()
@@ -186,17 +197,17 @@ fn section_rank(section: BoardSection) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{Event, EventKind};
     use serde_json::{json, Value};
-    use std::sync::Arc;
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
-    use crate::store::LogStore;
+    use crate::{api, config::Config, state::AppState, store::LogStore};
 
     async fn send(
         state: &AppState,

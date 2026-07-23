@@ -1,33 +1,40 @@
 //! End-to-end integration suite for the broker (issue #16).
 //!
 //! Each test starts a real `crewd` instance in-process, serving on an ephemeral
-//! loopback port, and drives it over HTTP and Server-Sent Events with a real client.
-//! Together they prove the Phase 1 transport end to end so later phases build on
-//! solid ground: post then receive, self-echo suppression, channel routing (direct /
-//! pair / all-units), history filters and pagination, and restart replay.
+//! loopback port, and drives it over HTTP and Server-Sent Events with a real
+//! client. Together they prove the Phase 1 transport end to end so later phases
+//! build on solid ground: post then receive, self-echo suppression, channel
+//! routing (direct / pair / all-units), history filters and pagination, and
+//! restart replay.
 //!
-//! The per-module unit tests exercise each handler in isolation (via `oneshot`);
-//! this suite exercises the assembled service over a real socket.
+//! The per-module unit tests exercise each handler in isolation (via
+//! `oneshot`); this suite exercises the assembled service over a real socket.
 
-use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use crew_broker::{AppState, Config, LogStore};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, task::JoinHandle};
 
-/// How long to wait for an event that should arrive (generous; it arrives in ms).
+/// How long to wait for an event that should arrive (generous; it arrives in
+/// ms).
 const EXPECTED: Duration = Duration::from_secs(2);
 
-/// How long to wait before concluding an event will not arrive (a suppression check).
+/// How long to wait before concluding an event will not arrive (a suppression
+/// check).
 const ABSENT: Duration = Duration::from_millis(300);
 
-/// A broker serving on an ephemeral loopback port, with a client and shutdown handle.
+/// A broker serving on an ephemeral loopback port, with a client and shutdown
+/// handle.
 struct TestBroker {
     base: String,
     client: reqwest::Client,
@@ -141,8 +148,8 @@ impl TestBroker {
         }
     }
 
-    /// Subscribes to the aggregate live stream with a query (e.g. `?role=backend`),
-    /// or the whole firehose when the query is empty.
+    /// Subscribes to the aggregate live stream with a query (e.g.
+    /// `?role=backend`), or the whole firehose when the query is empty.
     async fn stream(&self, query: &str) -> Inbox {
         let response = self
             .client
@@ -157,8 +164,8 @@ impl TestBroker {
         }
     }
 
-    /// Registers `role` on the roster (`POST /roster`) with an optional liveness,
-    /// so the transition publishes its lifecycle event.
+    /// Registers `role` on the roster (`POST /roster`) with an optional
+    /// liveness, so the transition publishes its lifecycle event.
     async fn register(&self, role: &str, liveness: Option<&str>) {
         let mut body = json!({ "role": role });
         if let Some(liveness) = liveness {
@@ -199,7 +206,8 @@ impl Inbox {
         }
     }
 
-    /// Drains complete lines from the buffer, returning the first `data:` event.
+    /// Drains complete lines from the buffer, returning the first `data:`
+    /// event.
     fn take_event(&mut self) -> Option<Value> {
         while let Some(newline) = self.buffer.find('\n') {
             let line: String = self.buffer.drain(..=newline).collect();
@@ -226,7 +234,8 @@ fn channel_of(event: &Value) -> &str {
     event["channel"].as_str().unwrap_or_default()
 }
 
-/// The lifecycle transition a lifecycle event carries (started / idle / died / ...).
+/// The lifecycle transition a lifecycle event carries (started / idle / died /
+/// ...).
 fn lifecycle_of(event: &Value) -> &str {
     event["kind"]["data"].as_str().unwrap_or_default()
 }
@@ -258,8 +267,9 @@ fn bodies(page: &Value) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_subscriber_sees_the_live_count_update_as_agents_transition() {
-    // The live agent count (issue #32): a subscriber on the stream sees a roster-change
-    // event on every transition, and `GET /roster` reports the current live count.
+    // The live agent count (issue #32): a subscriber on the stream sees a
+    // roster-change event on every transition, and `GET /roster` reports the
+    // current live count.
     let broker = TestBroker::in_memory().await;
     let mut stream = broker.stream("").await;
 
@@ -309,14 +319,16 @@ async fn a_subscriber_sees_the_live_count_update_as_agents_transition() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_consumer_renders_the_unit_from_the_stream_alone() {
-    // The external-consumer contract (issue #33, see docs/stream-contract.md): from the
-    // one live stream a viz like Runewood renders agents, messages, and the live count,
-    // with no crew-specific capture. Each event carries the whole envelope it needs.
+    // The external-consumer contract (issue #33, see docs/stream-contract.md): from
+    // the one live stream a viz like Runewood renders agents, messages, and the
+    // live count, with no crew-specific capture. Each event carries the whole
+    // envelope it needs.
     let broker = TestBroker::in_memory().await;
     let mut stream = broker.stream("").await; // the whole firehose, before anything happens
 
-    // An agent appearing is a `started` lifecycle event: a consumer spawns an entity for
-    // the role, and every event carries its typed, timestamped, addressed envelope.
+    // An agent appearing is a `started` lifecycle event: a consumer spawns an
+    // entity for the role, and every event carries its typed, timestamped,
+    // addressed envelope.
     broker.register("backend", None).await;
     let started = stream.recv(EXPECTED).await.expect("a live event arrives");
     assert!(
@@ -397,7 +409,8 @@ async fn a_role_s_timeline_is_retrievable_as_history_and_live() {
     // A live subscription to backend's timeline, open before anything is posted.
     let mut timeline = broker.activity("backend").await;
 
-    // What backend does and receives, plus a message between others it should not see.
+    // What backend does and receives, plus a message between others it should not
+    // see.
     broker
         .post_note("@frontend", role("backend"), "sent") // backend sent
         .await;
@@ -432,8 +445,8 @@ async fn a_role_s_timeline_is_retrievable_as_history_and_live() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_aggregate_view_is_filterable_live_and_historically() {
-    // The aggregate activity log (issue #31): the whole unit's stream, the same filter
-    // applied live and historically so the two views agree.
+    // The aggregate activity log (issue #31): the whole unit's stream, the same
+    // filter applied live and historically so the two views agree.
     let broker = TestBroker::in_memory().await;
 
     // A filtered live subscription: only backend's events, opened before any post.
@@ -451,7 +464,8 @@ async fn the_aggregate_view_is_filterable_live_and_historically() {
         "an event from another role is filtered out of the live stream",
     );
 
-    // Historically: the same filter over `/history` returns the same set, time-ordered.
+    // Historically: the same filter over `/history` returns the same set,
+    // time-ordered.
     let history = broker.get_json("/history?role=backend").await;
     assert_eq!(
         bodies(&history),
@@ -479,7 +493,8 @@ async fn a_role_never_receives_its_own_message() {
         .post_note("all-units", role("backend"), "team update")
         .await;
 
-    // A peer receives it; the sender does not (self-echo is filtered at the source).
+    // A peer receives it; the sender does not (self-echo is filtered at the
+    // source).
     assert_eq!(body_of(&qa.recv(EXPECTED).await.unwrap()), "team update");
     assert!(
         backend.recv(ABSENT).await.is_none(),

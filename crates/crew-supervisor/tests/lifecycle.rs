@@ -1,8 +1,8 @@
 //! End-to-end test of the agent lifecycle state machine (issue #22).
 //!
-//! It proves the acceptance: an idle role stops and restarts on demand, with the
-//! roster and the stream reflecting every transition. The defibrillator's death
-//! detection and recovery are covered in `defibrillator.rs`.
+//! It proves the acceptance: an idle role stops and restarts on demand, with
+//! the roster and the stream reflecting every transition. The defibrillator's
+//! death detection and recovery are covered in `defibrillator.rs`.
 
 mod common;
 

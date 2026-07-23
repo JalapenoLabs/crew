@@ -1,9 +1,10 @@
 //! Shared operational logging for the crew binaries.
 //!
-//! One `tracing` init the broker (`crewd`), the supervisor, and the CLI (`crew`)
-//! all call once at startup, so every binary emits the same structured, named
-//! events. Events follow the `<component>.<operation>.<state>` naming and the
-//! message-template rules from `~/.claude/docs/rust.md` (M-LOG-STRUCTURED):
+//! One `tracing` init the broker (`crewd`), the supervisor, and the CLI
+//! (`crew`) all call once at startup, so every binary emits the same
+//! structured, named events. Events follow the
+//! `<component>.<operation>.<state>` naming and the message-template rules from
+//! `~/.claude/docs/rust.md` (M-LOG-STRUCTURED):
 //!
 //! ```ignore
 //! use tracing::{event, Level};
@@ -18,8 +19,8 @@
 //! ```
 //!
 //! This is operational telemetry (how the process is behaving). It is distinct
-//! from the crew message event model, the typed inter-agent stream that lives in
-//! `crew-core` (see `docs/observability.md`).
+//! from the crew message event model, the typed inter-agent stream that lives
+//! in `crew-core` (see `docs/observability.md`).
 
 use std::io::IsTerminal;
 
@@ -32,13 +33,13 @@ const DEFAULT_FILTER: &str = "info";
 /// Initializes global structured logging for a crew binary.
 ///
 /// Reads the level filter from `RUST_LOG` (falling back to [`DEFAULT_FILTER`]),
-/// writes human-readable events with their named fields to stderr, and colors the
-/// output only when stderr is a terminal. Call it once, early in `main`, before
-/// any other work.
+/// writes human-readable events with their named fields to stderr, and colors
+/// the output only when stderr is a terminal. Call it once, early in `main`,
+/// before any other work.
 ///
 /// Calling it more than once is a no-op: the first call wins (the global
-/// subscriber can only be set once) and any later call logs a warning rather than
-/// panicking, so a stray second call never takes down the process.
+/// subscriber can only be set once) and any later call logs a warning rather
+/// than panicking, so a stray second call never takes down the process.
 pub fn init() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
@@ -64,8 +65,9 @@ pub mod redact {
     /// Masks a secret so it can appear in a log without leaking its value.
     ///
     /// Returns a fixed marker and never any bytes of `value`, so tokens, auth
-    /// keys, and passwords stay out of the logs. Apply it to any field carrying a
-    /// secret, and name the field `*.redacted` so the redaction is obvious:
+    /// keys, and passwords stay out of the logs. Apply it to any field carrying
+    /// a secret, and name the field `*.redacted` so the redaction is
+    /// obvious:
     ///
     /// ```
     /// use crew_telemetry::redact;

@@ -1,30 +1,34 @@
-//! `crew integrate`: merge the roles' branches into one coherent, green branch (issue #44).
+//! `crew integrate`: merge the roles' branches into one coherent, green branch
+//! (issue #44).
 //!
-//! Parallel roles work in isolated worktrees on `crew/<role>` branches (issue #43). This
-//! command runs the integration step over them: it merges each role branch into an
-//! integration branch, surfaces any conflicts precisely (rather than force-merging and
-//! dropping a role's work), and runs the acceptance checks (build, tests) on the merged
-//! result when `--check` is given. It prints where the integration stands, so the operator
-//! (or the commander) knows the whole is green before declaring the work done.
+//! Parallel roles work in isolated worktrees on `crew/<role>` branches (issue
+//! #43). This command runs the integration step over them: it merges each role
+//! branch into an integration branch, surfaces any conflicts precisely (rather
+//! than force-merging and dropping a role's work), and runs the acceptance
+//! checks (build, tests) on the merged result when `--check` is given. It
+//! prints where the integration stands, so the operator (or the commander)
+//! knows the whole is green before declaring the work done.
 //!
-//! The integration branch keeps the merged commits for the operator to push and open as a
-//! pull request; the stacked-PR strategy for roles that build on each other is to order the
-//! branches so a dependency merges before its dependents (see `docs/roles.md`).
+//! The integration branch keeps the merged commits for the operator to push and
+//! open as a pull request; the stacked-PR strategy for roles that build on each
+//! other is to order the branches so a dependency merges before its dependents
+//! (see `docs/roles.md`).
 
-use std::fmt::Write as _;
-use std::path::Path;
+use std::{fmt::Write as _, path::Path};
 
 use crew_substrate::supervisor::{IntegrationReport, Integrator, Standing};
 use eyre::{Result, WrapErr};
 
-/// Merges the crew's role branches into an integration branch and reports the standing.
+/// Merges the crew's role branches into an integration branch and reports the
+/// standing.
 ///
-/// Discovers the `crew/<role>` branches in `repo`, merges them into `branch` cut from `base`,
-/// and, when `check` is given, runs it on the integrated result. Prints the report.
+/// Discovers the `crew/<role>` branches in `repo`, merges them into `branch`
+/// cut from `base`, and, when `check` is given, runs it on the integrated
+/// result. Prints the report.
 ///
 /// # Errors
-/// Returns an error if `repo` is not a git repository, or git cannot list or merge the
-/// branches.
+/// Returns an error if `repo` is not a git repository, or git cannot list or
+/// merge the branches.
 pub fn integrate(repo: &str, base: &str, branch: &str, check: Option<&str>) -> Result<()> {
     let integrator = Integrator::new(Path::new(repo), branch, base)
         .wrap_err("could not start the integration")?;
@@ -44,8 +48,8 @@ pub fn integrate(repo: &str, base: &str, branch: &str, check: Option<&str>) -> R
     Ok(())
 }
 
-/// Renders the integration report for the operator: what merged, what conflicted, and the
-/// overall standing.
+/// Renders the integration report for the operator: what merged, what
+/// conflicted, and the overall standing.
 fn render(report: &IntegrationReport) -> String {
     let mut out = String::new();
     let _ = writeln!(

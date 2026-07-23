@@ -1,16 +1,17 @@
 //! The `crew-mcp` binary: the agent-facing MCP server.
 //!
-//! The supervisor spawns one per agent and hands it a role card: `CREW_ROLE_CARD`
-//! names a TOML card (see [`crew_core::RoleCard`]) with the role, its owned lane, its
-//! acceptance bar, and the broker address. The server boots from the card, registers
-//! the role on the roster so the unit sees it, and then speaks JSON-RPC over stdio
-//! (see [`crew_mcp`]).
+//! The supervisor spawns one per agent and hands it a role card:
+//! `CREW_ROLE_CARD` names a TOML card (see [`crew_core::RoleCard`]) with the
+//! role, its owned lane, its acceptance bar, and the broker address. The server
+//! boots from the card, registers the role on the roster so the unit sees it,
+//! and then speaks JSON-RPC over stdio (see [`crew_mcp`]).
 //!
-//! Without a card it falls back to the discrete environment: `CREW_ROLE` names the
-//! role and `CREW_BROKER_HOST` / `CREW_BROKER_PORT` (via the broker's own config)
-//! give the address. This keeps a bare manual boot working.
+//! Without a card it falls back to the discrete environment: `CREW_ROLE` names
+//! the role and `CREW_BROKER_HOST` / `CREW_BROKER_PORT` (via the broker's own
+//! config) give the address. This keeps a bare manual boot working.
 //!
-//! stdout carries the JSON-RPC protocol, so it stays clean: diagnostics go to stderr.
+//! stdout carries the JSON-RPC protocol, so it stays clean: diagnostics go to
+//! stderr.
 
 use std::io::{stdin, stdout, BufReader};
 
@@ -47,8 +48,9 @@ fn main() -> Result<()> {
     }
 
     // Subscribe to the live inbox so `crew_inbox` drains buffered events instead of
-    // refetching the whole history each call (issue #76). If streaming is unavailable the
-    // pull-based read remains the fallback, so the tool still works.
+    // refetching the whole history each call (issue #76). If streaming is
+    // unavailable the pull-based read remains the fallback, so the tool still
+    // works.
     if let Err(reason) = broker.subscribe() {
         eprintln!("crew-mcp: inbox streaming unavailable, using pull reads: {reason}");
     }
@@ -59,11 +61,12 @@ fn main() -> Result<()> {
         .wrap_err("the MCP server exited with an I/O error")
 }
 
-/// Loads the role card from `CREW_ROLE_CARD`, or builds one from the environment.
+/// Loads the role card from `CREW_ROLE_CARD`, or builds one from the
+/// environment.
 ///
 /// The card file is the supervisor's path and the standalone default. The env
-/// fallback (`CREW_ROLE` plus the broker's config) keeps a bare manual boot working
-/// with an empty lane and acceptance bar.
+/// fallback (`CREW_ROLE` plus the broker's config) keeps a bare manual boot
+/// working with an empty lane and acceptance bar.
 fn load_card() -> Result<RoleCard> {
     if let Some(path) = std::env::var_os(ROLE_CARD_ENV) {
         let path = std::path::PathBuf::from(path);

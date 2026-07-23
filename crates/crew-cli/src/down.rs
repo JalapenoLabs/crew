@@ -1,10 +1,11 @@
 //! `crew down`: stand the running crew down gracefully (issue #26).
 //!
-//! `crew up` runs the crew in the foreground, so standing it down is a matter of
-//! signaling that process: `crew down` reads the pidfile and sends `SIGTERM`, which
-//! `crew up` handles by stopping every agent, deregistering it, and draining the broker
-//! it started. The graceful shutdown itself lives in `crew up`, so `crew down` is a
-//! thin, reliable trigger with a single source of truth for how a unit stands down.
+//! `crew up` runs the crew in the foreground, so standing it down is a matter
+//! of signaling that process: `crew down` reads the pidfile and sends
+//! `SIGTERM`, which `crew up` handles by stopping every agent, deregistering
+//! it, and draining the broker it started. The graceful shutdown itself lives
+//! in `crew up`, so `crew down` is a thin, reliable trigger with a single
+//! source of truth for how a unit stands down.
 
 use crew_substrate::broker::Config as BrokerConfig;
 use eyre::{eyre, Result, WrapErr};
@@ -15,8 +16,8 @@ use crate::paths::pidfile;
 /// Signals the running crew to stand down.
 ///
 /// # Errors
-/// Returns an error if no crew is running (no pidfile), the pidfile is unreadable or
-/// malformed, or the process could not be signaled.
+/// Returns an error if no crew is running (no pidfile), the pidfile is
+/// unreadable or malformed, or the process could not be signaled.
 pub fn run() -> Result<()> {
     let broker_config = BrokerConfig::from_env()?;
     let pidfile = pidfile(&broker_config);
@@ -46,7 +47,8 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Sends `SIGTERM` to `pid`, so the `crew up` process runs its graceful shutdown.
+/// Sends `SIGTERM` to `pid`, so the `crew up` process runs its graceful
+/// shutdown.
 ///
 /// Shelling out to `kill` keeps this dependency-free; the crew targets Unix.
 #[cfg(unix)]

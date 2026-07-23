@@ -1,8 +1,8 @@
 //! `crewd`: the crew message broker daemon.
 //!
-//! A thin entry point: initialize structured logging, load the configuration from
-//! the environment, and run the broker (see [`crew_broker`]) until a shutdown
-//! signal.
+//! A thin entry point: initialize structured logging, load the configuration
+//! from the environment, and run the broker (see [`crew_broker`]) until a
+//! shutdown signal.
 
 use eyre::Result;
 use mimalloc::MiMalloc;

@@ -1,23 +1,29 @@
-//! The integration step: merge the roles' isolated work into one coherent result (issue #44).
+//! The integration step: merge the roles' isolated work into one coherent
+//! result (issue #44).
 //!
-//! Parallel roles work in isolated worktrees on `crew/<role>` branches (issue #43). Their
-//! work is only done when it comes together: this module merges those branches into a single
-//! integration branch, runs the crew's acceptance checks (build, tests) on the merged result,
-//! and reports where it stands, so "done" means the integrated whole is green, not just each
-//! part in isolation (issue #47's done-gate judges a part; this judges the whole).
+//! Parallel roles work in isolated worktrees on `crew/<role>` branches (issue
+//! #43). Their work is only done when it comes together: this module merges
+//! those branches into a single integration branch, runs the crew's acceptance
+//! checks (build, tests) on the merged result, and reports where it stands, so
+//! "done" means the integrated whole is green, not just each part in isolation
+//! (issue #47's done-gate judges a part; this judges the whole).
 //!
-//! Conflicts are resolved, not dropped. A conflicting merge is aborted and reported with the
-//! branch and the files it collides on, so a human (or the commander) resolves it, never a
-//! force-merge that discards a role's work behind its back. Migrations and other ordering
-//! concerns stay linear because the acceptance checks run on the integrated branch: a
-//! collision that breaks the build or the tests fails the integration rather than shipping.
+//! Conflicts are resolved, not dropped. A conflicting merge is aborted and
+//! reported with the branch and the files it collides on, so a human (or the
+//! commander) resolves it, never a force-merge that discards a role's work
+//! behind its back. Migrations and other ordering concerns stay linear because
+//! the acceptance checks run on the integrated branch: a collision that breaks
+//! the build or the tests fails the integration rather than shipping.
 //!
-//! The merge runs in a dedicated integration worktree, so it never disturbs the main checkout
-//! or the role worktrees; the integration branch keeps the merged commits after the worktree
-//! is cleaned up, ready for the operator to push and open as a pull request.
+//! The merge runs in a dedicated integration worktree, so it never disturbs the
+//! main checkout or the role worktrees; the integration branch keeps the merged
+//! commits after the worktree is cleaned up, ready for the operator to push and
+//! open as a pull request.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use eyre::{bail, eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -28,16 +34,18 @@ pub const DEFAULT_INTEGRATION_BRANCH: &str = "crew/integration";
 /// The prefix every per-role branch carries (`crew/<role>`, issue #43).
 const ROLE_BRANCH_PREFIX: &str = "crew/";
 
-/// How many trailing lines of a failed check's output the report keeps, enough to see the
-/// failure without carrying a whole build log.
+/// How many trailing lines of a failed check's output the report keeps, enough
+/// to see the failure without carrying a whole build log.
 const MAX_CHECK_OUTPUT_LINES: usize = 40;
 
-/// A merge that could not be applied cleanly: the branch, and the files it collides on.
+/// A merge that could not be applied cleanly: the branch, and the files it
+/// collides on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
     /// The role branch that conflicted.
     pub branch: String,
-    /// The files it collides on, named so the conflict is resolved by hand, not dropped.
+    /// The files it collides on, named so the conflict is resolved by hand, not
+    /// dropped.
     pub files: Vec<String>,
 }
 
@@ -48,33 +56,38 @@ pub struct CheckOutcome {
     pub command: String,
     /// Whether it passed (exit status zero).
     pub passed: bool,
-    /// The tail of its combined output, so a failure is diagnosable without the whole log.
+    /// The tail of its combined output, so a failure is diagnosable without the
+    /// whole log.
     pub output: String,
 }
 
 /// Where an integration stands overall (issue #44).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
-    /// Every branch merged cleanly and the acceptance checks passed: a green, coherent branch.
+    /// Every branch merged cleanly and the acceptance checks passed: a green,
+    /// coherent branch.
     Green,
     /// Every branch merged cleanly; no acceptance check was requested.
     Merged,
-    /// One or more branches conflicted; nothing was dropped, the conflicts are reported to resolve.
+    /// One or more branches conflicted; nothing was dropped, the conflicts are
+    /// reported to resolve.
     Conflicts,
-    /// Every branch merged cleanly, but the acceptance checks failed on the result.
+    /// Every branch merged cleanly, but the acceptance checks failed on the
+    /// result.
     ChecksFailed,
 }
 
 impl Standing {
-    /// Whether the integration produced a coherent branch that is safe to ship: everything
-    /// merged, and any checks passed.
+    /// Whether the integration produced a coherent branch that is safe to ship:
+    /// everything merged, and any checks passed.
     #[must_use]
     pub fn is_green(self) -> bool {
         matches!(self, Standing::Green | Standing::Merged)
     }
 }
 
-/// The result of an integration run: what merged, what conflicted, and how it checks out.
+/// The result of an integration run: what merged, what conflicted, and how it
+/// checks out.
 #[derive(Debug, Clone)]
 pub struct IntegrationReport {
     /// The integration branch the work was merged into.
@@ -85,17 +98,20 @@ pub struct IntegrationReport {
     pub merged: Vec<String>,
     /// The branches that conflicted, with the files they collide on.
     pub conflicts: Vec<Conflict>,
-    /// The acceptance-check outcome, if a check was run (skipped when a merge conflicted).
+    /// The acceptance-check outcome, if a check was run (skipped when a merge
+    /// conflicted).
     pub check: Option<CheckOutcome>,
     /// The overall standing.
     pub standing: Standing,
 }
 
-/// The integration step over one repo: merge role branches into an integration branch.
+/// The integration step over one repo: merge role branches into an integration
+/// branch.
 ///
 /// # Examples
 /// ```no_run
 /// use std::path::Path;
+///
 /// use crew_supervisor::{Integrator, DEFAULT_INTEGRATION_BRANCH};
 ///
 /// let integrator = Integrator::new(Path::new("."), DEFAULT_INTEGRATION_BRANCH, "main")?;
@@ -117,7 +133,8 @@ pub struct Integrator {
 impl Integrator {
     /// Builds an integrator over `repo`, merging into `branch` cut from `base`.
     ///
-    /// `base` is any ref the merge starts from (a branch like `main`, or `HEAD`).
+    /// `base` is any ref the merge starts from (a branch like `main`, or
+    /// `HEAD`).
     ///
     /// # Errors
     /// Returns an error if `repo` does not exist.
@@ -132,10 +149,11 @@ impl Integrator {
         })
     }
 
-    /// The `crew/<role>` branches in the repo, the ones an integration merges (issue #43).
+    /// The `crew/<role>` branches in the repo, the ones an integration merges
+    /// (issue #43).
     ///
-    /// Excludes the integration branch itself, so re-integrating does not merge the branch
-    /// into itself. Returned in git's stable sorted order.
+    /// Excludes the integration branch itself, so re-integrating does not merge
+    /// the branch into itself. Returned in git's stable sorted order.
     ///
     /// # Errors
     /// Returns an error if git cannot list the branches.
@@ -158,26 +176,30 @@ impl Integrator {
             .collect())
     }
 
-    /// Integrates `branches` into the integration branch, optionally running `check` on the
-    /// merged result.
+    /// Integrates `branches` into the integration branch, optionally running
+    /// `check` on the merged result.
     ///
-    /// Resets the integration branch to `base` in a dedicated worktree, then merges each
-    /// branch in order. A conflicting merge is aborted and recorded (its branch and the files
-    /// it collides on) rather than force-applied, so no role's work is silently dropped. When
-    /// every branch merges cleanly and `check` is given, it runs on the integrated result (via
-    /// `sh -c`), and the standing reflects whether it passed. A merge that conflicts skips the
-    /// checks, since the integration is not yet whole.
+    /// Resets the integration branch to `base` in a dedicated worktree, then
+    /// merges each branch in order. A conflicting merge is aborted and
+    /// recorded (its branch and the files it collides on) rather than
+    /// force-applied, so no role's work is silently dropped. When
+    /// every branch merges cleanly and `check` is given, it runs on the
+    /// integrated result (via `sh -c`), and the standing reflects whether
+    /// it passed. A merge that conflicts skips the checks, since the
+    /// integration is not yet whole.
     ///
-    /// The integration worktree is cleaned up afterward; the integration branch keeps the
-    /// merged commits for the operator to push and open as a pull request.
+    /// The integration worktree is cleaned up afterward; the integration branch
+    /// keeps the merged commits for the operator to push and open as a pull
+    /// request.
     ///
     /// # Errors
-    /// Returns an error if git cannot set up the integration worktree, or a merge fails for a
-    /// reason other than a resolvable conflict.
+    /// Returns an error if git cannot set up the integration worktree, or a
+    /// merge fails for a reason other than a resolvable conflict.
     pub fn integrate(&self, branches: &[String], check: Option<&str>) -> Result<IntegrationReport> {
         let workdir = self.setup_worktree()?;
         let result = self.run(&workdir, branches, check);
-        // Always clean up the integration worktree; the branch keeps the merged commits.
+        // Always clean up the integration worktree; the branch keeps the merged
+        // commits.
         let workdir_str = workdir.to_string_lossy();
         let _ = git(
             &self.repo,
@@ -188,8 +210,9 @@ impl Integrator {
 
     /// Creates the integration worktree, reset to `base`, idempotently.
     fn setup_worktree(&self) -> Result<PathBuf> {
-        // A dedicated worktree keyed by the repo, so the integration never disturbs the main
-        // checkout or the role worktrees, and a stale one from a prior run is replaced.
+        // A dedicated worktree keyed by the repo, so the integration never disturbs the
+        // main checkout or the role worktrees, and a stale one from a prior run
+        // is replaced.
         let key = self.repo.to_string_lossy().replace(['/', '\\', ':'], "_");
         let workdir = std::env::temp_dir().join(format!("crew-integration-{key}"));
         let workdir_str = workdir.to_string_lossy();
@@ -215,7 +238,8 @@ impl Integrator {
         Ok(workdir)
     }
 
-    /// Merges each branch and, if clean, runs the check, folding it all into a report.
+    /// Merges each branch and, if clean, runs the check, folding it all into a
+    /// report.
     fn run(
         &self,
         workdir: &Path,
@@ -279,34 +303,38 @@ impl Integrator {
 enum MergeResult {
     /// The branch merged cleanly.
     Clean,
-    /// The branch conflicts on these files; the merge was aborted, nothing dropped.
+    /// The branch conflicts on these files; the merge was aborted, nothing
+    /// dropped.
     Conflicted(Vec<String>),
 }
 
-/// Merges `branch` into the integration worktree, aborting and reporting a conflict.
+/// Merges `branch` into the integration worktree, aborting and reporting a
+/// conflict.
 fn merge_one(workdir: &Path, branch: &str) -> Result<MergeResult> {
     let attempt = run_git(workdir, &["merge", "--no-ff", "--no-edit", branch]);
     if attempt.ok {
         return Ok(MergeResult::Clean);
     }
 
-    // A merge that stopped on a conflict leaves the conflicting files marked `U`nmerged.
+    // A merge that stopped on a conflict leaves the conflicting files marked
+    // `U`nmerged.
     let files: Vec<String> = git(workdir, &["diff", "--name-only", "--diff-filter=U"])
         .map(|out| out.lines().map(str::to_owned).collect())
         .unwrap_or_default();
-    // Abort so the integration branch stays clean up to the last good merge; the conflict is
-    // reported, not left half-applied.
+    // Abort so the integration branch stays clean up to the last good merge; the
+    // conflict is reported, not left half-applied.
     let _ = run_git(workdir, &["merge", "--abort"]);
 
     if files.is_empty() {
-        // The merge failed for a reason other than a conflict (e.g. the branch is missing).
+        // The merge failed for a reason other than a conflict (e.g. the branch is
+        // missing).
         bail!("merging `{branch}` failed: {}", attempt.stderr.trim());
     }
     Ok(MergeResult::Conflicted(files))
 }
 
-/// Runs the acceptance `command` in the integrated worktree via the shell, capturing its
-/// standing and the tail of its output.
+/// Runs the acceptance `command` in the integrated worktree via the shell,
+/// capturing its standing and the tail of its output.
 fn run_check(workdir: &Path, command: &str) -> Result<CheckOutcome> {
     let output = Command::new("sh")
         .arg("-c")
@@ -323,21 +351,24 @@ fn run_check(workdir: &Path, command: &str) -> Result<CheckOutcome> {
     })
 }
 
-/// The last `lines` lines of `text`, so a report carries the diagnostic tail, not a whole log.
+/// The last `lines` lines of `text`, so a report carries the diagnostic tail,
+/// not a whole log.
 fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
 }
 
-/// The outcome of a git command run where a non-zero exit is expected (a merge, an abort).
+/// The outcome of a git command run where a non-zero exit is expected (a merge,
+/// an abort).
 struct GitRun {
     ok: bool,
     stderr: String,
 }
 
-/// Runs a git command in `dir` without failing on a non-zero exit, for the merge path where a
-/// conflict is a non-zero exit to inspect, not an error to propagate.
+/// Runs a git command in `dir` without failing on a non-zero exit, for the
+/// merge path where a conflict is a non-zero exit to inspect, not an error to
+/// propagate.
 fn run_git(dir: &Path, args: &[&str]) -> GitRun {
     match Command::new("git").arg("-C").arg(dir).args(args).output() {
         Ok(out) => GitRun {
@@ -351,7 +382,8 @@ fn run_git(dir: &Path, args: &[&str]) -> GitRun {
     }
 }
 
-/// Runs a git command in `dir`, returning its stdout or an error carrying stderr.
+/// Runs a git command in `dir`, returning its stdout or an error carrying
+/// stderr.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -390,8 +422,9 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "base"]).unwrap();
     }
 
-    /// Commits `contents` to `file` on a fresh `crew/<role>` branch off `main`, then returns
-    /// to `main`, mirroring what a role worktree leaves behind (issue #43).
+    /// Commits `contents` to `file` on a fresh `crew/<role>` branch off `main`,
+    /// then returns to `main`, mirroring what a role worktree leaves behind
+    /// (issue #43).
     fn role_branch(repo: &Path, role: &str, file: &str, contents: &str) {
         git(
             repo,

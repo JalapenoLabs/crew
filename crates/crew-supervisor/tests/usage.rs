@@ -1,9 +1,10 @@
 //! Subscription usage auto-pause, end to end against a real broker (issue #56).
 //!
-//! Proves the acceptance: a crossed usage threshold pauses new work (gauge and roster show
-//! it), and the operator can resume early. The reset auto-clear and the threshold logic are
-//! unit-tested in the broker; this proves the supervisor's `report_usage` seam reaches the
-//! broker and engages the one shared gauge. The usage signal is the rate-limit detection of
+//! Proves the acceptance: a crossed usage threshold pauses new work (gauge and
+//! roster show it), and the operator can resume early. The reset auto-clear and
+//! the threshold logic are unit-tested in the broker; this proves the
+//! supervisor's `report_usage` seam reaches the broker and engages the one
+//! shared gauge. The usage signal is the rate-limit detection of
 //! the stream-json parser (issue #24); this drives the seam directly.
 
 mod common;
@@ -12,7 +13,8 @@ use common::start_broker;
 use crew_core::Timestamp;
 use crew_supervisor::RosterClient;
 
-/// A window reset far in the future, so an engaged pause holds through the test.
+/// A window reset far in the future, so an engaged pause holds through the
+/// test.
 fn future_reset() -> Timestamp {
     serde_json::from_value(serde_json::json!("2099-01-01T00:00:00Z")).unwrap()
 }

@@ -1,25 +1,29 @@
 //! Auto-registering the crew MCP server so a spawned agent gets the crew tools.
 //!
-//! An agent only has the `crew_send` / `crew_inbox` / `crew_roster` tools if its
-//! Claude Code process loads the [`crew-mcp`](crew_mcp) server, and it must load with
-//! no per-task approval gate. This mirrors how Seraphim registers the Playwright MCP
-//! (issue #20): register the server once at **user** scope in the agent config
-//! (`claude mcp add -s user crew -- <path>`), so a `claude -p --permission-mode
-//! bypassPermissions` turn loads it silently. A project-scoped `.mcp.json` would sit
-//! unapproved and never connect under `bypassPermissions`.
+//! An agent only has the `crew_send` / `crew_inbox` / `crew_roster` tools if
+//! its Claude Code process loads the [`crew-mcp`](crew_mcp) server, and it must
+//! load with no per-task approval gate. This mirrors how Seraphim registers the
+//! Playwright MCP (issue #20): register the server once at **user** scope in
+//! the agent config (`claude mcp add -s user crew -- <path>`), so a `claude -p
+//! --permission-mode bypassPermissions` turn loads it silently. A
+//! project-scoped `.mcp.json` would sit unapproved and never connect under
+//! `bypassPermissions`.
 //!
-//! Registration is a one-time, unit-wide step, not per-agent: [`register_server`]
-//! records only the command. Each spawned agent's own broker address, role, and lane
-//! ride the environment its `claude` process is launched with (the [`Launch::env`]
-//! from [`provision`](crate::provision)), which the `crew-mcp` child inherits. So the
-//! flow is: [`locate_server`] and [`register_server`] once at startup, then
-//! `provision` and spawn per role with [`agent_turn_argv`].
+//! Registration is a one-time, unit-wide step, not per-agent:
+//! [`register_server`] records only the command. Each spawned agent's own
+//! broker address, role, and lane ride the environment its `claude` process is
+//! launched with (the [`Launch::env`] from [`provision`](crate::provision)),
+//! which the `crew-mcp` child inherits. So the flow is: [`locate_server`] and
+//! [`register_server`] once at startup, then `provision` and spawn per role
+//! with [`agent_turn_argv`].
 //!
 //! [`Launch::env`]: crate::Launch::env
 
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use eyre::{eyre, Result, WrapErr};
 
@@ -29,22 +33,24 @@ pub const MCP_SERVER_NAME: &str = "crew";
 /// The Claude Code CLI, resolved from `PATH`, that owns the MCP registry.
 pub(crate) const CLAUDE_BIN: &str = "claude";
 
-/// The crew MCP server binary's base name (the platform executable suffix is added).
+/// The crew MCP server binary's base name (the platform executable suffix is
+/// added).
 const SERVER_BINARY: &str = "crew-mcp";
 
 /// Finds the `crew-mcp` server binary, the build/boot check.
 ///
-/// Looks next to the running executable first (a co-installed release layout), then
-/// on `PATH`. Returns the resolved path, so [`register_server`] records an absolute
-/// command that does not depend on the agent's `PATH`.
+/// Looks next to the running executable first (a co-installed release layout),
+/// then on `PATH`. Returns the resolved path, so [`register_server`] records an
+/// absolute command that does not depend on the agent's `PATH`.
 ///
 /// # Errors
-/// Fails loudly, naming where it looked, if the binary is nowhere to be found, so a
-/// missing build never becomes a silently tool-less agent.
+/// Fails loudly, naming where it looked, if the binary is nowhere to be found,
+/// so a missing build never becomes a silently tool-less agent.
 pub fn locate_server() -> Result<PathBuf> {
     let name = server_file_name();
 
-    // Next to the supervisor's own executable: the release layout ships them together.
+    // Next to the supervisor's own executable: the release layout ships them
+    // together.
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| sibling_dir(&exe))
@@ -70,10 +76,10 @@ pub fn locate_server() -> Result<PathBuf> {
 
 /// Registers the crew MCP server at user scope so every spawned agent loads it.
 ///
-/// Idempotent by construction: it removes any prior `crew` registration, then adds
-/// `server`, so re-running re-asserts the current path. User scope (`-s user`) writes
-/// it to the agent config, so a `claude -p --permission-mode bypassPermissions` turn
-/// loads it with no approval prompt.
+/// Idempotent by construction: it removes any prior `crew` registration, then
+/// adds `server`, so re-running re-asserts the current path. User scope (`-s
+/// user`) writes it to the agent config, so a `claude -p --permission-mode
+/// bypassPermissions` turn loads it with no approval prompt.
 ///
 /// # Errors
 /// Fails if `server` is not an existing file (the build/boot check), or if the
@@ -100,11 +106,13 @@ pub fn register_server(server: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Builds the `claude` argv for a headless agent turn that loads the crew MCP silently.
+/// Builds the `claude` argv for a headless agent turn that loads the crew MCP
+/// silently.
 ///
-/// `-p` runs the turn headless with `briefing` as the opening prompt (the role card's
-/// thin bootstrap), and `--permission-mode bypassPermissions` is what makes the
-/// user-scope crew server load with no approval gate. `argv[0]` is the program.
+/// `-p` runs the turn headless with `briefing` as the opening prompt (the role
+/// card's thin bootstrap), and `--permission-mode bypassPermissions` is what
+/// makes the user-scope crew server load with no approval gate. `argv[0]` is
+/// the program.
 #[must_use]
 pub fn agent_turn_argv(briefing: &str) -> Vec<String> {
     vec![
@@ -116,14 +124,16 @@ pub fn agent_turn_argv(briefing: &str) -> Vec<String> {
     ]
 }
 
-/// The `claude mcp add` argv registering the stdio server at user scope by path.
+/// The `claude mcp add` argv registering the stdio server at user scope by
+/// path.
 fn mcp_add_argv(server: &Path) -> Vec<OsString> {
     let mut argv = os_args(&["mcp", "add", "-s", "user", MCP_SERVER_NAME, "--"]);
     argv.push(server.as_os_str().to_os_string());
     argv
 }
 
-/// The `claude mcp remove` argv that clears a prior registration before re-adding.
+/// The `claude mcp remove` argv that clears a prior registration before
+/// re-adding.
 fn mcp_remove_argv() -> Vec<OsString> {
     os_args(&["mcp", "remove", "-s", "user", MCP_SERVER_NAME])
 }
@@ -139,8 +149,8 @@ fn ensure_binary(server: &Path) -> Result<()> {
     ))
 }
 
-/// The server binary's file name, with the platform executable suffix (`.exe` on
-/// Windows, empty elsewhere).
+/// The server binary's file name, with the platform executable suffix (`.exe`
+/// on Windows, empty elsewhere).
 fn server_file_name() -> OsString {
     OsString::from(format!("{SERVER_BINARY}{}", std::env::consts::EXE_SUFFIX))
 }
@@ -164,9 +174,11 @@ fn os_args(args: &[&str]) -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use super::{
         agent_turn_argv, ensure_binary, find_on_path, mcp_add_argv, mcp_remove_argv,

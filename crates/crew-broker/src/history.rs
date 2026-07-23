@@ -2,38 +2,46 @@
 //!
 //! `GET /history` lets a consumer or a late joiner read the stored log without
 //! holding a stream open. It filters by `channel`, `role` (sent by), `agent` (a
-//! role's full activity timeline: what it sent and received, issue #30), `kind`,
-//! `task`, and `since`, orders deterministically by `ts` then log position, and pages
-//! with a stable cursor so concurrent writes never shift a page already returned.
+//! role's full activity timeline: what it sent and received, issue #30),
+//! `kind`, `task`, and `since`, orders deterministically by `ts` then log
+//! position, and pages with a stable cursor so concurrent writes never shift a
+//! page already returned.
 //!
-//! This module owns the HTTP surface only: it parses and validates the query string
-//! into a backend-neutral [`EventQuery`] and formats the [`EventPage`] the store
-//! returns. The filter, ordering, and paging live behind the [`Storage`](crate::Storage)
-//! trait (see `store.rs`), so a future indexed backend can push them down. With
-//! `summary=true` it returns a rolling-summary compaction instead of a raw page (see
-//! [`summary`](crate::summary)): the older events folded into bounded aggregates plus
-//! the recent tail, so a late joiner reads bounded context, not the full log.
+//! This module owns the HTTP surface only: it parses and validates the query
+//! string into a backend-neutral [`EventQuery`] and formats the [`EventPage`]
+//! the store returns. The filter, ordering, and paging live behind the
+//! [`Storage`](crate::Storage) trait (see `store.rs`), so a future indexed
+//! backend can push them down. With `summary=true` it returns a rolling-summary
+//! compaction instead of a raw page (see [`summary`](crate::summary)): the
+//! older events folded into bounded aggregates plus the recent tail, so a late
+//! joiner reads bounded context, not the full log.
 
-use axum::extract::{Query, State};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{
+    extract::{Query, State},
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use crew_core::Event;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
-use crate::filter::{nonempty, FilterQuery};
-use crate::state::AppState;
-use crate::store::{EventFilter, EventQuery};
-use crate::summary::{summarize, HistorySummary};
+use crate::{
+    error::ApiError,
+    filter::{nonempty, FilterQuery},
+    state::AppState,
+    store::{EventFilter, EventQuery},
+    summary::{summarize, HistorySummary},
+};
 
 /// The default page size when a request does not set `limit`.
 const DEFAULT_LIMIT: usize = 100;
 
-/// The largest page a single request may ask for, bounding response size and work.
+/// The largest page a single request may ask for, bounding response size and
+/// work.
 const MAX_LIMIT: usize = 1000;
 
-/// The history route: `GET /history` (read past events, filtered and paginated).
+/// The history route: `GET /history` (read past events, filtered and
+/// paginated).
 pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/history", get(history))
 }
@@ -41,8 +49,8 @@ pub(crate) fn routes() -> Router<AppState> {
 /// The pagination and summary params of `GET /history`, alongside the shared
 /// [`FilterQuery`] that says which events to keep.
 ///
-/// Every field is a raw string so a malformed value yields a typed 400 from this
-/// handler rather than an untyped rejection from the extractor.
+/// Every field is a raw string so a malformed value yields a typed 400 from
+/// this handler rather than an untyped rejection from the extractor.
 #[derive(Debug, Deserialize)]
 struct HistoryOptions {
     /// Resume after this opaque cursor (from a previous page's `next_cursor`).
@@ -58,15 +66,18 @@ struct HistoryOptions {
 struct HistoryPage {
     /// The matching events, oldest first.
     events: Vec<Event>,
-    /// The cursor to pass as `after` for the next page, absent on the last page.
+    /// The cursor to pass as `after` for the next page, absent on the last
+    /// page.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_cursor: Option<String>,
 }
 
-/// The `summary=true` response: a compaction of older events plus the recent tail.
+/// The `summary=true` response: a compaction of older events plus the recent
+/// tail.
 ///
-/// The `summary` folds every event older than the tail into bounded aggregates; the
-/// `tail` keeps the most recent `limit` events raw so recent detail is not lost.
+/// The `summary` folds every event older than the tail into bounded aggregates;
+/// the `tail` keeps the most recent `limit` events raw so recent detail is not
+/// lost.
 #[derive(Debug, Serialize)]
 struct SummaryResponse {
     /// The bounded compaction of the older events.
@@ -77,9 +88,9 @@ struct SummaryResponse {
 
 /// `GET /history`: read past events, filtered, time-ordered, and paginated.
 ///
-/// With `summary=true` it returns the rolling-summary compaction instead: a digest of
-/// the older events plus the recent tail (sized by `limit`), so a late joiner reads
-/// bounded context rather than the full log.
+/// With `summary=true` it returns the rolling-summary compaction instead: a
+/// digest of the older events plus the recent tail (sized by `limit`), so a
+/// late joiner reads bounded context rather than the full log.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if a filter, the cursor, or `limit` is malformed.
@@ -112,10 +123,11 @@ async fn history(
     .into_response())
 }
 
-/// Builds the rolling-summary response: older events compacted, recent `tail` kept raw.
+/// Builds the rolling-summary response: older events compacted, recent `tail`
+/// kept raw.
 ///
-/// Reads the whole filtered, time-ordered history in one query, then splits off the
-/// most recent `tail` events and folds the rest into a [`HistorySummary`].
+/// Reads the whole filtered, time-ordered history in one query, then splits off
+/// the most recent `tail` events and folds the rest into a [`HistorySummary`].
 fn summary_response(
     state: &AppState,
     filter: EventFilter,
@@ -145,7 +157,8 @@ fn wants_summary(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true" | "yes"))
 }
 
-/// Parses and clamps the `limit`, defaulting when absent and rejecting a bad value.
+/// Parses and clamps the `limit`, defaulting when absent and rejecting a bad
+/// value.
 fn parse_limit(limit: Option<&str>) -> Result<usize, ApiError> {
     match nonempty(limit) {
         None => Ok(DEFAULT_LIMIT),
@@ -173,8 +186,10 @@ fn parse_cursor(after: Option<&str>) -> Result<Option<u64>, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{
         Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId,
         Sender, Timestamp,
@@ -182,10 +197,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::filter::from_str;
-    use crate::state::AppState;
+    use crate::{api, config::Config, filter::from_str, state::AppState};
 
     /// An RFC 3339 timestamp for deterministic ordering in tests.
     fn ts(seconds: u32) -> Timestamp {
@@ -227,7 +239,8 @@ mod tests {
         )
     }
 
-    /// A `turn started` activity event for `role`, on `all-units`, stamped at `at`.
+    /// A `turn started` activity event for `role`, on `all-units`, stamped at
+    /// `at`.
     fn activity(role: &str, at: Timestamp) -> Event {
         event(
             role,
@@ -450,7 +463,8 @@ mod tests {
             (0..3).map(|i| message("backend", "all-units", ts(i))),
         );
 
-        // The tail default (100) exceeds the log, so nothing is old enough to summarize.
+        // The tail default (100) exceeds the log, so nothing is old enough to
+        // summarize.
         let (status, body) = get(&state, "?summary=true").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["summary"]["event_count"], 0);

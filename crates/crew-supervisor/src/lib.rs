@@ -1,31 +1,33 @@
 //! The crew process supervisor.
 //!
-//! Turns a set of resolved [`RoleCard`]s into running, connected agents: it spawns
-//! one `claude -p` process per role with its role card and the crew MCP server, wires
-//! each to the broker roster, and captures each process's output for the activity
-//! parser. Built on the types in [`crew_core`].
+//! Turns a set of resolved [`RoleCard`]s into running, connected agents: it
+//! spawns one `claude -p` process per role with its role card and the crew MCP
+//! server, wires each to the broker roster, and captures each process's output
+//! for the activity parser. Built on the types in [`crew_core`].
 //!
 //! The pieces, in the order a bring-up uses them:
 //!
 //! - [`register_server`] auto-registers the crew MCP server at user scope so a
-//!   spawned agent gets the crew tools with no per-task approval (issue #20), and
-//!   [`agent_turn_argv`] builds the `bypassPermissions` turn that loads it silently.
-//! - [`provision`] writes a role's card where the agent can read it and returns the
-//!   [`Launch`] the child process starts from. The standalone flow (the `crew-mcp`
-//!   binary) reads the very same card, so both paths share one loader in
-//!   [`crew_core`].
-//! - [`Supervisor::up`] runs the whole flow (issue #21): it spawns one process per
-//!   role, registers each on the roster on start and deregisters on exit, and
-//!   captures stdout and stderr, returning a running [`Crew`].
-//! - [`Fleet`] manages each agent's lifecycle (issue #22): lazy start on first work,
-//!   idle-stop after a quiet period, and restart on demand, emitting a lifecycle event
-//!   on every transition. Its defibrillator (issue #23) detects an agent whose turn
-//!   died, whether it crashed or hung, with a layered heartbeat and watchdog; it
-//!   records an [`Incident`] and revives the agent within a recovery budget, handing
-//!   it to the operator once the budget is spent. Its coordination-stall monitor (issue
-//!   #48, [`stall`]) extends that to the crew as a whole: it reads the event stream for a
-//!   deadlock, an unanswered question, or a ledger with no forward motion, and escalates
-//!   the specific [`Stall`] so silence never reads as progress.
+//!   spawned agent gets the crew tools with no per-task approval (issue #20),
+//!   and [`agent_turn_argv`] builds the `bypassPermissions` turn that loads it
+//!   silently.
+//! - [`provision`] writes a role's card where the agent can read it and returns
+//!   the [`Launch`] the child process starts from. The standalone flow (the
+//!   `crew-mcp` binary) reads the very same card, so both paths share one
+//!   loader in [`crew_core`].
+//! - [`Supervisor::up`] runs the whole flow (issue #21): it spawns one process
+//!   per role, registers each on the roster on start and deregisters on exit,
+//!   and captures stdout and stderr, returning a running [`Crew`].
+//! - [`Fleet`] manages each agent's lifecycle (issue #22): lazy start on first
+//!   work, idle-stop after a quiet period, and restart on demand, emitting a
+//!   lifecycle event on every transition. Its defibrillator (issue #23) detects
+//!   an agent whose turn died, whether it crashed or hung, with a layered
+//!   heartbeat and watchdog; it records an [`Incident`] and revives the agent
+//!   within a recovery budget, handing it to the operator once the budget is
+//!   spent. Its coordination-stall monitor (issue #48, [`stall`]) extends that
+//!   to the crew as a whole: it reads the event stream for a deadlock, an
+//!   unanswered question, or a ledger with no forward motion, and escalates the
+//!   specific [`Stall`] so silence never reads as progress.
 
 mod integrate;
 mod lifecycle;
@@ -35,12 +37,13 @@ mod spawn;
 mod stall;
 mod worktree;
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
-
 pub use integrate::{
     CheckOutcome, Conflict, IntegrationReport, Integrator, Standing, DEFAULT_INTEGRATION_BRANCH,
 };
@@ -53,30 +56,33 @@ pub use spawn::{
 pub use stall::{detect_stalls, Stall, StallKind};
 pub use worktree::Worktree;
 
-/// The file name a provisioned role card is written under, in the agent's directory.
+/// The file name a provisioned role card is written under, in the agent's
+/// directory.
 const CARD_FILE_NAME: &str = "role-card.toml";
 
 /// Everything needed to launch one role's agent process from its card.
 ///
-/// The supervisor spawns the agent with [`env`](Launch::env) set and hands the agent
-/// its [`briefing`](Launch::briefing) as the opening prompt.
+/// The supervisor spawns the agent with [`env`](Launch::env) set and hands the
+/// agent its [`briefing`](Launch::briefing) as the opening prompt.
 #[derive(Debug, Clone)]
 pub struct Launch {
     /// Where the role card was written, so the child can read it back.
     pub card_path: PathBuf,
     /// The environment the child MCP server reads to reach the unit.
     ///
-    /// One entry today: [`ROLE_CARD_ENV`] pointing at [`card_path`](Launch::card_path).
+    /// One entry today: [`ROLE_CARD_ENV`] pointing at
+    /// [`card_path`](Launch::card_path).
     pub env: Vec<(String, String)>,
     /// The thin bootstrap prompt for the agent (see [`RoleCard::briefing`]).
     pub briefing: String,
 }
 
-/// Writes `card` into `agent_dir` and returns the [`Launch`] its agent boots from.
+/// Writes `card` into `agent_dir` and returns the [`Launch`] its agent boots
+/// from.
 ///
 /// This is the boot step of spawning an agent: the card is serialized to
-/// `agent_dir/role-card.toml`, and the returned environment points the child's MCP
-/// server at it. `agent_dir` must already exist.
+/// `agent_dir/role-card.toml`, and the returned environment points the child's
+/// MCP server at it. `agent_dir` must already exist.
 ///
 /// # Errors
 /// Returns an error if the card cannot be serialized or written to `agent_dir`.
@@ -84,6 +90,7 @@ pub struct Launch {
 /// # Examples
 /// ```no_run
 /// use std::path::Path;
+///
 /// use crew_core::{BrokerEndpoint, RoleCard, RoleId};
 /// use crew_supervisor::provision;
 ///
@@ -114,13 +121,14 @@ pub fn provision(card: &RoleCard, agent_dir: &Path) -> Result<Launch> {
 
 #[cfg(test)]
 mod tests {
-    use super::{provision, CARD_FILE_NAME};
     use crew_core::{BrokerEndpoint, RoleCard, RoleId, ROLE_CARD_ENV};
+
+    use super::{provision, CARD_FILE_NAME};
 
     /// A unique, empty directory under the system temp dir for one test.
     ///
-    /// Named after the test so parallel tests never collide; cleaned on entry so a
-    /// prior run never leaks in.
+    /// Named after the test so parallel tests never collide; cleaned on entry
+    /// so a prior run never leaks in.
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("crew-supervisor-test-{name}"));
         let _ = std::fs::remove_dir_all(&dir);

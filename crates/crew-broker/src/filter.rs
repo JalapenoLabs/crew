@@ -1,33 +1,39 @@
-//! The event filter shared by the aggregate views: `GET /history` and `GET /stream`.
+//! The event filter shared by the aggregate views: `GET /history` and `GET
+//! /stream`.
 //!
-//! Both narrow the one event stream the same way, so a filtered live subscription and
-//! a filtered history read agree on which events belong to the view (issue #31). This
-//! module parses the query params into a backend-neutral [`EventFilter`]; the store
-//! applies it to the log for history, and the live `/stream` applies the very same
-//! [`EventFilter::matches`](crate::store::EventFilter::matches) to each fanned-out
-//! event. Parsing lives here, in the HTTP layer, so the store stays query-agnostic.
+//! Both narrow the one event stream the same way, so a filtered live
+//! subscription and a filtered history read agree on which events belong to the
+//! view (issue #31). This module parses the query params into a backend-neutral
+//! [`EventFilter`]; the store applies it to the log for history, and the live
+//! `/stream` applies the very same
+//! [`EventFilter::matches`](crate::store::EventFilter::matches) to each
+//! fanned-out event. Parsing lives here, in the HTTP layer, so the store stays
+//! query-agnostic.
 
 use crew_core::{ChannelId, RoleId, TaskId, Timestamp};
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 
-use crate::error::ApiError;
-use crate::store::{EventFilter, EventKindTag};
+use crate::{
+    error::ApiError,
+    store::{EventFilter, EventKindTag},
+};
 
 /// The filter query params common to the aggregate views: which events to keep.
 ///
 /// Every field is a raw string so a malformed value yields a typed 400 from
-/// [`to_filter`](FilterQuery::to_filter) rather than an untyped extractor rejection.
-/// An absent or blank field imposes no constraint, so a bare `?role=` reads as unset.
+/// [`to_filter`](FilterQuery::to_filter) rather than an untyped extractor
+/// rejection. An absent or blank field imposes no constraint, so a bare
+/// `?role=` reads as unset.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct FilterQuery {
     /// Keep only events on this channel (pair member order does not matter).
     pub channel: Option<String>,
     /// Keep only events sent by this role.
     pub role: Option<String>,
-    /// Keep only events on this role's activity timeline: its own events (messages it
-    /// sent, its lifecycle, its activity) plus the messages addressed to it (issue #30).
+    /// Keep only events on this role's activity timeline: its own events
+    /// (messages it sent, its lifecycle, its activity) plus the messages
+    /// addressed to it (issue #30).
     pub agent: Option<String>,
     /// Keep only events of this kind: `message`, `lifecycle`, or `activity`.
     pub kind: Option<String>,
@@ -41,8 +47,8 @@ impl FilterQuery {
     /// Parses and validates the params into a backend-neutral [`EventFilter`].
     ///
     /// # Errors
-    /// Returns a 400 [`ApiError`] if `kind` is not a known kind, or `task` / `since`
-    /// is malformed.
+    /// Returns a 400 [`ApiError`] if `kind` is not a known kind, or `task` /
+    /// `since` is malformed.
     pub(crate) fn to_filter(&self) -> Result<EventFilter, ApiError> {
         let kind = match nonempty(self.kind.as_deref()) {
             Some(kind) => Some(EventKindTag::parse(kind).ok_or_else(|| {
@@ -70,12 +76,14 @@ impl FilterQuery {
     }
 }
 
-/// The trimmed value if present and not blank, so a bare `?role=` reads as absent.
+/// The trimmed value if present and not blank, so a bare `?role=` reads as
+/// absent.
 pub(crate) fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-/// Deserializes a string into a wire type (e.g. [`TaskId`], [`Timestamp`]) via serde.
+/// Deserializes a string into a wire type (e.g. [`TaskId`], [`Timestamp`]) via
+/// serde.
 pub(crate) fn from_str<T: DeserializeOwned>(value: &str) -> Result<T, serde_json::Error> {
     serde_json::from_value(Value::String(value.to_owned()))
 }

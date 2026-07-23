@@ -1,10 +1,11 @@
 //! End-to-end test of coordination-stall detection (issue #48).
 //!
-//! It proves the acceptance against a real broker: a mutual-wait deadlock and a stalled
-//! task (a done-gate submission with no verdict, the on-`main` shape of "a ledger with no
-//! forward motion") are read off the live stream and detected with a precise cause, while
-//! an answered exchange is not. Detection runs over the same `history_since` fetch the
-//! fleet's stall monitor uses, so this exercises the wire path, not just the pure logic.
+//! It proves the acceptance against a real broker: a mutual-wait deadlock and a
+//! stalled task (a done-gate submission with no verdict, the on-`main` shape of
+//! "a ledger with no forward motion") are read off the live stream and detected
+//! with a precise cause, while an answered exchange is not. Detection runs over
+//! the same `history_since` fetch the fleet's stall monitor uses, so this
+//! exercises the wire path, not just the pure logic.
 
 mod common;
 
@@ -22,9 +23,9 @@ fn roster() -> Vec<RoleId> {
 
 /// Posts a message of `kind` from `role` to `channel` through the broker.
 ///
-/// An `answer` carries a required `in_reply_to` reference (the question it answers); the
-/// stall detector keys on the sender and the kind, not the referenced id, so a fresh id
-/// stands in here.
+/// An `answer` carries a required `in_reply_to` reference (the question it
+/// answers); the stall detector keys on the sender and the kind, not the
+/// referenced id, so a fresh id stands in here.
 fn post_message(base: &str, role: &str, channel: &str, kind: &str, body: &str) {
     let mut payload = json!({ "from": { "kind": "role", "id": role }, "kind": kind, "body": body });
     if kind == "answer" {
@@ -36,8 +37,9 @@ fn post_message(base: &str, role: &str, channel: &str, kind: &str, body: &str) {
         .unwrap();
 }
 
-/// A wait of zero, so an event posted a moment ago already counts as stalled: the test
-/// controls timing by what it posts, not by sleeping past a real threshold.
+/// A wait of zero, so an event posted a moment ago already counts as stalled:
+/// the test controls timing by what it posts, not by sleeping past a real
+/// threshold.
 const IMMEDIATE: Duration = Duration::from_secs(0);
 
 #[test]
@@ -85,9 +87,10 @@ fn a_submitted_task_with_no_verdict_is_a_stalled_ledger() {
     let since = Timestamp::now();
     let roster_client = RosterClient::new(base.clone());
 
-    // A role submits work to the done-gate; no one verifies it. The task sits with no
-    // forward motion: the on-`main` shape of a stalled ledger (issue #47's `verification`
-    // event; a work-ledger `ledger` event once issue #45 lands is handled the same way).
+    // A role submits work to the done-gate; no one verifies it. The task sits with
+    // no forward motion: the on-`main` shape of a stalled ledger (issue #47's
+    // `verification` event; a work-ledger `ledger` event once issue #45 lands
+    // is handled the same way).
     ureq::post(&format!("{base}/gate/submit"))
         .set("content-type", "application/json")
         .send_string(
