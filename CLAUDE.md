@@ -256,14 +256,26 @@ crashes recover (issue #22). Each agent runs a state machine on its own driver t
 **lazy start** (the fleet launches with every agent stopped and no process; the first
 work via `Fleet::start` spawns and registers it), **idle-stop** (after a configurable
 quiet period the driver stops the process but keeps the roster entry, marked idle, so
-a restart is fast and keeps context), and **restart** (an unexpected exit restarts it
-bounded by an attempt budget; exhausting the budget marks it dead; `Fleet::start` on a
-stopped agent restarts on demand). Every transition marks the broker roster (via
-`RosterClient::mark` / `register` / `deregister`), so the roster and the stream carry
-the matching `lifecycle` event (started / idle / stopped / restarted / died). The
-`LifecyclePolicy` (idle timeout and restart budget) defaults to a five-minute
-idle-stop and three restarts. (Unifying the eager `Crew` from #21 into the
-lifecycle-managed `Fleet` is a later cleanup.)
+a restart is fast and keeps context), and **restart on demand** (`Fleet::start` on a
+stopped or idle agent restarts it).
+
+The **defibrillator** (issue #23) recovers an agent whose turn died mid-flight,
+mirroring Seraphim's, with layered detection: each driver's in-turn **heartbeat**
+reaps a turn that crashed (its process exited) or hung (alive but silent past
+`heartbeat_timeout`), and a fleet-wide **watchdog** backs the drivers up for a working
+agent silent past the longer `watchdog_timeout`, which only a wedged driver lets
+through. On a death it records an `Incident` with the diagnostic detail (readable via
+`Fleet::incidents`), marks the role dead, and revives it within a `max_recoveries`
+budget, handing it to the operator once spent. Every transition marks the broker
+roster (via `RosterClient::mark` / `register` / `deregister`), so the roster and the
+stream carry the matching `lifecycle` event (started / idle / stopped / restarted /
+died / recovered): the broker derives `recovered` from a `dead` role coming back to
+`working` (issue #23 adds the `Recovered` variant to `crew_core::Lifecycle`). The
+`LifecyclePolicy` defaults to a five-minute idle-stop, a twenty-minute heartbeat under
+a twenty-five-minute watchdog, and three recoveries. Precise hang-versus-idle
+discrimination awaits the activity parser's turn boundaries (issue #24), so by default
+a quiet agent parks rather than being force-recovered. (Unifying the eager `Crew` from
+#21 into the lifecycle-managed `Fleet` is a later cleanup.)
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

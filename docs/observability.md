@@ -38,7 +38,7 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
 - `message` inter-agent communication, carrying the `communication.md` kind
   (order / question / answer / status / artifact / note).
 - `lifecycle` an agent's supervised state change (started, idle, stopped,
-  restarted, died) including defibrillator-style recovery.
+  restarted, died, recovered), including the defibrillator's death and recovery.
 - `activity` an agent's own work, parsed from its stream-json (turn boundaries,
   tool calls, text output).
 
@@ -84,16 +84,21 @@ their owned paths and liveness; a role or the supervisor registers on join with
 `POST /roster` (body `{role, owned_paths?, liveness?}`, defaulting to `working`)
 and leaves with `DELETE /roster/{role}`. Every change is a first-class event on the
 stream, published as a `lifecycle` event (`started` / `restarted` / `idle` /
-`stopped` / `died`) to `all-units`, so it rides `/history`, `/stream`, and each
-role's inbox with no separate capture path. The roster lives behind the storage
-trait, so a durable backend keeps it across a restart. The live count is the
-projection of these lifecycle events, computed by any consumer from the stream.
+`stopped` / `died` / `recovered`) to `all-units`, so it rides `/history`, `/stream`,
+and each role's inbox with no separate capture path. The broker derives the
+transition from the liveness change and the prior state: a role reaching `working`
+for the first time `started`, coming back from `dead` `recovered`, and otherwise
+`restarted`. The roster lives behind the storage trait, so a durable backend keeps it
+across a restart. The live count is the projection of these lifecycle events, computed
+by any consumer from the stream.
 
 The supervisor's lifecycle state machine drives these transitions (issue #22): it
-marks a role working on start, idle after a quiet period, stopped on stand-down, and
-dead when a crash exhausts its restart budget, each time re-registering with the
-right liveness. So the stream and the live count reflect lazy start, idle-stop, and
-restart with no separate signal.
+marks a role working on start, idle after a quiet period, and stopped on stand-down,
+each time re-registering with the right liveness. Its defibrillator (issue #23) marks
+a role dead when its turn crashes or hangs (a `died` event) and, within the recovery
+budget, revives it (a `recovered` event); it also records the diagnostic incident
+behind each death. So the stream and the live count reflect lazy start, idle-stop,
+restart, and death-and-recovery with no separate signal.
 
 ## Runewood
 

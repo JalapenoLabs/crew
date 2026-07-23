@@ -18,8 +18,11 @@
 //!   role, registers each on the roster on start and deregisters on exit, and
 //!   captures stdout and stderr, returning a running [`Crew`].
 //! - [`Fleet`] manages each agent's lifecycle (issue #22): lazy start on first work,
-//!   idle-stop after a quiet period, and restart on an unexpected exit bounded by an
-//!   attempt budget, emitting a lifecycle event on every transition.
+//!   idle-stop after a quiet period, and restart on demand, emitting a lifecycle event
+//!   on every transition. Its defibrillator (issue #23) detects an agent whose turn
+//!   died, whether it crashed or hung, with a layered heartbeat and watchdog; it
+//!   records an [`Incident`] and revives the agent within a recovery budget, handing
+//!   it to the operator once the budget is spent.
 
 mod lifecycle;
 mod mcp;
@@ -32,7 +35,7 @@ use std::path::{Path, PathBuf};
 use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
 
-pub use lifecycle::{AgentState, Fleet, LifecyclePolicy};
+pub use lifecycle::{AgentState, DeathCause, Fleet, Incident, LifecyclePolicy, Recovery};
 pub use mcp::{agent_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
 pub use roster::{Liveness, RosterClient};
 pub use spawn::{

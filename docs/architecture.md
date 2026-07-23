@@ -96,15 +96,33 @@ driver thread:
 - **Idle-stop.** After a configurable quiet period (no output) the driver stops the
   process but keeps the roster entry, marked idle, so a restart is fast and keeps
   context. An idle role costs nothing.
-- **Restart.** An unexpected exit restarts the agent, bounded by an attempt budget;
-  exhausting it marks the role dead. A `Fleet::start` on a stopped agent restarts it
-  on demand.
+- **Restart on demand.** A `Fleet::start` on a stopped or idle agent restarts it.
+
+The **defibrillator** recovers an agent whose turn died mid-flight, mirroring
+Seraphim's (issue #23). Detection is layered:
+
+- **In-turn heartbeat.** Each driver polls its agent. It reaps a turn that **crashed**
+  (its process exited) or **hung** (its process is alive but silent past the
+  `heartbeat_timeout`), records an incident with the diagnostic detail, marks the role
+  dead, and revives it while it has recovery budget; once the budget is spent it stays
+  dead and is handed to the operator.
+- **Background watchdog.** A single fleet-wide thread catches a working agent silent
+  past the longer `watchdog_timeout`, which the in-turn heartbeat should have caught
+  first; only a driver that has itself wedged lets it through, so the watchdog reaps
+  the orphan and hands the role to the operator rather than trusting the driver to
+  revive it.
 
 Every transition marks the broker roster, so the roster and the stream carry the
-matching `lifecycle` event (started / idle / stopped / restarted / died); the live
-count and every activity view stay a projection of that one stream. The policy (the
-idle timeout and the restart budget) is configurable, defaulting to a five-minute
-idle-stop and three restarts.
+matching `lifecycle` event (started / idle / stopped / restarted / died / recovered):
+a death emits `died`, a revival `recovered` (the broker derives it from a `dead`
+role coming back to `working`), and the live count and every activity view stay a
+projection of that one stream. Recorded incidents (read with `Fleet::incidents`) give
+the operator the diagnostic behind each death. The policy is configurable, defaulting
+to a five-minute idle-stop, a twenty-minute heartbeat under a twenty-five-minute
+watchdog, and three recoveries. Precise hang-versus-idle discrimination awaits the
+activity parser's turn boundaries (issue #24); until then the heartbeat is a coarse
+output-silence signal, so by default a quiet agent parks (idle-stop) rather than being
+force-recovered.
 
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.
