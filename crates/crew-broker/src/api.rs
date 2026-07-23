@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     board, boundary, briefing, budget, control, events, gate, history, inbox, ledger, roster,
-    state::AppState, stats, usage,
+    stall, state::AppState, stats, usage,
 };
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
@@ -20,8 +20,9 @@ use crate::{
 /// `POST /standdown`), `POST /boundary` (record a lane crossing), the `/ledger`
 /// endpoints (`GET /ledger`, `POST /ledger`), the done-gate endpoints (`GET
 /// /gate`, `POST /gate/submit`, `POST /gate/verdict`), the situation-board
-/// endpoints (`GET /board`, `POST /board`), and `GET /briefing?role=<role>`
-/// (the bounded new-role briefing packet).
+/// endpoints (`GET /board`, `POST /board`), `POST /stall` (surface a
+/// coordination stall, issue #120), and `GET /briefing?role=<role>` (the
+/// bounded new-role briefing packet).
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -34,6 +35,7 @@ pub(crate) fn build(state: AppState) -> Router {
         .merge(budget::routes())
         .merge(stats::routes())
         .merge(usage::routes())
+        .merge(stall::routes())
         .merge(gate::routes())
         .merge(ledger::routes())
         .merge(board::routes())

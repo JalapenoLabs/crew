@@ -104,6 +104,33 @@ Items: `{ "kind": "turn_started" }`, `{ "kind": "turn_ended" }`,
 The activity vocabulary is stable; the supervisor begins producing these once the
 stream-json parser lands, so a consumer that handles them today needs no change then.
 
+### `stall` (a coordination stall)
+
+`kind.data` is a coordination stall the fleet-wide monitor detected or resolved (issue
+#48, #120): the crew stuck waiting on itself rather than one dead agent. The envelope's
+`from` is `general` and `channel` is `all-units`, since a stall is a crew-level finding,
+not one role's action.
+
+```json
+{ "kind": "stall", "data": {
+  "kind": "deadlock",
+  "status": "detected",
+  "roles": ["backend", "frontend"],
+  "detail": "deadlock: backend waits on frontend, and frontend waits on backend"
+} }
+```
+
+- `kind` is `deadlock` (a cycle of unanswered questions), `unanswered_question` (a
+  one-sided wait), or `ledger_stall` (a held task with no forward motion).
+- `status` is `detected` when the stall crosses the threshold and `resolved` once it
+  clears, so a consumer lights a stall up and later takes it down off the same stream.
+- `roles` are the roles caught in the stall, sorted; `detail` names who is waiting on
+  what.
+
+Other supervisor and broker kinds ride the same envelope and are filterable by `kind`:
+`ledger` (issue #45), `boundary` (issue #46), `verification` (issue #47), `board` (issue
+#49), `budget` (issue #54), `telemetry` (issue #55), and `usage` (issue #56).
+
 ## Endpoints
 
 ### `GET /stream` (live, Server-Sent Events)
@@ -134,7 +161,9 @@ stable cursor:
 
 - Filters (all optional, combine with AND): `channel`, `role` (sent by that role),
   `agent` (a role's full activity timeline: what it sent and received), `kind`
-  (`message` / `lifecycle` / `activity`), `task`, `since` (an RFC 3339 instant).
+  (`message` / `lifecycle` / `activity` / `ledger` / `boundary` / `verification` /
+  `board` / `budget` / `telemetry` / `usage` / `stall`), `task`, `since` (an RFC 3339
+  instant).
 - Ordering is deterministic: by `ts`, then log position.
 - Pagination: pass `limit` (default 100, max 1000) and `after=<cursor>`. `next_cursor`
   is the position to resume from; it is **omitted** on the last page.

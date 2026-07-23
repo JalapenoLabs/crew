@@ -39,8 +39,8 @@ pub use channel::{Channel, ALL_UNITS};
 pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
 pub use event::{
     Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, Event, EventKind,
-    LedgerEvent, Lifecycle, Message, MessageKind, TaskState, TelemetryEvent, UsageEvent, Verdict,
-    VerificationEvent,
+    LedgerEvent, Lifecycle, Message, MessageKind, StallEvent, StallKind, StallStatus, TaskState,
+    TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use lane::path_in_lane;

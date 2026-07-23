@@ -254,9 +254,18 @@ waiting on the General, not on itself, so it is never escalated. When it does fi
 stall, it escalates the specific cause to the operator, who is waiting on what, as a
 warning in the `crew up` foreground (a `supervisor.stall.detected` event) rather than a
 generic timeout, and records it (read with `Fleet::stalls`) so a persistent stall is
-escalated once and a resolved-then-recurring one afresh. Because the monitor reads the
-stable stream contract rather than the in-memory ledger, it needs no new event kind, and
-surfacing a stall on the stream for the cockpit is a later refinement.
+escalated once and a resolved-then-recurring one afresh.
+
+The monitor also surfaces each stall on the stream as a first-class `stall` event
+(`POST /stall`, issue #120), so a stall is no longer only a supervisor log. It publishes
+a `detected` event when a stall first crosses the threshold and a `resolved` event once
+it clears, from the General to `all-units`, carrying the stall's `kind`
+(`deadlock` / `unanswered_question` / `ledger_stall`), the `roles` caught in it, and the
+specific `detail`. This is what lets `crew notify` fire the "a role is stalled" moment
+(issue #52) and the `crew top` cockpit (issue #51) render live stalls. The event carries
+the detection the monitor built; the stream write is best-effort, so a broker hiccup
+never takes the monitor down (the stall is still logged and in `Fleet::stalls`). It is
+filterable with `GET /history?kind=stall`.
 
 ## Push notifications
 
@@ -273,6 +282,9 @@ The actionable moments are the ones the stream carries today:
 - **A role dies** (a `lifecycle` `died`): a role crashed or hung past recovery.
 - **The crew stands down** (a `lifecycle` `stood_down`): every role halts and the mission
   is on hold.
+- **The crew is stalled** (a `stall` event with `status` `detected`, issue #120): the crew
+  is stuck waiting on itself and needs the General. A `resolved` stall is good news and
+  stays quiet.
 
 Not every question needs the General (issue #119). A peer loop (`@backend` asking a live
 `@frontend`) is coordination the crew resolves on its own, so pushing it would drown the
@@ -288,7 +300,7 @@ dropped.
 
 Everything else, status and notes, orders, answers and artifacts, ordinary lifecycle such
 as `started` or `idle`, activity, board, boundary, and verification events, is routine and
-never notifies. The policy is configurable per moment: `--mute question,died,stood-down`
+never notifies. The policy is configurable per moment: `--mute question,died,stood-down,stalled`
 suppresses any subset (for a General who does not want peer questions, say), and
 `--no-sound` drops the terminal bell while keeping the desktop notification and the log
 line.
@@ -300,10 +312,10 @@ through the platform notifier (`notify-send` on Linux, `osascript` on macOS). A 
 failing notifier is not an error: the printed line and the bell already carry the alert, so
 delivery degrades quietly.
 
-Two further moments in the notification scope wait on their events reaching the stream: an
-approval pending (the approval gates of issue #40) and a role stalled (the stall monitor
-above, once it surfaces a stall on the stream). Both light up here for free when their
-events land, since the classifier is one match over the event kinds.
+One further moment in the notification scope waits on its event reaching the stream: an
+approval pending (the approval gates of issue #40). It lights up here for free when its
+event lands, since the classifier is one match over the event kinds, exactly as the stall
+moment above plugged in once the monitor began surfacing stalls (issue #120).
 
 ## Token budget
 

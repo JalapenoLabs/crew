@@ -42,6 +42,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crew_core::StallKind;
 use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
 pub use integrate::{
@@ -53,7 +54,7 @@ pub use roster::{Liveness, RosterClient};
 pub use spawn::{
     agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
 };
-pub use stall::{detect_stalls, Stall, StallKind};
+pub use stall::{detect_stalls, Stall};
 pub use worktree::Worktree;
 
 /// The file name a provisioned role card is written under, in the agent's

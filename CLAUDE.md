@@ -158,10 +158,11 @@ The full design is in `docs/architecture.md`. In short:
   coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
-  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
+  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
+  (auto-reconnecting like `tail -F`, resuming from `Last-Event-ID` without loss, issue #117),
   `crew notify` to push a native notification on each actionable moment (a question, a
-  death, a stand-down) over that same stream, and `crew usage` to read the shared-subscription
-  usage gauge (issue #56).
+  death, a stand-down, a coordination stall) over that same stream, and `crew usage` to read
+  the shared-subscription usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -513,9 +514,15 @@ claim not yet `done` from issue #45 or a `verification` submission with no verdi
 issue #47). A question broadcast to `all-units`, or to anyone who is not a live agent, is
 a legitimate wait for the General, not a deadlock, so it is never escalated. A new stall
 is escalated as a specific `supervisor.stall.detected` warning (who is waiting on what)
-and recorded (read with `Fleet::stalls`), once per stall until it resolves. It reads the
-stream over HTTP rather than adding an event kind, keeping it out of the in-flight ledger
-PR's path; surfacing a stall on the stream for the cockpit is a later refinement.
+and recorded (read with `Fleet::stalls`), once per stall until it resolves. The monitor
+also surfaces each stall on the stream as a first-class `stall` event (`POST /stall`,
+`EventKind::Stall`, issue #120): a `detected` event when a stall crosses the threshold and
+a `resolved` event once it clears, from the General to `all-units`, carrying the stall's
+kind (`deadlock` / `unanswered_question` / `ledger_stall`), the roles caught in it, and
+the specific detail. That is what lets `crew notify` fire the "a role is stalled" moment
+(issue #52) and the `crew top` cockpit (issue #51) render live stalls; the stream write is
+best-effort, so a broker hiccup never takes the monitor down. The event is filterable with
+`GET /history?kind=stall`.
 
 The **integration step** brings the roles' isolated work together (issue #44,
 `crew_supervisor::integrate`). Parallel roles work on `crew/<role>` branches in their own
@@ -632,10 +639,12 @@ reassign against. See `docs/communication.md` (direct override) and `docs/roles.
 
 `crew notify` lets the General walk away and be pulled back only when it matters (issue
 #52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
-sharing the `broker::tail_events` read half, so there is no separate signal path) and
+sharing the `broker::tail_events` read half, so there is no separate signal path, and it
+auto-reconnects on a dropped connection along with `crew watch`, issue #117) and
 pushes a native notification on each **actionable moment**: a General-facing question asked
-(`message`/`question`), a role dead (`lifecycle`/`died`), or the crew stood down
-(`lifecycle`/`stood_down`). A question is General-facing only when it is broadcast to
+(`message`/`question`), a role dead (`lifecycle`/`died`), the crew stood down
+(`lifecycle`/`stood_down`), or the crew stalled (a `stall`/`detected` event, issue #120; a
+`resolved` stall stays quiet). A question is General-facing only when it is broadcast to
 `all-units` or addressed to a role that is not a live agent (issue #119); a directed
 question to a live teammate is peer coordination the crew resolves itself and stays quiet,
 mirroring the stall monitor's rule (issue #48). To scope it, the notifier tracks roster
@@ -644,12 +653,13 @@ or idle); the firehose is live-only, so an addressee not yet known to be live is
 General-facing, and a real question is never dropped. Other routine chatter (status, notes,
 orders, answers, artifacts, ordinary lifecycle, activity, board, boundary, verification)
 stays quiet by default. The classifier, `notification_for` over the liveness-tracking
-`Roster`, decides per event, so the policy is fully unit-tested; `--mute <moments>` narrows
-the set and `--no-sound` drops the terminal bell. Each push prints a log line (the durable
-record), sounds the bell (mirroring Seraphim's notification sound), and calls the platform
-desktop notifier (`notify-send` on Linux, `osascript` on macOS), degrading quietly when no
-notifier is present. An approval pending (issue #40) and a role stalled (once the stall
-monitor surfaces on the stream) plug into the same classifier when their events land. See
+`Roster`, decides per event, so the policy is fully unit-tested; `--mute <moments>`
+(`question,died,stood-down,stalled`) narrows the set and `--no-sound` drops the terminal
+bell. Each push prints a log line (the durable record), sounds the bell (mirroring
+Seraphim's notification sound), and calls the platform desktop notifier (`notify-send` on
+Linux, `osascript` on macOS), degrading quietly when no notifier is present. An approval
+pending (issue #40) plugs into the same classifier when its event lands, exactly as the
+stall moment did once the monitor began surfacing stalls. See
 `docs/observability.md` (push notifications).
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by

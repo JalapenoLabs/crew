@@ -10,27 +10,34 @@
 //! Sending a message is the shim's job (`crew send`, `src/shim.rs`), which
 //! posts as the agent's role. This module only reads.
 
-use std::io::{BufRead, BufReader};
+use std::{
+    io::{BufRead, BufReader},
+    thread,
+    time::Duration,
+};
 
 use crew_substrate::{
     broker::Config as BrokerConfig,
     core::{
         Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind,
-        MessageKind, Sender, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
+        MessageKind, Sender, StallEvent, StallStatus, TelemetryEvent, UsageEvent, Verdict,
+        VerificationEvent,
     },
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
 
 /// Tails a role's self-filtered inbox, or the whole firehose when `role` is
-/// `None`, rendering each event until the stream closes or the user interrupts.
+/// `None`, rendering each event until the user interrupts (Ctrl-C).
 ///
-/// The broker base comes from `broker` when set, else the broker's own
-/// `CREW_BROKER_HOST` / `CREW_BROKER_PORT` environment.
+/// Like `tail -F`, it reconnects on a dropped connection (a broker restart or a
+/// network blip), resuming a role inbox from `Last-Event-ID` without loss
+/// (issue #117). The broker base comes from `broker` when set, else the
+/// broker's own `CREW_BROKER_HOST` / `CREW_BROKER_PORT` environment.
 ///
 /// # Errors
 /// Returns an error if the broker configuration is invalid, or the broker
-/// cannot be reached or refuses the stream.
+/// cannot be reached on the first connection.
 pub fn watch(broker: Option<&str>, role: Option<&str>) -> Result<()> {
     let base = resolve_base(broker)?;
     tail(&base, &watch_path(role))
@@ -81,36 +88,121 @@ fn tail(base: &str, path: &str) -> Result<()> {
     tail_events(base, path, |event| println!("{}", render_event(event)))
 }
 
+/// How long a dropped watch waits before reconnecting, so a restarting broker
+/// is not hammered but the tail resumes promptly (issue #117).
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
+
 /// Tails `path` (an SSE endpoint) on `base`, invoking `on_event` for each
-/// event.
+/// event, reconnecting on a dropped connection like `tail -F` (issue #117).
 ///
-/// This is the shared read half behind `crew watch` and `crew notify`: it opens
+/// This is the shared read half behind `crew watch` and `crew notify`. It opens
 /// the stream, parses each SSE `data:` line into an [`Event`], and hands it to
-/// `on_event`. The tail runs until the connection ends or the caller
-/// interrupts.
+/// `on_event`, tracking the id of the last event delivered. When the connection
+/// ends (a broker restart or a network blip), it waits a brief backoff and
+/// reconnects, passing the last id as `Last-Event-ID`. For `/inbox` the broker
+/// resumes right after that cursor, so no addressed event is lost or repeated;
+/// `/stream` is live-only, so a firehose reconnect resumes at the live tail and
+/// a consumer catches the gap up through `/history`. It runs until the caller
+/// interrupts (Ctrl-C).
 ///
 /// # Errors
-/// Returns an error if the broker cannot be reached or refuses the stream.
+/// Returns an error only if the **first** connection cannot be opened (so a
+/// wrong address or a broker that is not running fails fast). Once connected, a
+/// drop is recovered rather than surfaced, since the point is to survive it.
 pub(crate) fn tail_events(base: &str, path: &str, mut on_event: impl FnMut(&Event)) -> Result<()> {
     let url = format!("{base}{path}");
-    let response = ureq::get(&url).call().map_err(|err| match err {
+    let mut resume_from: Option<u64> = None;
+    let mut connected = false;
+
+    loop {
+        match stream_once(&url, resume_from, &mut on_event) {
+            Ok(last_id) => {
+                connected = true;
+                resume_from = last_id.or(resume_from);
+                event!(
+                    name: "cli.stream.reconnecting",
+                    Level::DEBUG,
+                    url = %url,
+                    "watch stream ended; reconnecting from {{url}}",
+                );
+            }
+            // Fail fast if we never connected: a clear "is crewd running?" error.
+            Err(err) if !connected => return Err(err),
+            // A blip while the broker restarts: back off and retry, never give up.
+            Err(err) => event!(
+                name: "cli.stream.reconnecting",
+                Level::DEBUG,
+                url = %url,
+                error = %err,
+                "watch reconnect failed; retrying {{url}}",
+            ),
+        }
+        thread::sleep(RECONNECT_BACKOFF);
+    }
+}
+
+/// Opens one SSE connection and reads it until it ends, returning the id of the
+/// last event delivered (for the next reconnect's cursor).
+///
+/// Resumes from `resume_from` by sending it as `Last-Event-ID`. Returns an
+/// error only if the connection cannot be opened; a mid-stream read error ends
+/// the read cleanly, so the caller reconnects rather than aborts.
+fn stream_once(
+    url: &str,
+    resume_from: Option<u64>,
+    on_event: &mut impl FnMut(&Event),
+) -> Result<Option<u64>> {
+    let mut request = ureq::get(url);
+    if let Some(id) = resume_from {
+        request = request.set("Last-Event-ID", &id.to_string());
+    }
+    let response = request.call().map_err(|err| match err {
         ureq::Error::Status(code, _) => eyre!("the broker refused the stream: HTTP {code}"),
         ureq::Error::Transport(transport) => {
-            eyre!("could not reach the broker at {base}; is `crewd` running? ({transport})")
+            eyre!("could not reach the broker at {url}; is `crewd` running? ({transport})")
         }
     })?;
     event!(name: "cli.stream.connected", Level::DEBUG, url = %url, "streaming {{url}}");
 
-    // Read the SSE body line by line as events arrive; the tail runs until the
-    // connection ends or the caller interrupts.
+    let mut last_id = resume_from;
+    let mut pending: Option<u64> = None;
     let reader = BufReader::new(response.into_reader());
     for line in reader.lines() {
-        let line = line.wrap_err("the event stream ended unexpectedly")?;
-        if let Some(event) = parse_data_line(&line) {
-            on_event(&event);
+        // A read error means the connection dropped; end the read so the caller
+        // reconnects.
+        let Ok(line) = line else { break };
+        apply_line(&line, &mut pending, &mut last_id, on_event);
+    }
+    Ok(last_id)
+}
+
+/// Applies one SSE line to the tail state.
+///
+/// An `id:` line arms the pending cursor; a `data:` line delivers its [`Event`]
+/// and only then commits the pending id as `last_id`. Committing after
+/// delivery, not on the `id:` line, means a connection that drops between the
+/// two does not advance the cursor past an event the reader never received, so
+/// the reconnect replays it rather than skipping it.
+fn apply_line(
+    line: &str,
+    pending: &mut Option<u64>,
+    last_id: &mut Option<u64>,
+    on_event: &mut impl FnMut(&Event),
+) {
+    if let Some(id) = parse_id_line(line) {
+        *pending = Some(id);
+    } else if let Some(event) = parse_data_line(line) {
+        on_event(&event);
+        if let Some(id) = pending.take() {
+            *last_id = Some(id);
         }
     }
-    Ok(())
+}
+
+/// Parses one Server-Sent-Event `id:` line into its sequence cursor, if it is
+/// one.
+fn parse_id_line(line: &str) -> Option<u64> {
+    line.strip_prefix("id:")?.trim().parse().ok()
 }
 
 /// Parses one Server-Sent-Event `data:` line into an [`Event`], if it is one.
@@ -166,7 +258,18 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Budget(budget) => ("budget", budget_body(budget)),
         EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
         EventKind::Usage(usage) => ("usage", usage_body(usage)),
+        EventKind::Stall(stall) => ("stall", stall_body(stall)),
     }
+}
+
+/// A short description of a coordination stall the monitor surfaced (issue
+/// #120).
+fn stall_body(stall: &StallEvent) -> String {
+    let verb = match stall.status {
+        StallStatus::Detected => "detected",
+        StallStatus::Resolved => "resolved",
+    };
+    format!("{verb} {}: {}", stall.kind.label(), stall.detail)
 }
 
 /// A short description of a shared-subscription usage reading (issue #56).
@@ -289,7 +392,9 @@ mod tests {
         Timestamp,
     };
 
-    use super::{normalize_base, parse_data_line, render_event, watch_path};
+    use super::{
+        apply_line, normalize_base, parse_data_line, parse_id_line, render_event, watch_path,
+    };
 
     fn note(from: Sender, channel: &str, body: &str) -> Event {
         Event {
@@ -386,6 +491,61 @@ mod tests {
     fn watch_path_is_the_firehose_or_a_role_inbox() {
         assert_eq!(watch_path(None), "/stream");
         assert_eq!(watch_path(Some("backend")), "/inbox?role=backend");
+    }
+
+    #[test]
+    fn parse_id_line_reads_the_sse_cursor() {
+        assert_eq!(parse_id_line("id: 7"), Some(7));
+        assert_eq!(parse_id_line("id:42"), Some(42));
+        assert_eq!(
+            parse_id_line("data: {}"),
+            None,
+            "a data line is not a cursor"
+        );
+        assert_eq!(
+            parse_id_line("id: nope"),
+            None,
+            "a non-numeric id is skipped"
+        );
+        assert_eq!(parse_id_line(": keep-alive"), None);
+    }
+
+    #[test]
+    fn apply_line_commits_the_cursor_only_after_the_event_is_delivered() {
+        // Committing the cursor after delivery, not on the `id:` line, is what lets a
+        // reconnect resume without a gap: an event the reader never received does not
+        // advance the cursor past it (issue #117).
+        let event = note(Sender::General, "all-units", "hi");
+        let data = format!("data: {}", serde_json::to_string(&event).unwrap());
+
+        let delivered = std::cell::Cell::new(0);
+        let mut on_event = |_: &Event| delivered.set(delivered.get() + 1);
+        let mut pending = None;
+        let mut last_id = None;
+
+        // An `id:` line arms the pending cursor but does not commit it yet.
+        apply_line("id: 5", &mut pending, &mut last_id, &mut on_event);
+        assert_eq!(last_id, None, "the cursor is not advanced before delivery");
+        assert_eq!(pending, Some(5));
+
+        // The `data:` line delivers the event and commits the cursor.
+        apply_line(&data, &mut pending, &mut last_id, &mut on_event);
+        assert_eq!(delivered.get(), 1);
+        assert_eq!(
+            last_id,
+            Some(5),
+            "the cursor advances to the delivered event"
+        );
+        assert_eq!(pending, None);
+
+        // A later `id:` with no `data:` (the connection dropped mid-event) must not
+        // advance the cursor past an event the reader never received.
+        apply_line("id: 6", &mut pending, &mut last_id, &mut on_event);
+        assert_eq!(
+            last_id,
+            Some(5),
+            "an undelivered event does not advance the cursor"
+        );
     }
 
     #[test]

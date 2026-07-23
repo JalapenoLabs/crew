@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use crew_core::{BudgetEvent, RoleId, TaskId, TelemetryEvent, Timestamp};
+use crew_core::{BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
 use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -201,6 +201,27 @@ impl RosterClient {
             .send_string(&body.to_string())
             .map(|_response| ())
             .map_err(|err| eyre!("could not report subscription usage: {err}"))
+    }
+
+    /// Surfaces a coordination stall on the stream (`POST /stall`, issue #120).
+    ///
+    /// The stall monitor (issue #48) supplies the finding it built (its kind,
+    /// detected-or-resolved status, roles, and specific detail); the broker
+    /// records it as a `stall` event, so `crew notify` fires the "a role is
+    /// stalled" moment and the `crew top` cockpit renders live stalls.
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_stall(&self, event: &StallEvent) -> Result<()> {
+        let url = format!("{}/stall", self.base);
+        let body = serde_json::to_string(event)
+            .map_err(|err| eyre!("could not encode the stall report: {err}"))?;
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not report the {} stall: {err}", event.kind.label()))
     }
 
     /// Adds the task id to a roster request body when a task context is set.
