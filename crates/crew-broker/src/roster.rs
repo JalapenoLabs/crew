@@ -90,27 +90,29 @@ async fn register(
 ) -> Result<(StatusCode, Json<RosterView>), ApiError> {
     let role = parse_role(&request.role)?;
     let liveness = request.liveness.unwrap_or(Liveness::Working);
+    // Read the prior status once, before the update, for both the retained paths and
+    // the lifecycle transition (a `dead` role coming back is a recovery, not a restart).
+    let prior = state.storage.roster().get(&role).cloned();
     // A liveness-only update (no `owned_paths`) keeps the role's current paths.
     let owned_paths = match request.owned_paths {
         Some(paths) => paths,
-        None => state
-            .storage
-            .roster()
-            .get(&role)
+        None => prior
+            .as_ref()
             .map(|status| status.owned_paths.clone())
             .unwrap_or_default(),
     };
 
-    let existed = state.storage.register_role(
+    state.storage.register_role(
         role.clone(),
         RoleStatus {
             owned_paths,
             liveness,
         },
     );
-    state.publish(roster_event(&role, lifecycle_for(liveness, existed)));
+    let prior_liveness = prior.as_ref().map(|status| status.liveness);
+    state.publish(roster_event(&role, lifecycle_for(liveness, prior_liveness)));
 
-    let code = if existed {
+    let code = if prior.is_some() {
         StatusCode::OK
     } else {
         StatusCode::CREATED
@@ -145,14 +147,18 @@ fn parse_role(role: &str) -> Result<RoleId, ApiError> {
     Ok(RoleId::new(role))
 }
 
-/// The lifecycle transition a liveness change emits.
+/// The lifecycle transition a liveness change emits, given the role's prior liveness.
 ///
-/// A role reaching `working` for the first time `started`; reaching it again (from
-/// idle, or after a stop) `restarted`. The other states map directly.
-fn lifecycle_for(liveness: Liveness, already_registered: bool) -> Lifecycle {
+/// A role reaching `working` for the first time `started`; coming back from `dead`
+/// (the defibrillator revived it) `recovered`; reaching it again from any other state
+/// (idle, or after a stop) `restarted`. The other states map directly.
+fn lifecycle_for(liveness: Liveness, prior: Option<Liveness>) -> Lifecycle {
     match liveness {
-        Liveness::Working if already_registered => Lifecycle::Restarted,
-        Liveness::Working => Lifecycle::Started,
+        Liveness::Working => match prior {
+            None => Lifecycle::Started,
+            Some(Liveness::Dead) => Lifecycle::Recovered,
+            Some(_) => Lifecycle::Restarted,
+        },
         Liveness::Idle => Lifecycle::Idle,
         Liveness::Stopped => Lifecycle::Stopped,
         Liveness::Dead => Lifecycle::Died,
@@ -332,6 +338,47 @@ mod tests {
         assert!(matches!(
             stopped.kind,
             EventKind::Lifecycle(Lifecycle::Stopped)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reviving_a_dead_role_emits_recovered_not_restarted() {
+        let state = AppState::new(Config::default());
+
+        // A role that died (the defibrillator reaped it).
+        register(&state, json!({ "role": "backend" })).await;
+        register(&state, json!({ "role": "backend", "liveness": "dead" })).await;
+        assert_eq!(
+            entry(&get_roster(&state).await, "backend").unwrap()["liveness"],
+            "dead"
+        );
+
+        // Bringing a dead role back to working is a recovery, not a plain restart.
+        let mut stream = state.broadcast.subscribe();
+        register(&state, json!({ "role": "backend", "liveness": "working" })).await;
+        let event = stream
+            .recv()
+            .await
+            .expect("the revive reaches the stream")
+            .event;
+        assert!(
+            matches!(event.kind, EventKind::Lifecycle(Lifecycle::Recovered)),
+            "a dead role coming back is `recovered`",
+        );
+
+        // Whereas restarting a role that was merely idle is a `restarted`.
+        register(&state, json!({ "role": "frontend" })).await;
+        register(&state, json!({ "role": "frontend", "liveness": "idle" })).await;
+        let mut stream = state.broadcast.subscribe();
+        register(&state, json!({ "role": "frontend", "liveness": "working" })).await;
+        let event = stream
+            .recv()
+            .await
+            .expect("the restart reaches the stream")
+            .event;
+        assert!(matches!(
+            event.kind,
+            EventKind::Lifecycle(Lifecycle::Restarted)
         ));
     }
 

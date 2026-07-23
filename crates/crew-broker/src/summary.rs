@@ -241,6 +241,7 @@ fn lifecycle_label(state: Lifecycle) -> &'static str {
         Lifecycle::Stopped => "stopped",
         Lifecycle::Restarted => "restarted",
         Lifecycle::Died => "died",
+        Lifecycle::Recovered => "recovered",
     }
 }
 

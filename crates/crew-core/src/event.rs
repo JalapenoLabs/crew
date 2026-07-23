@@ -141,8 +141,11 @@ pub enum Lifecycle {
     Stopped,
     /// The agent was restarted.
     Restarted,
-    /// The agent died mid-flight (a defibrillator recovery point).
+    /// The agent died mid-flight: it crashed or hung, and the defibrillator reaped
+    /// its orphaned process (see `docs/observability.md`).
     Died,
+    /// The defibrillator revived the agent after a death, within its recovery budget.
+    Recovered,
 }
 
 /// An agent's own work item, parsed from its `claude -p` stream-json.
