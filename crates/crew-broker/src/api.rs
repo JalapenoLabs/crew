@@ -10,9 +10,10 @@ use crate::state::AppState;
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
 ///
-/// Serves `GET /health`, `POST /events` (post a message), and `GET /events` (read
-/// the log). The self-filtered SSE streams, the roster, and the rolling-summary
-/// history come in later tickets.
+/// Serves `GET /health`, `POST /channels/{channel}/messages` (post a message),
+/// `GET /events` (read the log), and `GET /stream` (subscribe to the event feed).
+/// The self-filtered per-role streams, the roster, and the rolling-summary history
+/// come in later tickets.
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))

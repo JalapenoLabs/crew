@@ -173,18 +173,24 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`) stream
-model, all serde round-tripping; and `crewd` (the broker, issues #7 and #8) starts
-on loopback, serves `GET /health`, stores and reads the event model over
-`POST`/`GET /events` (typed per-kind message fields, typed 4xx on malformed
-input), and shuts down gracefully. The rest of the substrate is still scaffolds
-waiting for the phased build in `docs/roadmap.md`. Verify with `cargo build` and
-`cargo test` at the root.
+model, all serde round-tripping; and `crewd` (the broker, issues #7, #8 and #9)
+starts on loopback, serves `GET /health`, and shuts down gracefully. It stores the
+event model with typed per-kind message fields and typed 4xx on malformed input,
+reads the log over `GET /events`, and accepts messages over `POST
+/channels/{channel}/messages`: the channel comes from the path, the broker stamps
+`ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
+masks configured secret values out of the event, persists it, and fans it to every
+subscriber on the `GET /stream` SSE feed. The self-filtered per-role streams, the
+roster, and the rolling-summary history are still scaffolds waiting for the phased
+build in `docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the root.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
-`CREW_BROKER_STATE_DIR` (default `.crew`), and `CREW_BROKER_ALLOW_NON_LOCAL`
-(`1`/`true`/`yes`). Binding a non-loopback address is refused unless that last one
-is set, so the broker never exposes itself to the network by accident.
+`CREW_BROKER_STATE_DIR` (default `.crew`), `CREW_BROKER_ALLOW_NON_LOCAL`
+(`1`/`true`/`yes`), and `CREW_BROKER_SECRETS` (a whitespace-separated list of secret
+values the broker masks out of every message before storing or streaming it).
+Binding a non-loopback address is refused unless the non-local flag is set, so the
+broker never exposes itself to the network by accident.
 
 ## Local conventions
 
