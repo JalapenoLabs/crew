@@ -270,6 +270,34 @@ impl RosterClient {
         Ok(view.roles.into_iter().map(|entry| entry.role).collect())
     }
 
+    /// Fetches `role`'s bounded briefing packet text (`GET /briefing?role=`,
+    /// issue #50), for injecting into the agent's opening turn at spawn (issue
+    /// #122).
+    ///
+    /// Returns just the rendered packet (the board plus a lane-scoped rolling
+    /// summary, size-capped), which the caller folds into the boot prompt. The
+    /// supervisor fetches this at spawn, not provision, so the packet reflects
+    /// the current situation; a spawn treats an error as "no packet" and boots
+    /// on the card briefing alone, keeping `crew_briefing` the re-read path.
+    ///
+    /// # Errors
+    /// Returns an error if the broker cannot be reached or its response is
+    /// malformed.
+    pub fn briefing(&self, role: &RoleId) -> Result<String> {
+        let url = format!("{}/briefing", self.base);
+        let text = self
+            .agent
+            .get(&url)
+            .query("role", role.as_str())
+            .call()
+            .map_err(|err| eyre!("could not fetch the briefing for role `{role}`: {err}"))?
+            .into_string()
+            .map_err(|err| eyre!("could not read the briefing response: {err}"))?;
+        let packet: BriefingResponse = serde_json::from_str(&text)
+            .map_err(|err| eyre!("could not parse the briefing response: {err}"))?;
+        Ok(packet.text)
+    }
+
     /// Reads the events at or after `since`, oldest first, following the
     /// history pages.
     ///
@@ -315,6 +343,12 @@ struct HistoryPage {
     events: Vec<Value>,
     #[serde(default)]
     next_cursor: Option<String>,
+}
+
+/// The shape of `GET /briefing` (only the rendered packet text is read here).
+#[derive(Debug, Deserialize)]
+struct BriefingResponse {
+    text: String,
 }
 
 /// The shape of `GET /roster` (only the role ids are read here).

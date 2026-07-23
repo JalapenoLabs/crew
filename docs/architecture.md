@@ -54,7 +54,9 @@ Planned surface (illustrative, not final):
 - `GET /briefing?role=<role>` assembles the bounded new-role briefing packet (issue #50):
   the decision board plus a rolling summary scoped to the role's timeline, rendered to
   text and capped to a byte budget, so a fresh role catches up without reading the whole
-  log. See `docs/roles.md` (the briefing packet).
+  log. The supervisor also fetches it at spawn and folds it into the agent's opening turn
+  (issue #122), best-effort, so bounded context is in context even if the agent never calls
+  the tool. See `docs/roles.md` (the briefing packet).
 
 Why a broker beats the old shared file:
 
