@@ -13,7 +13,7 @@
 //! down removes.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -40,7 +40,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// cannot be started, or the fleet cannot be launched (a missing MCP server or
 /// an unprovisionable role).
 pub fn run(config_path: Option<&Path>) -> Result<()> {
-    let crew_config = load_config(config_path)?;
+    let (crew_config, config_dir) = load_config(config_path)?;
 
     // The broker: its runtime config (env-overridable) and the endpoint agents
     // reach.
@@ -67,7 +67,7 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
     // connected.
     let root = broker_config.state_dir.join("agents");
     let supervisor = Supervisor::new(endpoint, root);
-    let fleet = supervisor.launch(&crew_config)?;
+    let fleet = supervisor.launch(&crew_config, &config_dir)?;
     fleet.start_all()?;
 
     // Surface the live roster and the commander entry point once the unit connects.
@@ -94,7 +94,7 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
 
 /// Loads the crew config: the given path, else `./crew.toml`, else the default
 /// crew.
-fn load_config(path: Option<&Path>) -> Result<CrewConfig> {
+fn load_config(path: Option<&Path>) -> Result<(CrewConfig, PathBuf)> {
     let default = Path::new("crew.toml");
     let chosen = match path {
         Some(path) => Some(path),
@@ -108,7 +108,9 @@ fn load_config(path: Option<&Path>) -> Result<CrewConfig> {
             Level::INFO,
             "no crew config found; bringing up the default crew",
         );
-        return Ok(CrewConfig::default());
+        // The default crew has no repos, so the anchor is unused; the current
+        // directory stands in.
+        return Ok((CrewConfig::default(), PathBuf::from(".")));
     };
 
     let toml = std::fs::read_to_string(path)
@@ -122,7 +124,18 @@ fn load_config(path: Option<&Path>) -> Result<CrewConfig> {
         crew.roles = config.roles.len(),
         "loaded a {{crew.roles}}-role crew from {{crew.config}}",
     );
-    Ok(config)
+    Ok((config, config_dir_of(path)))
+}
+
+/// The directory that holds the config file: the anchor a bare `repos` name
+/// resolves against (issue #126).
+///
+/// A bare `crew.toml` with no parent component anchors to the current
+/// directory.
+fn config_dir_of(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 /// A broker running in-process on its own thread, with a handle to stand it
