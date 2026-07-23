@@ -255,7 +255,11 @@ masks configured secret values out of the event, persists it, and fans it to eve
 subscriber. Subscribers read either `GET /stream`, the live aggregate feed, or
 `GET /inbox?role=<role>`, a role's live events filtered to its direct, pair, and
 `all-units` channels with its own messages dropped at the source and resumable from
-a `Last-Event-ID` cursor without loss (issue #10). `GET /history` reads past events
+a `Last-Event-ID` cursor without loss (issue #10). A subscriber that lags off the
+broadcast (its buffer overruns the capacity under load) logs a `broker.inbox.lagged`
+event with the role and skipped count, so the gap is visible to the operator rather
+than silent; the client still recovers it from the cursor on reconnect (issue #116).
+`GET /history` reads past events
 filtered by `channel`, `role` (sent by), `agent` (a role's activity timeline), `kind`,
 `task`, and `since`, ordered by `ts` then log
 position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
