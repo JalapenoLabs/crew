@@ -358,7 +358,11 @@ broker auto-pauses new work and publishes a `usage` event carrying the reset tim
 pause is visible on the stream, never silent. The auto-pause gates every role, since the
 subscription is shared; it is distinct from the manual pause control (issue #41), so it never
 clobbers a manual pause and a reset never lifts one. The gate lifts lazily at the reset
-instant (the pause event advertises it), so work auto-resumes with no further reading. The
+instant (the pause event advertises it), so work auto-resumes with no further reading. A
+lightweight background sweep in the broker (a tokio task tied to the server) announces that
+auto-resume: when a pause whose window has reset is found, it clears the pause and publishes a
+`usage` lift event, so the resume is observable on the stream, not only reflected in the gate
+(issue #112). The lift is announced once, whether by the sweep or by a manual resume. The
 operator resumes early with `crew resume`, the one escape hatch, which lifts a manual pause
 and the usage auto-pause together and surfaces the lift as a `usage` event. `GET /usage` (and
 `crew usage`) reads the gauge: the latest reading, the threshold, and any pause. The usage

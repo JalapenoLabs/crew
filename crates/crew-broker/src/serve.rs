@@ -1,6 +1,6 @@
 //! Binding the listener, serving the HTTP surface, and graceful shutdown.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use eyre::{eyre, Result, WrapErr};
 use tokio::net::TcpListener;
@@ -11,7 +11,17 @@ use crate::{
     config::{is_bind_allowed, Config},
     state::AppState,
     store::LogStore,
+    usage::usage_event,
 };
+
+/// How often the broker sweeps for a usage auto-pause whose window has reset
+/// (issue #112).
+///
+/// The auto-resume already takes effect lazily the instant the window resets;
+/// this only bounds how soon the lift is announced on the stream. Thirty
+/// seconds keeps the sweep negligibly cheap (one mutex read per tick) while
+/// surfacing the resume promptly.
+const USAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Runs the broker until a shutdown signal (Ctrl-C or, on Unix, `SIGTERM`).
 ///
@@ -91,10 +101,46 @@ pub async fn serve(
         crew.storage = state.storage.backend(),
         "crewd listening on {{server.address}}",
     );
-    axum::serve(listener, api::build(state))
+
+    // A background sweep announces a usage auto-pause lifting when its window
+    // resets (issue #112). Tied to the server's lifetime: it is aborted when
+    // serving ends, so it never outlives the broker it reports for.
+    let sweeper = tokio::spawn(usage_sweeper(state.clone()));
+
+    let result = axum::serve(listener, api::build(state))
         .with_graceful_shutdown(shutdown)
         .await
-        .wrap_err("the crewd server exited with an error")
+        .wrap_err("the crewd server exited with an error");
+
+    sweeper.abort();
+    result
+}
+
+/// Sweeps for an expired usage auto-pause on a timer, announcing each lift.
+async fn usage_sweeper(state: AppState) {
+    let mut ticker = tokio::time::interval(USAGE_SWEEP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        sweep_usage(&state);
+    }
+}
+
+/// One sweep: if a usage auto-pause has expired, clear it and publish the lift.
+///
+/// Returns whether it announced a lift, so the behavior is unit-testable
+/// without waiting on the ticker.
+fn sweep_usage(state: &AppState) -> bool {
+    let Some(view) = state.expire_usage_pause() else {
+        return false;
+    };
+    state.publish(usage_event(&view));
+    event!(
+        name: "broker.usage.autoresumed",
+        Level::INFO,
+        usage.percent = view.percent,
+        "usage window reset; new work auto-resumed",
+    );
+    true
 }
 
 /// Resolves when the process receives Ctrl-C or (on Unix) `SIGTERM`.
@@ -133,8 +179,42 @@ mod tests {
         net::{TcpListener, TcpStream},
     };
 
-    use super::serve;
+    use super::{serve, sweep_usage};
     use crate::{config::Config, state::AppState};
+
+    /// Parses an RFC 3339 instant into a `Timestamp` for a test fixture.
+    fn at(rfc3339: &str) -> crew_core::Timestamp {
+        serde_json::from_value(serde_json::Value::String(rfc3339.to_owned())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_sweep_announces_an_expired_usage_pause_on_the_stream_once() {
+        use crew_core::EventKind;
+
+        let state = AppState::new(Config::default());
+        let mut stream = state.broadcast.subscribe();
+
+        // Arm a pause whose window has already reset: armed, but lazily lifted, so no
+        // lift has reached the stream yet.
+        let _ = state.report_usage(99, at("2000-01-01T00:00:00Z"));
+        assert!(!state.is_usage_paused());
+
+        // The sweep clears the expired pause and announces the lift, un-paused.
+        assert!(sweep_usage(&state), "the expired pause is swept");
+        let streamed = stream.try_recv().unwrap().event;
+        let EventKind::Usage(usage) = streamed.kind else {
+            panic!("expected a usage lift event");
+        };
+        assert!(!usage.paused, "the auto-resume is announced as un-paused");
+        assert_eq!(usage.percent, 99);
+
+        // A second sweep finds nothing: no duplicate lift event.
+        assert!(!sweep_usage(&state));
+        assert!(
+            stream.try_recv().is_err(),
+            "the lift is announced exactly once",
+        );
+    }
 
     #[tokio::test]
     async fn serves_health_then_shuts_down_cleanly() {

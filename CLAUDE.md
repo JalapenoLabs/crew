@@ -545,11 +545,15 @@ window percent plus its reset); at or above `CREW_BROKER_USAGE_THRESHOLD` (defau
 auto-pauses new work, publishing a `usage` event with the reset time so the pause is never
 silent. `is_role_paused` folds in the usage auto-pause, so every role is gated (one shared
 subscription). The gate lifts lazily at the reset instant, so work auto-resumes; `crew
-resume` (which now also clears a usage pause) is the escape hatch to resume early. `GET
-/usage` and `crew usage` read the gauge. The usage signal is the supervisor's to detect from
-the agents' rate-limit output (the stream-json parser, issue #24) and report via
-`RosterClient::report_usage`; the auto-pause mechanism is exercised through `POST /usage`
-directly until then. See `docs/observability.md` (subscription usage auto-pause).
+resume` (which now also clears a usage pause) is the escape hatch to resume early. A
+background sweep tied to the server (`serve.rs`, a tokio task aborted on shutdown) polls for a
+pause whose window has reset and, when one has, clears it and publishes a `usage` lift event,
+so the lazy auto-resume is observable on the stream, not only reflected in the gate (issue
+#112). The sweep is idempotent (`AppState::expire_usage_pause` clears the armed reset), so the
+lift is announced once. `GET /usage` and `crew usage` read the gauge. The usage signal is the
+supervisor's to detect from the agents' rate-limit output (the stream-json parser, issue #24)
+and report via `RosterClient::report_usage`; the auto-pause mechanism is exercised through
+`POST /usage` directly until then. See `docs/observability.md` (subscription usage auto-pause).
 
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config

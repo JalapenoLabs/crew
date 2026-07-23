@@ -6,10 +6,13 @@
 //! limit; a reading at or above the configured threshold auto-pauses new work
 //! until the window resets, publishing a `usage` event so the pause is visible,
 //! never silent. The gate lifts lazily at the reset instant, and `crew resume`
-//! lifts it early (see `control.rs`). `GET /usage` reads the gauge: the latest
-//! reading, the threshold, and the pause. The usage signal is the supervisor's
-//! to detect from the agents' rate-limit output (the stream-json parser, issue
-//! #24); this is the surface it reports to.
+//! lifts it early (see `control.rs`). A background sweep in `serve.rs`
+//! announces the lazy lift on the stream when the window resets, so the
+//! auto-resume is observable too, not only reflected in the gate (issue #112).
+//! `GET /usage` reads the gauge: the latest reading, the threshold, and the
+//! pause. The usage signal is the supervisor's to detect from the agents'
+//! rate-limit output (the stream-json parser, issue #24); this is the surface
+//! it reports to.
 
 use axum::{extract::State, routing::post, Json, Router};
 use crew_core::{ChannelId, Event, EventKind, Sender, Timestamp, UsageEvent, ALL_UNITS};

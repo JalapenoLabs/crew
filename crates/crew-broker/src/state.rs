@@ -109,6 +109,27 @@ impl Usage {
     fn is_paused(&self, now: Timestamp) -> bool {
         self.paused_until.is_some_and(|until| now < until)
     }
+
+    /// Clears an auto-pause whose window has reset as of `now`, returning the
+    /// reset instant that just passed, or `None` if none has expired.
+    ///
+    /// This is the lazy lift, made observable (issue #112). [`is_paused`]
+    /// already reads `false` once `now` reaches the reset, but the armed
+    /// `paused_until` lingers until this clears it; the broker's background
+    /// sweep calls it and, on a `Some`, announces the lift on the stream.
+    /// Clearing to `None` makes the clear idempotent, so a second sweep
+    /// does not re-announce it.
+    ///
+    /// [`is_paused`]: Usage::is_paused
+    fn expire(&mut self, now: Timestamp) -> Option<Timestamp> {
+        match self.paused_until {
+            Some(until) if now >= until => {
+                self.paused_until = None;
+                Some(until)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The shared-subscription usage gauge, as `GET /usage` reports it (issue #56).
@@ -590,6 +611,28 @@ impl AppState {
         self.usage().is_paused(Timestamp::now())
     }
 
+    /// Clears a usage auto-pause whose window has reset, returning the lifted
+    /// gauge to announce, or `None` if none has expired (issue #112).
+    ///
+    /// The broker's background sweep calls this on a timer: on a `Some` it
+    /// publishes a `usage` lift event, so the lazy auto-resume is observable on
+    /// the stream, not just reflected in the gate. It is idempotent, a second
+    /// call after the pause is cleared returns `None`, so the lift is announced
+    /// once.
+    #[must_use = "the returned gauge must be published so the auto-resume is announced"]
+    pub fn expire_usage_pause(&self) -> Option<UsageView> {
+        let mut usage = self.usage();
+        usage.expire(Timestamp::now())?;
+        // The pause just lifted: report the gauge, now un-paused, so the lift
+        // event carries the same shape as a manual resume.
+        Some(UsageView {
+            percent: usage.percent,
+            threshold: usage.threshold,
+            paused: false,
+            resets_at: None,
+        })
+    }
+
     /// The usage gauge for `GET /usage`: the latest reading, the threshold, and
     /// the pause.
     #[must_use]
@@ -894,6 +937,36 @@ mod tests {
             task: None,
             kind,
         }
+    }
+
+    #[test]
+    fn expiring_a_usage_pause_reports_the_lift_once_when_the_window_has_reset() {
+        let state = AppState::new(Config::default());
+
+        // An active pause (its window still ahead) has not expired: nothing to lift.
+        let _ = state.report_usage(99, at("2099-01-01T00:00:00Z"));
+        assert!(state.is_usage_paused(), "armed with a future reset");
+        assert!(
+            state.expire_usage_pause().is_none(),
+            "an active pause is not swept",
+        );
+
+        // A pause whose window has already reset is armed but lazily lifted; the sweep
+        // clears it and reports the lifted gauge.
+        let _ = state.report_usage(99, at("2000-01-01T00:00:00Z"));
+        assert!(!state.is_usage_paused(), "the window already reset");
+        let lifted = state
+            .expire_usage_pause()
+            .expect("an expired pause is swept");
+        assert!(!lifted.paused, "the reported gauge is un-paused");
+        assert_eq!(lifted.percent, 99, "it carries the last reading");
+        assert_eq!(lifted.resets_at, None);
+
+        // Idempotent: a second sweep finds nothing, so the lift is announced once.
+        assert!(
+            state.expire_usage_pause().is_none(),
+            "the lift is reported once"
+        );
     }
 
     #[test]
