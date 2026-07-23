@@ -66,4 +66,16 @@ impl AppState {
             broadcast,
         }
     }
+
+    /// Scrubs an event of secrets in place, stores it, and fans it to subscribers.
+    ///
+    /// The one path every emitter shares (a posted message, a roster change), so the
+    /// persisted log and every live stream carry the same scrubbed event; the caller
+    /// keeps `event`, now masked. A send with no live subscribers is not an error:
+    /// the event is stored for a later reader.
+    pub fn publish(&self, event: &mut Event) {
+        self.scrubber.scrub_event(event);
+        self.storage.append(event.clone());
+        let _ = self.broadcast.send(event.clone());
+    }
 }

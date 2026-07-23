@@ -21,6 +21,7 @@ mod config;
 mod error;
 mod events;
 mod history;
+mod roster;
 mod router;
 mod secrets;
 mod serve;
@@ -34,6 +35,6 @@ pub use secrets::{mask, Scrubber};
 pub use serve::run;
 pub use state::AppState;
 pub use store::{
-    EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, LogStore, MemoryStore, Roster,
-    Storage,
+    EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, Liveness, LogStore,
+    MemoryStore, RoleStatus, Roster, Storage,
 };
