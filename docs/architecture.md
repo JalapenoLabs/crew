@@ -204,9 +204,14 @@ subcommand tree.
   direct channel a `redirect` (steer, keep the task) or a `belay` (halt and re-task),
   which the role honors at its next tool boundary. They need no role card, resolving the
   broker from `--broker` or the `CREW_BROKER_*` environment. See `docs/communication.md`.
-- `crew watch` tails the conversation with routing visible, and a `crew send` run
-  without a role context posts as the General to the commander by default: the human's
-  own front-end, alongside the agent shim above.
+- `crew watch` tails the conversation live with routing visible (issue #15),
+  rendering each event from the broker's SSE feed as `from -> channel (kind) body`. It
+  reads the whole firehose (`/stream`) by default, or one role's self-filtered inbox
+  with `--role <role>`, so a peer sees a teammate's messages without polling and never
+  its own (the broker drops self-echo at the source, issue #10). The base comes from
+  `--broker`, else `CREW_BROKER_HOST` / `PORT`. This is the streaming read the upgraded
+  `coworker` skill uses in place of its `tail -F` monitor (issue #37; see
+  `docs/communication.md`).
 
 ### Observability
 

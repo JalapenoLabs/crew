@@ -7,7 +7,10 @@
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
 //!   `crew register`, `crew send`, `crew inbox`, and `crew roster` act as the role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
-//!   (see `docs/codex.md`).
+//!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
+//!   stream live, so a peer sees a teammate's messages without polling and never its
+//!   own; the upgraded `coworker` skill replaces its `tail -F` monitor with it (see
+//!   `docs/communication.md`).
 //! - The General steers a running agent with `crew redirect` and `crew belay` (issue
 //!   #38): each posts a directive to a role's inbox that the role honors at once,
 //!   without tearing the crew down (see `docs/communication.md`).
@@ -22,6 +25,7 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 use mimalloc::MiMalloc;
 
+mod broker;
 mod control;
 mod down;
 mod paths;
@@ -63,8 +67,17 @@ enum Command {
         /// The message text (markdown).
         body: String,
     },
-    /// Read the messages addressed to this agent's role.
+    /// Read the messages currently addressed to this agent's role.
     Inbox,
+    /// Tail a role's self-filtered inbox stream live, or the whole firehose.
+    Watch {
+        /// Watch one role's self-filtered inbox instead of the whole firehose.
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// Redirect a role mid-task: inject a steering message it honors immediately.
     Redirect {
         /// The role to steer (its `@role` channel).
@@ -98,6 +111,7 @@ fn main() -> Result<()> {
         Command::Register => shim::register(),
         Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
         Command::Inbox => shim::inbox(),
+        Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
         Command::Redirect {
             role,
             message,

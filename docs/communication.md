@@ -166,6 +166,15 @@ it:
 ## Relationship to the coworker skill
 
 The `coworker` skill is crew's ancestor: a shared markdown file plus a `tail -F`
-monitor. Its transport is what crew replaces. Upgrading the skill to use a broker
-instead of a file is a **separate, tracked effort** (see `roadmap.md`), so the
-skill improves for existing users without waiting on all of crew.
+monitor. Its transport is what crew replaces.
+
+crew ships the upgraded skill at `skills/coworker/` (issue #37). It keeps the skill's
+shape, an agent scoped to a lane that talks to its teammates, and swaps the transport:
+the shared file becomes `crew send`, and the `tail -F` monitor becomes `crew watch
+--role <role>`, a role's self-filtered inbox stream. So an existing coworker user gets
+routing, no self-echo, and a bounded catch-up by pointing the skill at a running
+broker, without waiting on the rest of crew. The skill shrinks to a role-card
+bootstrap (you are role X, here is your lane, here is the broker) because the broker
+now owns the routing, self-echo filtering, and catch-up the skill used to describe by
+convention. If no broker is reachable, the skill says so and asks for one rather than
+falling back to a file.

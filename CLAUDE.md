@@ -108,8 +108,6 @@ not a reimplementation of the agent.
 - Codex parity: same MCP surface via a CLI shim, or a Codex-native path?
 - Persistence: SQLite for the standalone broker vs in-memory with a log file.
   (Seraphim brings Postgres; the standalone need not.)
-- Where the coworker-skill transport upgrade lands: a `crew` dependency, or a
-  standalone drop-in the skill points at. Tracked as a separate effort.
 
 ## Architecture (summary)
 
@@ -123,8 +121,14 @@ The full design is in `docs/architecture.md`. In short:
 - **MCP server:** the agent-facing surface (`crew_send`, `crew_inbox`, ...).
 - **CLI (`crew`):** the operator front-end (`crew up` / `crew down`), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
-  mid-task), and the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
-  `crew roster`) for a runtime without MCP.
+  mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
+  `crew roster`) for a runtime without MCP, and `crew watch` to tail a role's
+  self-filtered inbox stream live.
+- **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
+  a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
+  existing users get the broker's routing, no self-echo, and bounded catch-up. This is
+  where the transport upgrade lands: a standalone drop-in the skill points at, using
+  the `crew` CLI, not a code dependency. See `docs/communication.md`.
 
 ## Roles (summary)
 
@@ -166,6 +170,8 @@ crates/
   crew-substrate     the umbrella crate: re-exports the four above as one dependency
   crew-cli           the human front-end binary (`crew`)
   crew-telemetry     shared structured-logging (tracing) init + secret redaction
+skills/
+  coworker/          the upgraded `coworker` skill: a role-card bootstrap over the broker
 ```
 
 Crate split follows `M-SMALLER-CRATES`: every crate builds and tests on its own,
