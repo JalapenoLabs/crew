@@ -302,6 +302,61 @@ async fn a_subscriber_sees_the_live_count_update_as_agents_transition() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consumer_renders_the_unit_from_the_stream_alone() {
+    // The external-consumer contract (issue #33, see docs/stream-contract.md): from the
+    // one live stream a viz like Runewood renders agents, messages, and the live count,
+    // with no crew-specific capture. Each event carries the whole envelope it needs.
+    let broker = TestBroker::in_memory().await;
+    let mut stream = broker.stream().await; // subscribe before anything happens
+
+    // An agent appearing is a `started` lifecycle event: a consumer spawns an entity for
+    // the role, and every event carries its typed, timestamped, addressed envelope.
+    broker.register("backend", None).await;
+    let started = stream.recv(EXPECTED).await.expect("a live event arrives");
+    assert!(
+        started["ts"].is_string(),
+        "timestamped: every event has `ts`"
+    );
+    assert_eq!(
+        started["from"]["id"], "backend",
+        "addressed: who it is about"
+    );
+    assert_eq!(started["channel"], "all-units");
+    assert_eq!(started["kind"]["kind"], "lifecycle", "typed: the kind tag");
+    assert_eq!(started["kind"]["data"], "started", "the transition");
+
+    broker.register("frontend", None).await;
+    assert_eq!(
+        lifecycle_of(&stream.recv(EXPECTED).await.unwrap()),
+        "started"
+    );
+
+    // A message renders as a particle between agents: source `from`, destination
+    // `channel`, and a typed intent, all on the one event.
+    broker
+        .post_note("@backend", role("frontend"), "the API is ready")
+        .await;
+    let message = stream.recv(EXPECTED).await.expect("the message arrives");
+    assert_eq!(from_of(&message), "frontend", "the source agent");
+    assert_eq!(channel_of(&message), "@backend", "the destination");
+    assert_eq!(message["kind"]["kind"], "message");
+    assert_eq!(message["kind"]["data"]["kind"], "note", "the typed intent");
+    assert_eq!(body_of(&message), "the API is ready");
+
+    // A transition parks an agent; the consumer keeps its live count from these.
+    broker.register("backend", Some("idle")).await;
+    assert_eq!(lifecycle_of(&stream.recv(EXPECTED).await.unwrap()), "idle");
+
+    // The live count is also a snapshot on /roster, and it agrees with the stream:
+    // both agents present, one idle.
+    let roster = broker.get_json("/roster").await;
+    assert_eq!(roster["count"]["live"], 2, "both agents are live");
+    assert_eq!(roster["count"]["idle"], 1, "one is parked");
+
+    broker.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_posted_message_is_received_live_and_appears_in_history() {
     let broker = TestBroker::in_memory().await;
     // A subscriber on backend's inbox, live before the post.
