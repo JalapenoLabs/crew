@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::{BudgetScope, Spend};
 use crate::channel::Channel;
 use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 use crate::time::Timestamp;
@@ -138,7 +139,8 @@ impl Event {
 /// `message` is inter-agent communication, `lifecycle` is a supervised state change,
 /// `activity` is an agent's own work parsed from its stream-json, `boundary` is a lane
 /// crossing (issue #46), `verification` is a step through the adversarial done-gate
-/// (issue #47), and `board` is a change to the shared situation board (issue #49).
+/// (issue #47), `board` is a change to the shared situation board (issue #49), and
+/// `budget` is a token-spend report against the crew budget (issue #54).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -154,6 +156,8 @@ pub enum EventKind {
     Verification(VerificationEvent),
     /// A change to the shared situation board: an entry recorded or retracted (issue #49).
     Board(BoardEvent),
+    /// A token-spend report against the crew budget, and any cap it hit (issue #54).
+    Budget(BudgetEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -395,6 +399,52 @@ pub enum BoardSection {
     Interface,
     /// A known gotcha or pitfall, so the crew does not rediscover it.
     Gotcha,
+}
+
+/// A token-spend report against the crew budget, and any cap it hit (issue #54).
+///
+/// The supervisor publishes one as it records a role's spend, so a UI reads spend against
+/// budget off the stream and a cap hit is never silent. When [`breach`](BudgetEvent::breach)
+/// is set, the report marks the moment the supervisor idle-stops the role (a [`Role`] cap)
+/// or the crew (the [`Crew`] budget) rather than overrun.
+///
+/// [`Role`]: BudgetScope::Role
+/// [`Crew`]: BudgetScope::Crew
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetEvent {
+    /// The role whose spend this report is about.
+    pub role: RoleId,
+    /// The role's cumulative token spend.
+    pub role_spent: u64,
+    /// The role's own cap, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_cap: Option<u64>,
+    /// The crew's cumulative token spend across every role.
+    pub crew_spent: u64,
+    /// The crew-wide budget, if the crew has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_budget: Option<u64>,
+    /// The ceiling this spend hit, if any: the role idle-stops (a [`Role`] breach) or the
+    /// whole crew does (a [`Crew`] breach). `None` is a report still within budget.
+    ///
+    /// [`Role`]: BudgetScope::Role
+    /// [`Crew`]: BudgetScope::Crew
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breach: Option<BudgetScope>,
+}
+
+impl From<Spend> for BudgetEvent {
+    /// Renders a recorded [`Spend`] as the `budget` event that surfaces it on the stream.
+    fn from(spend: Spend) -> Self {
+        Self {
+            role: spend.role,
+            role_spent: spend.role_spent,
+            role_cap: spend.role_cap,
+            crew_spent: spend.crew_spent,
+            crew_budget: spend.crew_budget,
+            breach: spend.breach,
+        }
+    }
 }
 
 impl BoardSection {

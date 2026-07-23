@@ -20,6 +20,7 @@
 //! route it and any front-end can render it (see `docs/communication.md` and
 //! `docs/observability.md`).
 
+mod budget;
 mod card;
 mod channel;
 mod config;
@@ -28,12 +29,13 @@ mod id;
 mod lane;
 mod time;
 
+pub use budget::{Budget, BudgetScope, Spend};
 pub use card::{BrokerEndpoint, CardError, RoleCard, ROLE_CARD_ENV};
 pub use channel::{Channel, ALL_UNITS};
 pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
 pub use event::{
-    Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, Event, EventKind, Lifecycle,
-    Message, MessageKind, Verdict, VerificationEvent,
+    Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, Event, EventKind,
+    Lifecycle, Message, MessageKind, Verdict, VerificationEvent,
 };
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use lane::path_in_lane;

@@ -181,7 +181,9 @@ impl Supervisor {
             idle_timeout: config.idle_stop,
             ..LifecyclePolicy::default()
         };
-        Ok(Fleet::launch(&roster, prepared, policy).with_worktrees(worktrees))
+        Ok(Fleet::launch(&roster, prepared, policy)
+            .with_worktrees(worktrees)
+            .with_budget(config.budget()))
     }
 
     /// Provisions each card and builds its spawn command into a [`PreparedAgent`],
