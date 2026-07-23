@@ -58,6 +58,9 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   turn spent, and its cost in micro-USD. Always emitted, whether or not a budget is set.
 - `usage` a shared-subscription usage reading and its auto-pause (issue #56): the window
   percent, whether new work is paused, and (while paused) when the window resets.
+- `approval` a risky action gated behind the General's sign-off (issue #39): the request id,
+  the role, the action (push / merge / delete / spend / external_post), what specifically it
+  intends, and the decision (pending / approved / denied) with the reason on a decision.
 
 ## The views
 
@@ -228,6 +231,29 @@ and the cockpit can render it. Agents use the ledger through `crew_claim` and
 `crew_ledger` (or the CLI shim `crew claim` / `crew ledger`); every role card tells a
 role to claim before it touches shared work. The live ledger lives in the broker; like
 the pause state, rebuilding it from the durable log on a restart is a later refinement.
+
+## The approval gate
+
+The **approval gate** keeps a crew safe to leave running by gating risky actions behind the
+General's sign-off (issue #39). It is another projection of the stream, like the roster and
+the done-gate: a role requests approval before a gated action, and the broker records who is
+waiting on what.
+
+Each role's rules of engagement (see `docs/roles.md`) decide which actions are gated. Before
+one, the role calls `crew_request_approval`; if the action is gated, the broker records a
+pending request (`POST /approvals`) and the role blocks, polling `GET /approvals/{id}` until
+it resolves. The General decides it with `POST /approvals/{id}/decision` (approve, or deny
+with a reason): the broker records the decision once, refusing a second decision on a resolved
+request, and `GET /approvals` lists the pending ones. On an approval the blocked role proceeds;
+on a denial it abandons the action with the reason recorded.
+
+Every request and decision rides the stream as an `approval` event (from the requesting role
+on the request, from the General on the decision, to `all-units`, filterable with
+`history?kind=approval`), so the request notifies the General and the decision flows back to
+the role, and the whole exchange is auditable. The live gate lives in the broker, in memory
+like the pause state and the done-gate; the operator decision UX (`crew approvals` /
+`crew approve` / `crew deny`), the native notification on a pending request, and the timeout
+policy (hold vs auto-deny) are issue #40.
 
 ## Coordination-stall detection
 

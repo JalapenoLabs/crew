@@ -81,7 +81,9 @@ not a reimplementation of the agent.
 - **Command and control (the general's console).** The General can interject and
   redirect a role mid-task (`crew redirect` / `crew belay`), gate risky actions
   (push, merge, delete, spend, external post) behind rules-of-engagement
-  approval, pause and resume per role and crew-wide plus an emergency stand-down
+  approval (`crew_request_approval`, issue #39: a role blocks on the General's sign-off
+  before a gated action, with sensible per-role defaults and per-crew overrides), pause
+  and resume per role and crew-wide plus an emergency stand-down
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
   commander to command a specialist directly.
 - **Coordination robustness.** Parallel roles work in isolated git worktrees
@@ -229,7 +231,7 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Ledger`, `Boundary`,
-`Verification`, `Board`, `Budget`, `Telemetry`, `Usage`) stream
+`Verification`, `Board`, `Budget`, `Telemetry`, `Usage`, `Approval`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -308,7 +310,7 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes thirteen
+API; it never touches the store. It exposes fourteen
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
@@ -318,7 +320,9 @@ order's structured fields), `crew_roster` (list registered teammates, their owne
 paths, and liveness), `crew_lane` (check a path against the role's owned lane
 before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `boundary`
 event and, under a blocking policy, refuses, routing the change through the commander;
-issue #46), the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
+issue #46), `crew_request_approval` (get the General's sign-off before a gated risky
+action, blocking until approved or denied; ungated actions return at once, issue #39),
+the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
 touching shared work, moving the claim through `in_progress` / `blocked` / `done`, and
 read the ledger; the broker refuses a claim another role holds, issue #45), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
@@ -410,6 +414,26 @@ task, owner, verifier, verdict, and detail) published to `all-units` and filtera
 (409) and a `Verification` history-kind tag. Each role card's briefing now instructs a role
 to verify before done and to be the skeptic on a teammate's work. See `docs/roles.md` (the
 done-gate) and `docs/observability.md`.
+
+Rules of engagement make a crew safe to leave running by gating risky actions behind the
+General's sign-off (issue #39). `crew_core::RulesOfEngagement` is the pure per-role policy: a
+set of gated `RiskyAction`s (`push`, `merge`, `delete`, `spend`, `external_post`) plus an
+optional spend threshold, with `requires_approval(action, magnitude)` the one decision. The
+defaults follow trust (a specialist gates every risky action; the commander, the integrator,
+may merge without sign-off), and a crew overrides them per role in its config (`approval` and
+`spend_threshold` on `RoleSpec`), stamped onto each `RoleCard` by `to_cards`. A role calls
+the `crew_request_approval` MCP tool before a gated action: if its policy does not gate the
+action it proceeds at once, otherwise the tool posts a request (`POST /approvals`) and blocks,
+polling `GET /approvals/{id}` until the General decides it. The gate lives in `AppState` behind
+one lock (like the pause control and done-gate): `POST /approvals/{id}/decision` records the
+approval or denial once (409 on a second decision, and a denial needs a reason), and `GET
+/approvals` lists the pending requests. Every request and decision is a first-class `approval`
+event (a new `EventKind::Approval` carrying the id, role, action, detail, decision, and
+reason) published to `all-units` and filterable with `GET /history?kind=approval`, so the
+request notifies the General and the decision flows back to the blocked role. Added an
+`Approval` history-kind tag. The operator decision UX (`crew approvals` / `crew approve` /
+`crew deny`, notifications, and the timeout policy) is issue #40. See `docs/roles.md` (rules
+of engagement) and `docs/observability.md` (the approval gate).
 
 The shared situation board is the crew's durable memory (issue #49), distinct from the
 transient message stream: agreed interfaces, decisions and their rationale, and known

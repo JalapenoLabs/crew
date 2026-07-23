@@ -85,6 +85,12 @@ macro_rules! uuid_id {
             pub fn as_uuid(self) -> Uuid {
                 self.0
             }
+
+            #[doc = concat!("Parses a [`", stringify!($name), "`] from its canonical text, the inverse of `Display`.")]
+            #[must_use]
+            pub fn parse(text: &str) -> Option<Self> {
+                Uuid::parse_str(text).ok().map(Self)
+            }
         }
 
         impl Default for $name {
@@ -134,6 +140,12 @@ uuid_id! {
 uuid_id! {
     /// A task's globally unique identifier, correlating the events worked under it.
     TaskId
+}
+
+uuid_id! {
+    /// An approval request's globally unique identifier, named when the General decides it
+    /// (`crew approve`/`crew deny`, issue #39).
+    ApprovalId
 }
 
 /// Who emitted an event: a role-scoped agent, or the General (the human).

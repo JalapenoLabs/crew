@@ -190,6 +190,8 @@ pub enum EventKindTag {
     Telemetry,
     /// A shared-subscription usage reading and its auto-pause (issue #56).
     Usage,
+    /// A risky action gated behind the General's sign-off (issue #39).
+    Approval,
 }
 
 impl EventKindTag {
@@ -207,6 +209,7 @@ impl EventKindTag {
             "budget" => Some(Self::Budget),
             "telemetry" => Some(Self::Telemetry),
             "usage" => Some(Self::Usage),
+            "approval" => Some(Self::Approval),
             _ => None,
         }
     }
@@ -225,6 +228,7 @@ impl EventKindTag {
                 | (Self::Budget, EventKind::Budget(_))
                 | (Self::Telemetry, EventKind::Telemetry(_))
                 | (Self::Usage, EventKind::Usage(_))
+                | (Self::Approval, EventKind::Approval(_))
         )
     }
 }

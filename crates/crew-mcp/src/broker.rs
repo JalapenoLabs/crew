@@ -20,8 +20,8 @@ use std::thread;
 use std::time::Duration;
 
 use crew_core::{
-    path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind, RoleId,
-    Sender,
+    path_in_lane, ApprovalDecision, ApprovalId, Channel, Event, EventKind, LaneEnforcement,
+    MessageId, MessageKind, RiskyAction, RoleId, Sender,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -40,6 +40,14 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// a genuinely down broker is not hammered. A resume carries the `Last-Event-ID` cursor,
 /// so nothing is missed across the gap.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+
+/// How long the approval poll waits between checks while a request is pending (issue #39).
+const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long [`request_approval`](Broker::request_approval) blocks before it returns
+/// still-pending, so a forgotten request does not wedge the agent forever. The broker-side
+/// timeout policy (hold vs auto-deny) is issue #40; this is only the client's safety bound.
+const APPROVAL_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// The broker client for one agent role.
 #[derive(Debug)]
@@ -422,6 +430,54 @@ impl Broker {
         self.get("/gate")
     }
 
+    /// Requests the General's approval for a gated action, blocking until it is decided
+    /// (issue #39).
+    ///
+    /// Records the request on the broker and then polls it until the General approves or
+    /// denies it, so the role waits for sign-off rather than taking the action. Returns a
+    /// message telling the role to proceed (approved) or to abandon the action with the
+    /// reason (denied). If no decision lands within [`APPROVAL_MAX_WAIT`] it returns
+    /// still-pending, so the agent is never wedged forever.
+    ///
+    /// # Errors
+    /// Returns a message if the broker rejects the request or cannot be reached.
+    pub fn request_approval(&self, action: RiskyAction, detail: &str) -> Result<String, String> {
+        let payload = json!({
+            "role": self.role.as_str(),
+            "action": action.label(),
+            "detail": detail,
+        });
+        let request: ApprovalView = self.post_json_returning("/approvals", &payload)?;
+        let what = if detail.is_empty() {
+            action.to_string()
+        } else {
+            format!("{action} ({detail})")
+        };
+
+        let polls = (APPROVAL_MAX_WAIT.as_secs() / APPROVAL_POLL_INTERVAL.as_secs().max(1)).max(1);
+        for _ in 0..polls {
+            let view: ApprovalView = self.get(&format!("/approvals/{}", request.id))?;
+            match view.decision {
+                ApprovalDecision::Approved => {
+                    return Ok(format!(
+                        "APPROVED: the General signed off. Proceed to {what}."
+                    ));
+                }
+                ApprovalDecision::Denied => {
+                    return Ok(format!(
+                        "DENIED: do not {what}. Reason: {}. Abandon the action and report back.",
+                        view.reason
+                    ));
+                }
+                ApprovalDecision::Pending => thread::sleep(APPROVAL_POLL_INTERVAL),
+            }
+        }
+        Ok(format!(
+            "still pending: the General has not decided {what} yet. Do not proceed; move to \
+             other work and request again later."
+        ))
+    }
+
     /// Records a decision, interface, or gotcha on the shared situation board (issue #49).
     ///
     /// The board is the crew's durable memory: recording here so the crew stops
@@ -509,6 +565,26 @@ impl Broker {
             Ok(_) => Ok(()),
             Err(err) => Err(self.explain(err)),
         }
+    }
+
+    /// Posts `payload` to `path` and parses the broker's JSON response into `T`.
+    fn post_json_returning<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        payload: &Value,
+    ) -> Result<T, String> {
+        let url = format!("{}{path}", self.base);
+        let response = self
+            .agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&payload.to_string())
+            .map_err(|err| self.explain(err))?;
+        let text = response
+            .into_string()
+            .map_err(|err| format!("could not read the broker response: {err}"))?;
+        serde_json::from_str(&text)
+            .map_err(|err| format!("could not parse the broker response: {err}"))
     }
 
     /// Reads the roster: the crew's control standing and every registered role.
@@ -752,6 +828,18 @@ pub struct InboxItem {
     /// Whether this is a General directive (a `redirect` or `belay`) the role must
     /// honor at once, so the inbox render can flag it (see `docs/communication.md`).
     pub directive: bool,
+}
+
+/// One approval request from `POST`/`GET /approvals/{id}`, polled until decided (issue #39).
+#[derive(Debug, Deserialize)]
+struct ApprovalView {
+    /// The request id, used to poll and to decide it.
+    id: ApprovalId,
+    /// Where the request stands: pending, approved, or denied.
+    decision: ApprovalDecision,
+    /// The General's reason on a decision; empty while pending.
+    #[serde(default)]
+    reason: String,
 }
 
 /// One task in the work ledger from `GET /ledger` (issue #45).

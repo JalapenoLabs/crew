@@ -8,7 +8,7 @@
 
 use std::io::{BufRead, Write};
 
-use crew_core::LaneEnforcement;
+use crew_core::{LaneEnforcement, RiskyAction, RulesOfEngagement};
 use serde_json::{json, Value};
 
 use crate::broker::{
@@ -30,21 +30,26 @@ pub struct Server {
     owned_paths: Vec<String>,
     /// How the crew enforces this role's lane.
     lane_enforcement: LaneEnforcement,
+    /// The risky actions this role must get signed off, for `crew_request_approval` (issue #39).
+    rules_of_engagement: RulesOfEngagement,
 }
 
 impl Server {
-    /// Builds a server that dispatches tool calls to `broker`, enforcing the role's
-    /// lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
+    /// Builds a server that dispatches tool calls to `broker`, enforcing the role's lane
+    /// (`owned_paths`, `lane_enforcement`) for `crew_lane` and its rules of engagement
+    /// (`rules_of_engagement`) for `crew_request_approval`.
     #[must_use]
     pub fn new(
         broker: Broker,
         owned_paths: Vec<String>,
         lane_enforcement: LaneEnforcement,
+        rules_of_engagement: RulesOfEngagement,
     ) -> Self {
         Self {
             broker,
             owned_paths,
             lane_enforcement,
+            rules_of_engagement,
         }
     }
 
@@ -146,6 +151,7 @@ impl Server {
                 self.broker
                     .check_lane(&self.owned_paths, self.lane_enforcement, path)
             }
+            "crew_request_approval" => self.request_approval(arguments),
             "crew_claim" => {
                 let task =
                     str_arg(arguments, "task").ok_or("crew_claim requires a `task` to claim")?;
@@ -203,6 +209,31 @@ impl Server {
             other => Err(format!("unknown tool `{other}`")),
         }
     }
+
+    /// Handles `crew_request_approval`: gate the action against the role's rules of
+    /// engagement, requesting the General's sign-off and blocking only when it is gated
+    /// (issue #39).
+    fn request_approval(&self, arguments: &Value) -> Result<String, String> {
+        let label = str_arg(arguments, "action").ok_or(
+            "crew_request_approval requires an `action`: push, merge, delete, spend, \
+             or external_post",
+        )?;
+        let action = RiskyAction::parse(label).ok_or_else(|| {
+            format!("`{label}` is not a risky action; name push, merge, delete, spend, or external_post")
+        })?;
+        let detail = str_arg(arguments, "detail").unwrap_or_default();
+        let magnitude = arguments.get("amount").and_then(Value::as_u64);
+        if self
+            .rules_of_engagement
+            .requires_approval(action, magnitude)
+        {
+            self.broker.request_approval(action, detail)
+        } else {
+            Ok(format!(
+                "`{action}` needs no approval for your role; proceed without waiting."
+            ))
+        }
+    }
 }
 
 /// The `initialize` result: echo the client's protocol version (or the default) and
@@ -219,7 +250,8 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: coordination, work-ledger, done-gate, board, briefing.
+/// The tool catalog for `tools/list`: coordination (with approval), work-ledger, done-gate,
+/// board, briefing.
 fn tool_catalog() -> Value {
     let mut tools = coordination_tools();
     tools.extend(ledger_tools());
@@ -229,7 +261,8 @@ fn tool_catalog() -> Value {
     Value::Array(tools)
 }
 
-/// The coordination tools: message, order, read the inbox and roster, and check a lane.
+/// The coordination tools: message, order, read the inbox and roster, check a lane, and
+/// request approval for a gated action.
 fn coordination_tools() -> Vec<Value> {
     vec![
         json!({
@@ -305,6 +338,28 @@ fn coordination_tools() -> Vec<Value> {
                     "path": { "type": "string", "description": "The repo-relative file path you are about to edit." }
                 },
                 "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "crew_request_approval",
+            "description": "Get the General's sign-off before a risky action: push, merge, \
+                delete, spend, or external_post. Call it BEFORE the action, naming what you \
+                intend in `detail`. It blocks until the General approves or denies: proceed \
+                only on an approval, and on a denial abandon the action and report the reason. \
+                If your role does not gate the action, it returns at once telling you to \
+                proceed. Never take a gated action without asking.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["push", "merge", "delete", "spend", "external_post"],
+                        "description": "The risky action you intend to take."
+                    },
+                    "detail": { "type": "string", "description": "What specifically you intend, e.g. 'merge PR #42 into main'." },
+                    "amount": { "type": "integer", "description": "For a spend, the magnitude, so a small spend below your threshold proceeds without asking." }
+                },
+                "required": ["action"]
             }
         }),
     ]
@@ -679,6 +734,7 @@ mod tests {
             ),
             vec!["api/".to_owned()],
             crew_core::LaneEnforcement::Warn,
+            crew_core::RulesOfEngagement::default_for(false),
         )
     }
 
@@ -751,6 +807,7 @@ mod tests {
                 "crew_inbox",
                 "crew_roster",
                 "crew_lane",
+                "crew_request_approval",
                 "crew_claim",
                 "crew_ledger",
                 "crew_submit",

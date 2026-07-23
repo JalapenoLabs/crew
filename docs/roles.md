@@ -115,6 +115,29 @@ durable events it survives an idle-stop or a broker restart: the broker rebuilds
 the log. See `docs/communication.md` (context management) and `docs/observability.md` (the
 situation board).
 
+### Rules of engagement
+
+A crew is safe to leave running only if the moves that are expensive to undo do not happen
+without a human in the loop. Rules of engagement (issue #39) gate the risky actions, a
+`push`, a `merge`, a `delete`, a `spend`, an `external_post`, behind the General's sign-off.
+
+Each role carries a `RulesOfEngagement` policy: the set of actions it must get approved
+before taking, plus an optional spend threshold so routine small spends proceed and only a
+large one is gated. The defaults follow trust: a specialist gates every risky action, while
+the commander, the unit's integrator, may `merge` without sign-off but still gates the rest.
+A crew overrides them per role in its config (`approval` and `spend_threshold`, see
+`docs/config.md`), and `to_cards` stamps the resolved policy onto each role card.
+
+Before a gated action, a role calls `crew_request_approval` with the action and what
+specifically it intends. If its policy does not gate the action, the tool returns at once and
+the role proceeds. If it does, the tool posts an approval request and **blocks** until the
+General approves or denies it: on an approval the role proceeds, on a denial it abandons the
+action and records the reason. The broker is the authority, holding every request and its
+decision, and each request and decision rides the stream as an `approval` event, so the
+General is notified and the decision flows back (see `docs/observability.md`, the approval
+gate). Answering a request from the CLI (`crew approvals` / `crew approve` / `crew deny`), the
+notification, and the timeout policy are issue #40.
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface

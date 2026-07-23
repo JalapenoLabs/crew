@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::LaneEnforcement;
 use crate::id::RoleId;
 use crate::lane::path_in_lane;
+use crate::roe::{RiskyAction, RulesOfEngagement};
 
 /// The environment variable naming the role card a spawned agent boots from.
 ///
@@ -87,6 +88,13 @@ pub struct RoleCard {
     /// blocks, or is unchecked (issue #46). Defaults to `warn`.
     #[serde(default)]
     pub lane_enforcement: LaneEnforcement,
+    /// The risky actions this role must get signed off before taking (issue #39).
+    ///
+    /// A hand-authored card that omits it gates every risky action, the safe fallback; the
+    /// supervisor stamps the resolved policy (the role's default or a crew override) onto
+    /// each card it writes. See [`RulesOfEngagement`].
+    #[serde(default = "RulesOfEngagement::gate_all")]
+    pub rules_of_engagement: RulesOfEngagement,
     /// How to reach the unit: the broker's address.
     pub broker: BrokerEndpoint,
 }
@@ -111,6 +119,7 @@ impl RoleCard {
             acceptance: acceptance.into(),
             commander: default_commander(),
             lane_enforcement: LaneEnforcement::default(),
+            rules_of_engagement: RulesOfEngagement::gate_all(),
             broker,
         }
     }
@@ -119,6 +128,13 @@ impl RoleCard {
     #[must_use]
     pub fn with_lane_enforcement(mut self, enforcement: LaneEnforcement) -> Self {
         self.lane_enforcement = enforcement;
+        self
+    }
+
+    /// Sets the role's rules of engagement, returning the card so calls chain (issue #39).
+    #[must_use]
+    pub fn with_rules_of_engagement(mut self, rules: RulesOfEngagement) -> Self {
+        self.rules_of_engagement = rules;
         self
     }
 
@@ -264,6 +280,24 @@ impl RoleCard {
              interface, or gotcha with crew_record so no one relitigates it. The board outlives \
              the message stream and survives a restart; the commander curates it.\n",
         );
+
+        if self.rules_of_engagement.gated_actions().next().is_some() {
+            let gated = self
+                .rules_of_engagement
+                .gated_actions()
+                .map(RiskyAction::label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push('\n');
+            let _ = writeln!(
+                out,
+                "Some actions need the General's sign-off before you take them: {gated}. Before \
+                 one, call crew_request_approval with the action and what specifically you intend; \
+                 it blocks until the General approves or denies. Proceed only on an approval; on a \
+                 denial, abandon the action and record the reason. Never take a gated action \
+                 without asking.",
+            );
+        }
 
         out.push('\n');
         out.push_str(

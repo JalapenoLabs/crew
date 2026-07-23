@@ -78,10 +78,12 @@ Each is a milestone of its own; they layer onto the phase work rather than block
 it.
 
 - **Command & Control.** Interject to redirect and belay a role mid-task (`crew
-  redirect` / `crew belay`, issue #38, done); rules-of-engagement approval gates for
-  risky actions; pause, resume, and emergency stand-down per role and crew-wide
-  (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
-  the commander.
+  redirect` / `crew belay`, issue #38, done); rules-of-engagement approval gates for risky
+  actions (`crew_request_approval`, issue #39, done: a role blocks on the General's sign-off
+  before a gated push, merge, delete, spend, or external post, with per-role defaults and
+  per-crew overrides), with the decision UX and timeout policy to follow (issue #40); pause,
+  resume, and emergency stand-down per role and crew-wide (`crew pause` / `crew resume` /
+  `crew standdown`, issue #41, done); direct override of the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
   config, issue #43, done) with an integrator to follow, a work ledger with claims
   (`crew_claim` / `crew_ledger`, issue #45, done), lane-ownership enforcement

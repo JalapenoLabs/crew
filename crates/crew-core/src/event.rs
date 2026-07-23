@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::budget::{BudgetScope, Spend};
 use crate::channel::Channel;
-use crate::id::{ChannelId, MessageId, RoleId, Sender, TaskId};
+use crate::id::{ApprovalId, ChannelId, MessageId, RoleId, Sender, TaskId};
+use crate::roe::RiskyAction;
 use crate::time::Timestamp;
 
 /// A single, typed, addressed item on the crew event stream.
@@ -142,8 +143,9 @@ impl Event {
 /// `verification` is a step through the adversarial done-gate (issue #47), `board` is a
 /// change to the shared situation board (issue #49), `budget` is a token-spend report
 /// against the crew budget (issue #54), `telemetry` is a per-turn token-and-cost usage
-/// report (issue #55), and `usage` is a shared-subscription usage reading and its
-/// auto-pause (issue #56).
+/// report (issue #55), `usage` is a shared-subscription usage reading and its
+/// auto-pause (issue #56), and `approval` is a risky action gated behind the General's
+/// sign-off (issue #39).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -167,6 +169,8 @@ pub enum EventKind {
     Telemetry(TelemetryEvent),
     /// A shared-subscription usage reading, and whether it auto-paused the crew (issue #56).
     Usage(UsageEvent),
+    /// A risky action requested, then approved or denied by the General (issue #39).
+    Approval(ApprovalEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -432,6 +436,50 @@ pub enum Verdict {
     Passed,
     /// A verifier broke it; the work returns to the owner with the specific failure.
     Failed,
+}
+
+/// A risky action gated behind the General's sign-off (issue #39).
+///
+/// When a role's [`RulesOfEngagement`](crate::RulesOfEngagement) gates an action it is
+/// about to take, it requests approval and blocks; the broker records the request and
+/// this event carries it on the stream (`decision` [`Pending`](ApprovalDecision::Pending)).
+/// The General's decision publishes the same event again, resolved to
+/// [`Approved`](ApprovalDecision::Approved) or [`Denied`](ApprovalDecision::Denied), so the
+/// blocked role proceeds or abandons the action with the reason recorded (see
+/// `docs/observability.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalEvent {
+    /// The request's id, named when the General decides it (`crew approve`/`crew deny`).
+    pub id: ApprovalId,
+    /// The role that must get sign-off before taking the action.
+    pub role: RoleId,
+    /// The gated action awaiting a decision.
+    pub action: RiskyAction,
+    /// What specifically the role wants to do, for example `merge PR #42 into main`.
+    #[serde(default)]
+    pub detail: String,
+    /// Where the request stands: pending, approved, or denied.
+    pub decision: ApprovalDecision,
+    /// The General's note: the denial reason, or an optional word on an approval; empty
+    /// while pending or when a decision carries none.
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Where an approval request stands (issue #39).
+///
+/// It moves from [`Pending`](Self::Pending) to either [`Approved`](Self::Approved), when
+/// the General signs off and the role proceeds, or [`Denied`](Self::Denied), when the
+/// General refuses and the role abandons the action with the reason recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    /// The request awaits the General; the role is blocked on it.
+    Pending,
+    /// The General signed off; the role may take the action.
+    Approved,
+    /// The General refused; the role abandons the action, the reason recorded.
+    Denied,
 }
 
 /// A change to the shared situation board: an entry recorded or retracted (issue #49).

@@ -30,6 +30,7 @@ mod event;
 mod id;
 mod lane;
 mod model;
+mod roe;
 mod time;
 
 pub use budget::{Budget, BudgetScope, Spend};
@@ -37,11 +38,12 @@ pub use card::{BrokerEndpoint, CardError, RoleCard, ROLE_CARD_ENV};
 pub use channel::{Channel, ALL_UNITS};
 pub use config::{ConfigError, CrewConfig, LaneEnforcement, RoleSpec};
 pub use event::{
-    Activity, ArtifactKind, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, Event, EventKind,
-    LedgerEvent, Lifecycle, Message, MessageKind, TaskState, TelemetryEvent, UsageEvent, Verdict,
-    VerificationEvent,
+    Activity, ApprovalDecision, ApprovalEvent, ArtifactKind, BoardEvent, BoardSection,
+    BoundaryEvent, BudgetEvent, Event, EventKind, LedgerEvent, Lifecycle, Message, MessageKind,
+    TaskState, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
-pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
+pub use id::{ApprovalId, ChannelId, MessageId, RoleId, Sender, TaskId};
 pub use lane::path_in_lane;
 pub use model::{default_tier_for, ModelTier, ModelTiers};
+pub use roe::{RiskyAction, RulesOfEngagement};
 pub use time::Timestamp;

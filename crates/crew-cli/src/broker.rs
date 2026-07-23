@@ -13,8 +13,9 @@ use std::io::{BufRead, BufReader};
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{
-    Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind, MessageKind,
-    Sender, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
+    Activity, ApprovalDecision, ApprovalEvent, BoardEvent, BrokerEndpoint, BudgetEvent,
+    BudgetScope, Event, EventKind, MessageKind, Sender, TelemetryEvent, UsageEvent, Verdict,
+    VerificationEvent,
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -156,6 +157,27 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Budget(budget) => ("budget", budget_body(budget)),
         EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
         EventKind::Usage(usage) => ("usage", usage_body(usage)),
+        EventKind::Approval(approval) => ("approval", approval_body(approval)),
+    }
+}
+
+/// A short description of an approval request or decision (issue #39).
+fn approval_body(approval: &ApprovalEvent) -> String {
+    let what = if approval.detail.is_empty() {
+        approval.action.to_string()
+    } else {
+        format!("{} ({})", approval.action, approval.detail)
+    };
+    match approval.decision {
+        ApprovalDecision::Pending => format!("{} awaits sign-off to {what}", approval.role),
+        ApprovalDecision::Approved => format!("{} approved to {what}", approval.role),
+        ApprovalDecision::Denied => {
+            if approval.reason.is_empty() {
+                format!("{} denied: {what}", approval.role)
+            } else {
+                format!("{} denied to {what}: {}", approval.role, approval.reason)
+            }
+        }
     }
 }
 

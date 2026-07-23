@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use crate::state::AppState;
 use crate::{
-    board, boundary, briefing, budget, control, events, gate, history, inbox, ledger, roster,
-    stats, usage,
+    approvals, board, boundary, briefing, budget, control, events, gate, history, inbox, ledger,
+    roster, stats, usage,
 };
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
@@ -22,8 +22,9 @@ use crate::{
 /// the control endpoints (`POST /pause`, `POST /resume`, `POST /standdown`), `POST
 /// /boundary` (record a lane crossing), the `/ledger` endpoints (`GET /ledger`, `POST
 /// /ledger`), the done-gate endpoints (`GET /gate`, `POST /gate/submit`, `POST
-/// /gate/verdict`), the situation-board endpoints (`GET /board`, `POST /board`), and
-/// `GET /briefing?role=<role>` (the bounded new-role briefing packet).
+/// /gate/verdict`), the situation-board endpoints (`GET /board`, `POST /board`),
+/// `GET /briefing?role=<role>` (the bounded new-role briefing packet), and the approval
+/// endpoints (`GET /approvals`, `POST /approvals`, `GET`/`POST /approvals/{id}...`).
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -40,6 +41,7 @@ pub(crate) fn build(state: AppState) -> Router {
         .merge(ledger::routes())
         .merge(board::routes())
         .merge(briefing::routes())
+        .merge(approvals::routes())
         .with_state(state)
 }
 

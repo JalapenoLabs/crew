@@ -23,6 +23,7 @@ use crate::budget::Budget;
 use crate::card::{BrokerEndpoint, RoleCard};
 use crate::id::RoleId;
 use crate::model::{default_tier_for, ModelTier, ModelTiers};
+use crate::roe::{RiskyAction, RulesOfEngagement};
 
 /// How the crew enforces lane ownership when a role edits outside its owned paths
 /// (issue #46).
@@ -113,6 +114,13 @@ pub struct RoleSpec {
     /// role bounded only by the crew-wide [`token_budget`](CrewConfig::token_budget). When
     /// the role reaches its cap, the supervisor idle-stops it rather than overrun.
     pub token_cap: Option<u64>,
+    /// The risky actions this role must get signed off before taking (issue #39). `None`
+    /// uses the sensible default for the role (a specialist gates every risky action, the
+    /// commander all but `merge`); `Some` overrides it with exactly these actions.
+    pub approval: Option<Vec<RiskyAction>>,
+    /// Narrows the role's [`Spend`](RiskyAction::Spend) gate to spends above this magnitude
+    /// (issue #39). `None` gates every spend the policy gates.
+    pub spend_threshold: Option<u64>,
 }
 
 impl Default for CrewConfig {
@@ -173,8 +181,25 @@ impl CrewConfig {
                 )
                 .with_commander(self.commander.clone())
                 .with_lane_enforcement(self.lane_enforcement)
+                .with_rules_of_engagement(self.rules_of_engagement_for(spec))
             })
             .collect()
+    }
+
+    /// The rules of engagement `spec`'s role runs (issue #39).
+    ///
+    /// Its explicit `approval` override, else the sensible default for its place in the crew
+    /// (the commander may merge without sign-off; a specialist gates every risky action),
+    /// narrowed by any `spend_threshold`.
+    fn rules_of_engagement_for(&self, spec: &RoleSpec) -> RulesOfEngagement {
+        let base = match &spec.approval {
+            Some(actions) => RulesOfEngagement::new(actions.iter().copied()),
+            None => RulesOfEngagement::default_for(spec.role == self.commander),
+        };
+        match spec.spend_threshold {
+            Some(threshold) => base.with_spend_threshold(threshold),
+            None => base,
+        }
     }
 
     /// The model alias `role` runs, resolved by the tier precedence (issue #53).
@@ -298,6 +323,8 @@ fn default_roles() -> Vec<RoleSpec> {
         tier: None,
         model: None,
         token_cap: None,
+        approval: None,
+        spend_threshold: None,
     };
     vec![
         role("commander", &[]),
@@ -387,6 +414,8 @@ struct RawRole {
     tier: Option<ModelTier>,
     model: Option<String>,
     token_cap: Option<u64>,
+    approval: Option<Vec<RiskyAction>>,
+    spend_threshold: Option<u64>,
 }
 
 impl RawConfig {
@@ -436,6 +465,8 @@ impl RawRole {
             tier: self.tier,
             model: normalize_alias(self.model),
             token_cap: self.token_cap,
+            approval: self.approval,
+            spend_threshold: self.spend_threshold,
         }
     }
 }

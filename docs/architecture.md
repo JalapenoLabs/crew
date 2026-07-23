@@ -55,6 +55,11 @@ Planned surface (illustrative, not final):
   the decision board plus a rolling summary scoped to the role's timeline, rendered to
   text and capped to a byte budget, so a fresh role catches up without reading the whole
   log. See `docs/roles.md` (the briefing packet).
+- `GET /approvals` lists pending approval requests; `POST /approvals` records a role's
+  request to take a gated risky action, and `POST /approvals/{id}/decision` records the
+  General's approval or denial, refusing a second decision on a resolved request (issue #39).
+  A blocked role polls `GET /approvals/{id}` until it resolves. See `docs/roles.md` (rules of
+  engagement) and `docs/observability.md` (the approval gate).
 
 Why a broker beats the old shared file:
 
@@ -167,8 +172,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes thirteen tools (issues #17,
-#27, #45, #46, #47, #49, #50):
+broker's HTTP API; it never touches the store. It exposes fourteen tools (issues #17,
+#27, #39, #45, #46, #47, #49, #50):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -189,6 +194,11 @@ broker's HTTP API; it never touches the store. It exposes thirteen tools (issues
   the crossing to the unit (a `boundary` event) and, under a blocking policy, refuses the
   edit, telling the role to route the change through the commander. The policy comes from
   the role card (`lane_enforcement`: `warn` / `block` / `off`). See `docs/roles.md`.
+- `crew_request_approval` gets the General's sign-off before a gated risky action, a
+  `push`, `merge`, `delete`, `spend`, or `external_post` (issue #39). It checks the role's
+  rules of engagement from the card: an ungated action returns at once, a gated one posts an
+  approval request and blocks until the General approves or denies it. See `docs/roles.md`
+  (rules of engagement).
 - `crew_claim` claims a piece of work (a task key) before the role starts it, or moves
   the role's claim to `in_progress`, `blocked`, or `done`. The broker refuses a claim
   another role holds, so two roles never edit the same work blind (issue #45).

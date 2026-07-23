@@ -21,6 +21,7 @@
 //! [`crew_core`]: crew_core
 
 mod api;
+mod approvals;
 mod board;
 mod boundary;
 mod briefing;

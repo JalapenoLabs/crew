@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crew_core::{
-    BoardEvent, BoardSection, Event, EventKind, Lifecycle, RoleId, Sender, TelemetryEvent,
-    Timestamp, Verdict,
+    ApprovalDecision, ApprovalId, BoardEvent, BoardSection, Event, EventKind, Lifecycle,
+    RiskyAction, RoleId, Sender, TelemetryEvent, Timestamp, Verdict,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -166,6 +166,64 @@ pub struct VerdictOutcome {
     pub verdict: Verdict,
     /// The failure detail on a handback; empty on a pass.
     pub detail: String,
+}
+
+/// An approval request's live standing: what a role wants to do, and the decision (issue #39).
+///
+/// The role blocks on its request until the [`decision`](ApprovalEntry::decision) resolves
+/// from [`Pending`](ApprovalDecision::Pending) to approved or denied. See
+/// [`AppState::request_approval`] and [`AppState::decide_approval`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalEntry {
+    /// The role that must get sign-off before taking the action.
+    pub role: RoleId,
+    /// The gated action awaiting a decision.
+    pub action: RiskyAction,
+    /// What specifically the role wants to do.
+    pub detail: String,
+    /// Where the request stands: pending, approved, or denied.
+    pub decision: ApprovalDecision,
+    /// The General's note: the denial reason, or a word on an approval; empty while pending.
+    pub reason: String,
+    /// When the request was made, so the gate lists the oldest first.
+    pub requested_at: Timestamp,
+}
+
+/// The approval gate: risky actions awaiting the General's decision, keyed by id (issue #39).
+///
+/// In memory like the pause control and the done-gate: the broker is the live authority,
+/// and every request and decision is also an `approval` event in the durable log. A blocked
+/// role polls its request here until it resolves.
+#[derive(Debug, Default)]
+struct Approvals {
+    requests: BTreeMap<ApprovalId, ApprovalEntry>,
+}
+
+/// Why the broker refused an approval decision (issue #39).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalError {
+    /// No request has that id.
+    UnknownApproval,
+    /// The request was already decided; it carries this decision.
+    AlreadyDecided(ApprovalDecision),
+}
+
+/// The result of deciding an approval, for the endpoint to publish and route (issue #39).
+#[derive(Debug, Clone)]
+pub struct ApprovalOutcome {
+    /// The request's id.
+    pub id: ApprovalId,
+    /// The role that was blocked on the decision.
+    pub role: RoleId,
+    /// The action it wanted to take.
+    pub action: RiskyAction,
+    /// What specifically it wanted to do.
+    pub detail: String,
+    /// The resulting decision: [`Approved`](ApprovalDecision::Approved) or
+    /// [`Denied`](ApprovalDecision::Denied).
+    pub decision: ApprovalDecision,
+    /// The General's reason, carried back to the role.
+    pub reason: String,
 }
 
 /// One entry on the shared situation board: its section, author, and content (issue #49).
@@ -414,6 +472,10 @@ pub struct AppState {
     /// The shared-subscription usage gauge and auto-pause (issue #56). In memory like the
     /// pause control: the broker is the live authority, distinct from the manual pause.
     usage: Arc<Mutex<Usage>>,
+    /// The approval gate: risky actions awaiting the General's decision (issue #39). In
+    /// memory like the pause control and done-gate, with every request and decision also
+    /// recorded as an `approval` event in the durable log.
+    approvals: Arc<Mutex<Approvals>>,
 }
 
 impl AppState {
@@ -455,6 +517,7 @@ impl AppState {
             board: Arc::new(Mutex::new(board)),
             stats: Arc::new(Mutex::new(stats)),
             usage: Arc::new(Mutex::new(usage)),
+            approvals: Arc::new(Mutex::new(Approvals::default())),
         }
     }
 
@@ -633,6 +696,99 @@ impl AppState {
     /// another handler must not wedge the done-gate).
     fn gate(&self) -> std::sync::MutexGuard<'_, Gate> {
         self.gate.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records a role's request to take a gated action, returning its id (issue #39).
+    ///
+    /// The request starts [`Pending`](ApprovalDecision::Pending); the role blocks on it
+    /// (polling [`approval`](AppState::approval)) until the General decides it.
+    #[must_use = "the returned id is how the request is polled and decided"]
+    pub fn request_approval(
+        &self,
+        role: RoleId,
+        action: RiskyAction,
+        detail: String,
+    ) -> ApprovalId {
+        let id = ApprovalId::new();
+        self.approvals().requests.insert(
+            id,
+            ApprovalEntry {
+                role,
+                action,
+                detail,
+                decision: ApprovalDecision::Pending,
+                reason: String::new(),
+                requested_at: Timestamp::now(),
+            },
+        );
+        id
+    }
+
+    /// Records the General's decision on a pending request (issue #39).
+    ///
+    /// # Errors
+    /// Returns [`ApprovalError::UnknownApproval`] if no request has that id, or
+    /// [`ApprovalError::AlreadyDecided`] if it was already resolved (so a decision is
+    /// recorded once, and a late second decision does not flip it).
+    pub fn decide_approval(
+        &self,
+        id: ApprovalId,
+        approve: bool,
+        reason: String,
+    ) -> Result<ApprovalOutcome, ApprovalError> {
+        let mut approvals = self.approvals();
+        let entry = approvals
+            .requests
+            .get_mut(&id)
+            .ok_or(ApprovalError::UnknownApproval)?;
+        if entry.decision != ApprovalDecision::Pending {
+            return Err(ApprovalError::AlreadyDecided(entry.decision));
+        }
+        entry.decision = if approve {
+            ApprovalDecision::Approved
+        } else {
+            ApprovalDecision::Denied
+        };
+        entry.reason = reason;
+        Ok(ApprovalOutcome {
+            id,
+            role: entry.role.clone(),
+            action: entry.action,
+            detail: entry.detail.clone(),
+            decision: entry.decision,
+            reason: entry.reason.clone(),
+        })
+    }
+
+    /// Reads one approval request, for the blocked role to poll until it resolves (issue #39).
+    #[must_use]
+    pub fn approval(&self, id: ApprovalId) -> Option<ApprovalEntry> {
+        self.approvals().requests.get(&id).cloned()
+    }
+
+    /// A snapshot of the approval gate, oldest request first (issue #39).
+    #[must_use]
+    pub fn approval_snapshot(&self) -> Vec<(ApprovalId, ApprovalEntry)> {
+        let mut requests: Vec<(ApprovalId, ApprovalEntry)> = self
+            .approvals()
+            .requests
+            .iter()
+            .map(|(id, entry)| (*id, entry.clone()))
+            .collect();
+        requests.sort_by(|a, b| {
+            a.1.requested_at
+                .cmp(&b.1.requested_at)
+                .then_with(|| a.0.as_uuid().cmp(&b.0.as_uuid()))
+        });
+        requests
+    }
+
+    /// The approval gate behind its lock, recovering from a poisoned mutex (a panic in
+    /// another handler must not wedge the gate).
+    fn approvals(&self) -> std::sync::MutexGuard<'_, Approvals> {
+        self.approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Records a board entry under `key`, or replaces the existing one (issue #49).

@@ -35,6 +35,8 @@ owned_paths = ["api/", "db/"]
 acceptance = "Tests green, migrations reversible."
 model = "haiku"           # an exact model, the escape hatch that wins over any tier
 token_cap = 1_000_000     # this role's own token ceiling (issue #54)
+approval = ["push", "merge", "delete", "external_post", "spend"]  # gated actions (issue #39)
+spend_threshold = 50_000  # only gate a spend above this magnitude
 
 [[roles]]
 role = "frontend"
@@ -66,6 +68,13 @@ Every field is optional and takes a default:
   each role its own git worktree of those repos (on a `crew/<role>` branch), so
   parallel roles never clobber each other's edits (issue #43). An unchanged worktree is
   cleaned up on stand-down; one with uncommitted changes is kept for integration (#48).
+- `approval` (issue #39) is the role's rules of engagement: the risky actions it must get
+  the General's sign-off for before taking (`push`, `merge`, `delete`, `spend`,
+  `external_post`). It defaults to the sensible policy for the role: a specialist gates every
+  risky action, the commander gates all but `merge`. `spend_threshold` narrows the `spend`
+  gate to spends above that magnitude, so routine small spends proceed. Both are stamped onto
+  the role card and enforced through `crew_request_approval`. See `docs/roles.md` (rules of
+  engagement) and `docs/observability.md` (the approval gate).
 - `lane_enforcement` defaults to `warn`. It sets what happens when a role reaches
   outside its owned paths (issue #46): `warn` reports the crossing to the unit and lets
   the role proceed, `block` reports and refuses the out-of-lane edit, and `off` disables

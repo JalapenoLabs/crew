@@ -131,7 +131,8 @@ pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
             | EventKind::Board(_)
             | EventKind::Budget(_)
             | EventKind::Telemetry(_)
-            | EventKind::Usage(_) => {}
+            | EventKind::Usage(_)
+            | EventKind::Approval(_) => {}
         }
     }
 
