@@ -249,7 +249,21 @@ lifecycle mechanics and takes fully-resolved `AgentCommand`s, so it is exercised
 tests with a stub process instead of a real `claude`. Shutting the crew down kills the
 processes and deregisters every role; a dropped crew still kills its processes.
 The roster of roles comes from the crew config (issue #25), which `up` consumes as
-role cards. Idle-stop and restart-on-death land in a later phase.
+role cards.
+
+`crew_supervisor::Fleet` manages each agent's lifecycle so idle roles cost nothing and
+crashes recover (issue #22). Each agent runs a state machine on its own driver thread:
+**lazy start** (the fleet launches with every agent stopped and no process; the first
+work via `Fleet::start` spawns and registers it), **idle-stop** (after a configurable
+quiet period the driver stops the process but keeps the roster entry, marked idle, so
+a restart is fast and keeps context), and **restart** (an unexpected exit restarts it
+bounded by an attempt budget; exhausting the budget marks it dead; `Fleet::start` on a
+stopped agent restarts on demand). Every transition marks the broker roster (via
+`RosterClient::mark` / `register` / `deregister`), so the roster and the stream carry
+the matching `lifecycle` event (started / idle / stopped / restarted / died). The
+`LifecyclePolicy` (idle timeout and restart budget) defaults to a five-minute
+idle-stop and three restarts. (Unifying the eager `Crew` from #21 into the
+lifecycle-managed `Fleet` is a later cleanup.)
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

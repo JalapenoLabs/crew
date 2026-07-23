@@ -89,6 +89,12 @@ role's inbox with no separate capture path. The roster lives behind the storage
 trait, so a durable backend keeps it across a restart. The live count is the
 projection of these lifecycle events, computed by any consumer from the stream.
 
+The supervisor's lifecycle state machine drives these transitions (issue #22): it
+marks a role working on start, idle after a quiet period, stopped on stand-down, and
+dead when a crash exhausts its restart budget, each time re-registering with the
+right liveness. So the stream and the live count reflect lazy start, idle-stop, and
+restart with no separate signal.
+
 ## Runewood
 
 Runewood (the Gource-style WebGL visualization spun off from Seraphim's watch

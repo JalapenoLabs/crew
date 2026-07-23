@@ -17,9 +17,11 @@
 //! - [`Supervisor::up`] runs the whole flow (issue #21): it spawns one process per
 //!   role, registers each on the roster on start and deregisters on exit, and
 //!   captures stdout and stderr, returning a running [`Crew`].
-//!
-//! Idle-stop and restart-on-death land in a later phase (see `docs/architecture.md`).
+//! - [`Fleet`] manages each agent's lifecycle (issue #22): lazy start on first work,
+//!   idle-stop after a quiet period, and restart on an unexpected exit bounded by an
+//!   attempt budget, emitting a lifecycle event on every transition.
 
+mod lifecycle;
 mod mcp;
 mod roster;
 mod spawn;
@@ -30,8 +32,9 @@ use std::path::{Path, PathBuf};
 use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
 
+pub use lifecycle::{AgentState, Fleet, LifecyclePolicy};
 pub use mcp::{agent_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
-pub use roster::RosterClient;
+pub use roster::{Liveness, RosterClient};
 pub use spawn::{
     agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
 };

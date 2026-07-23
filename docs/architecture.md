@@ -85,9 +85,26 @@ registers a role on start and deregisters it on exit, so `GET /roster` always
 reflects the live unit. Each process's stdout and stderr are captured and streamed as
 `Captured` lines for the activity parser (issue #24). The set of roles comes from the
 crew config (issue #25); the supervisor consumes resolved role cards, so the two
-compose without either owning the other's job. Shutting the crew down kills the
-processes and deregisters every role; a dropped crew still kills its processes so
-none leaks.
+compose without either owning the other's job.
+
+`crew_supervisor::Fleet` manages each agent's lifecycle so idle roles cost nothing
+and crashes recover (issue #22). Each agent runs a small state machine on its own
+driver thread:
+
+- **Lazy start.** A fleet launches with every agent stopped and no process; the
+  first work (`Fleet::start`) spawns the process and registers the role.
+- **Idle-stop.** After a configurable quiet period (no output) the driver stops the
+  process but keeps the roster entry, marked idle, so a restart is fast and keeps
+  context. An idle role costs nothing.
+- **Restart.** An unexpected exit restarts the agent, bounded by an attempt budget;
+  exhausting it marks the role dead. A `Fleet::start` on a stopped agent restarts it
+  on demand.
+
+Every transition marks the broker roster, so the roster and the stream carry the
+matching `lifecycle` event (started / idle / stopped / restarted / died); the live
+count and every activity view stay a projection of that one stream. The policy (the
+idle timeout and the restart budget) is configurable, defaulting to a five-minute
+idle-stop and three restarts.
 
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.

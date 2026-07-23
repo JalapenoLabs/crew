@@ -13,6 +13,36 @@ use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::json;
 
+/// A role's liveness, as the broker roster labels it.
+///
+/// The supervisor marks each transition of its lifecycle state machine with the
+/// matching liveness (issue #22); the broker turns the change into a `lifecycle`
+/// stream event (`working` first is `started`, again is `restarted`, and `idle` /
+/// `stopped` / `dead` map directly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// Up and working.
+    Working,
+    /// Registered but idle, its process stopped to save context and money.
+    Idle,
+    /// Cleanly stood down, its roster entry kept for a fast restart.
+    Stopped,
+    /// Gave up after exhausting its restart budget on repeated crashes.
+    Dead,
+}
+
+impl Liveness {
+    /// The wire label the broker roster expects.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Stopped => "stopped",
+            Self::Dead => "dead",
+        }
+    }
+}
+
 /// How long to wait to connect to the broker before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -57,6 +87,25 @@ impl RosterClient {
             .send_string(&body.to_string())
             .map(|_response| ())
             .map_err(|err| eyre!("could not register role `{role}` with the broker: {err}"))
+    }
+
+    /// Marks `role` with a new liveness, keeping its owned paths (`POST /roster`).
+    ///
+    /// The role must already be registered; this changes only its liveness, which the
+    /// broker publishes as the matching `lifecycle` event. Used for the idle, stopped,
+    /// and dead transitions (a restart re-registers via [`register`](Self::register)).
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the update or cannot be reached.
+    pub fn mark(&self, role: &RoleId, liveness: Liveness) -> Result<()> {
+        let url = format!("{}/roster", self.base);
+        let body = json!({ "role": role.as_str(), "liveness": liveness.wire() });
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not mark role `{role}` as {}: {err}", liveness.wire()))
     }
 
     /// Deregisters `role` on exit (`DELETE /roster/{role}`).
