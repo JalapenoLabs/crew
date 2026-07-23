@@ -18,5 +18,5 @@
 mod broker;
 mod server;
 
-pub use broker::{Broker, InboxItem, RoleEntry};
+pub use broker::{Broker, InboxItem, RoleEntry, RosterSnapshot, Standing};
 pub use server::Server;

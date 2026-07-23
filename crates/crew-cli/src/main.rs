@@ -3,7 +3,8 @@
 //! Two audiences drive the crew through this one binary:
 //!
 //! - The operator brings a unit online and stands it down: `crew up` and `crew down`
-//!   (issue #26).
+//!   (issue #26), and gates its work with `crew pause` / `crew resume` / `crew standdown`
+//!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
 //!   `crew register`, `crew send`, `crew inbox`, and `crew roster` act as the role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
@@ -25,6 +26,7 @@ use mimalloc::MiMalloc;
 mod broker;
 mod down;
 mod paths;
+mod pause;
 mod shim;
 mod up;
 
@@ -74,6 +76,28 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Pause a role, or the whole crew: it pulls no new work until resumed.
+    Pause {
+        /// The role to pause; omit to pause the whole crew.
+        role: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Resume a paused role, or the whole crew.
+    Resume {
+        /// The role to resume; omit to resume the whole crew.
+        role: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Stand the crew down: halt every role now, preserving state for recovery.
+    Standdown {
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// List the unit's roster: every role, its lane, and its liveness.
     Roster,
 }
@@ -88,6 +112,9 @@ fn main() -> Result<()> {
         Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
+        Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
+        Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
+        Command::Standdown { broker } => pause::standdown(broker.as_deref()),
         Command::Roster => shim::roster(),
     }
 }

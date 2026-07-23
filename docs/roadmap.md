@@ -78,8 +78,9 @@ Each is a milestone of its own; they layer onto the phase work rather than block
 it.
 
 - **Command & Control.** Interject, redirect, and belay a role mid-task;
-  rules-of-engagement approval gates for risky actions; pause and stand-down;
-  direct override of the commander.
+  rules-of-engagement approval gates for risky actions; pause, resume, and emergency
+  stand-down per role and crew-wide (`crew pause` / `crew resume` / `crew standdown`,
+  issue #41, done); direct override of the commander.
 - **Coordination Robustness.** Worktree-per-role isolation with an integrator, a
   work ledger with claims, lane-ownership enforcement, an adversarial done-gate,
   and coordination-stall detection.

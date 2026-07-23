@@ -180,13 +180,16 @@ impl Broker {
         }
     }
 
-    /// Lists the roster: every registered role with its owned paths and liveness.
+    /// Reads the roster: the crew's control standing and every registered role.
     ///
     /// # Errors
     /// Returns a message if the broker cannot be reached or its response is malformed.
-    pub fn roster(&self) -> Result<Vec<RoleEntry>, String> {
+    pub fn roster(&self) -> Result<RosterSnapshot, String> {
         let view: RosterView = self.get("/roster")?;
-        Ok(view.roles)
+        Ok(RosterSnapshot {
+            standing: view.standing,
+            roles: view.roles,
+        })
     }
 
     /// Fetches the whole message log, oldest first, following the history cursor.
@@ -286,12 +289,41 @@ pub struct RoleEntry {
     pub owned_paths: Vec<String>,
     /// The role's liveness (working / idle / stopped / dead).
     pub liveness: String,
+    /// Whether the role is paused on its own (issue #41); it is also gated whenever the
+    /// crew is not `running`.
+    #[serde(default)]
+    pub paused: bool,
+}
+
+/// A roster read: the crew's control standing and its registered roles (issue #41).
+#[derive(Debug)]
+pub struct RosterSnapshot {
+    /// The crew's control standing.
+    pub standing: Standing,
+    /// The registered roles, sorted by id.
+    pub roles: Vec<RoleEntry>,
 }
 
 /// The shape of `GET /roster`.
 #[derive(Debug, Deserialize)]
 struct RosterView {
+    /// The crew's control standing: `running`, `paused`, or `stood_down` (issue #41).
+    #[serde(default)]
+    standing: Standing,
     roles: Vec<RoleEntry>,
+}
+
+/// The crew's control standing from `GET /roster` (issue #41).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    /// Normal: roles pull work as usual.
+    #[default]
+    Running,
+    /// Globally paused: no role pulls new work.
+    Paused,
+    /// Stood down: an emergency halt.
+    StoodDown,
 }
 
 /// The shape of `GET /history`.

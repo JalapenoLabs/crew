@@ -22,6 +22,7 @@
 
 mod api;
 mod config;
+mod control;
 mod error;
 mod events;
 mod history;

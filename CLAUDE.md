@@ -81,8 +81,9 @@ not a reimplementation of the agent.
 - **Command and control (the general's console).** The General can interject and
   redirect a role mid-task (`crew redirect` / `crew belay`), gate risky actions
   (push, merge, delete, spend, external post) behind rules-of-engagement
-  approval, pause or stand down per role and globally, and override the commander
-  to command a specialist directly.
+  approval, pause and resume per role and crew-wide plus an emergency stand-down
+  (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
+  commander to command a specialist directly.
 - **Coordination robustness.** Parallel roles work in isolated git worktrees and
   integrate through a deliberate step; a commander-maintained work ledger with
   claims prevents collisions; lane ownership is enforced; nothing is done until an
@@ -119,7 +120,8 @@ The full design is in `docs/architecture.md`. In short:
 - **Supervisor:** spawns one agent process per role with its role card, wires
   each to the broker, and manages lifecycle (start, idle-stop, restart).
 - **MCP server:** the agent-facing surface (`crew_send`, `crew_inbox`, ...).
-- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`) plus the agent
+- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`, and the
+  `crew pause` / `crew resume` / `crew standdown` brake and kill switch) plus the agent
   CLI shim (`crew register` / `crew send` / `crew inbox` / `crew roster`) for a runtime
   without MCP, and `crew watch` to tail a role's self-filtered inbox stream live.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),

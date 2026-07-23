@@ -197,6 +197,13 @@ impl RoleCard {
         );
 
         out.push('\n');
+        out.push_str(
+            "The General can pause you. Before you pick up new work, check crew_roster: if you \
+             are marked paused, or the crew is paused or stood down, pull no new work and wait \
+             for it to lift. A stand-down means stop now and leave your work recoverable.\n",
+        );
+
+        out.push('\n');
         out.push_str(&self.topology_briefing());
         out
     }
@@ -410,6 +417,10 @@ mod tests {
             "gives the broker address"
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
+        assert!(
+            briefing.contains("paused") && briefing.contains("pull no new work"),
+            "tells the role to honor a pause"
+        );
     }
 
     #[test]
