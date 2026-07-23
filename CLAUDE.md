@@ -91,8 +91,12 @@ not a reimplementation of the agent.
   a path against its owned lane before an out-of-lane edit, which is reported to the unit
   as a `boundary` event and, under a blocking policy, refused, so a cross-lane change
   routes through the commander instead of a silent edit); nothing is done until an
-  adversarial gate fails to break it; the defibrillator also catches coordination stalls,
-  not just dead agents.
+  adversarial done-gate fails to break it (`crew_submit` / `crew_verdict` / `crew_gate`,
+  issue #47: a role submits finished work for verification instead of asserting it done,
+  an independent role tries to break it against the acceptance and passes or hands it
+  back, and the broker refuses a self-verdict so "done" means an independent role could
+  not break it); the defibrillator also catches coordination stalls, not just dead
+  agents.
 - **Team memory.** A shared decision board (agreed interfaces, decisions,
   gotchas) the crew reads and writes, distinct from the transient message stream;
   a new role boots from a briefing packet (role card + board + rolling summary),
@@ -128,8 +132,8 @@ The full design is in `docs/architecture.md`. In short:
   `crew pause` / `crew resume` / `crew standdown` brake and kill switch), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
-  `crew roster` / `crew lane`) for a runtime without MCP, and `crew watch` to tail a
-  role's self-filtered inbox stream live.
+  `crew roster` / `crew lane` / `crew submit` / `crew verdict` / `crew gate`) for a
+  runtime without MCP, and `crew watch` to tail a role's self-filtered inbox stream live.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -204,7 +208,8 @@ Design of record plus the workspace scaffold. The crates build/test green.
 structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
-`EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Boundary`) stream
+`EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Boundary`,
+`Verification`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -279,17 +284,20 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes five
+API; it never touches the store. It exposes eight
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
 fan-out handle, issue #27), `crew_inbox` (read the messages addressed to the role
 since the last call, self-filtered, over a per-session history cursor, surfacing an
 order's structured fields), `crew_roster` (list registered teammates, their owned
-paths, and liveness), and `crew_lane` (check a path against the role's owned lane
+paths, and liveness), `crew_lane` (check a path against the role's owned lane
 before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `boundary`
 event and, under a blocking policy, refuses, routing the change through the commander;
-issue #46). A tool failure returns as an `isError` result, not a protocol error. The
+issue #46), and the adversarial done-gate trio `crew_submit` / `crew_verdict` /
+`crew_gate` (submit finished work for verification instead of asserting it done, judge a
+teammate's work as an independent skeptic, and read the gate; issue #47). A tool failure
+returns as an `isError` result, not a protocol error. The
 roadmap step is `crew_inbox` push over the per-role SSE stream instead of the current
 history read.
 
@@ -335,6 +343,23 @@ stream to `all-units`, and under `block` the edit is refused so a cross-lane cha
 through the commander instead of a silent edit. The event is filterable with
 `GET /history?kind=boundary`. See `docs/roles.md` (lane enforcement) and
 `docs/observability.md` (the `boundary` event).
+
+The adversarial done-gate makes "done" mean verified, not asserted (issue #47), so
+confident-but-wrong work never ships. A role does not report its own task done: it submits
+the finished work with `crew_submit` (or `crew submit`), an independent role tries to break
+it against the acceptance criteria and records a pass or a failure with `crew_verdict`, and
+`crew_gate` reads the live gate. The gate lives in `AppState` behind one lock (mirroring the
+#41 pause `control`): `POST /gate/submit` records the task awaiting verification and, when a
+reviewer is named, notifies it; `POST /gate/verdict` holds the lock across the check and the
+update, refusing a verdict from the task's own owner (409) or on a task not awaiting one, so
+a task reaches `Passed` only when a role other than the owner could not break it. A `Failed`
+verdict posts an actionable handback to the owner's inbox with the specific failure. Each
+step is a first-class `verification` event (a new `EventKind::Verification` carrying the
+task, owner, verifier, verdict, and detail) published to `all-units` and filterable with
+`GET /history?kind=verification`; `GET /gate` reads live ownership. Added `ApiError::Conflict`
+(409) and a `Verification` history-kind tag. Each role card's briefing now instructs a role
+to verify before done and to be the skeptic on a teammate's work. See `docs/roles.md` (the
+done-gate) and `docs/observability.md`.
 
 `crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
 crew tools with no per-task approval (issue #20), the way Seraphim registers the
@@ -404,7 +429,8 @@ exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` driv
 in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
-`crew inbox`, `crew roster`, and `crew lane` let an agent on a runtime without MCP, such
+`crew inbox`, `crew roster`, `crew lane`, and the done-gate trio `crew submit` /
+`crew verdict` / `crew gate` (issue #47) let an agent on a runtime without MCP, such
 as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
 shim's `crew_lane`, issue #46). Each boots from the same role context
 the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`

@@ -6,8 +6,9 @@
 //!   (issue #26), and gates its work with `crew pause` / `crew resume` / `crew standdown`
 //!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
-//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, and `crew lane` act as
-//!   the role the
+//!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew lane`, and the
+//!   done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47) act as the
+//!   role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
 //!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
 //!   stream live, so a peer sees a teammate's messages without polling and never its
@@ -130,6 +131,30 @@ enum Command {
         /// The repo-relative file path to check against this role's owned lane.
         path: String,
     },
+    /// Submit finished work for adversarial verification (not done until it passes).
+    Submit {
+        /// The task title, matching the order it came from.
+        task: String,
+        /// The acceptance criteria the work claims to meet.
+        #[arg(long, value_name = "TEXT")]
+        acceptance: Option<String>,
+        /// An optional reviewer role to notify (for example `qa`).
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+    },
+    /// Return a verdict on a task another role submitted: try to break it, then judge.
+    Verdict {
+        /// The task title under verification.
+        task: String,
+        /// Pass the task: mark it done because you could not break it.
+        #[arg(long)]
+        pass: bool,
+        /// The specific failure when the task does not pass (required to fail it).
+        #[arg(long, value_name = "TEXT")]
+        failure: Option<String>,
+    },
+    /// Read the done-gate: tasks under verification and their standing.
+    Gate,
 }
 
 fn main() -> Result<()> {
@@ -157,5 +182,16 @@ fn main() -> Result<()> {
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
+        Command::Submit {
+            task,
+            acceptance,
+            to,
+        } => shim::submit(&task, acceptance.as_deref(), to.as_deref()),
+        Command::Verdict {
+            task,
+            pass,
+            failure,
+        } => shim::verdict(&task, pass, failure.as_deref()),
+        Command::Gate => shim::gate(),
     }
 }

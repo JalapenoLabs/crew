@@ -26,6 +26,7 @@ mod config;
 mod control;
 mod error;
 mod events;
+mod gate;
 mod history;
 mod inbox;
 mod roster;

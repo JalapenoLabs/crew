@@ -66,6 +66,32 @@ directory boundary, matched on whole path segments so `api/` never matches `apiv
 A genuine cross-lane need is a message to the commander or a pair channel, not a
 boundary crossing.
 
+### The done-gate
+
+Done means verified, not asserted (issue #47). A role does not report its own task done;
+confident-but-wrong work never ships because an independent role tries to break it first.
+
+The gate is a two-party protocol the broker enforces:
+
+1. **Submit.** When a role believes its task meets the acceptance criteria, it submits the
+   work with `crew_submit` (or `crew submit <task>` on the shim) instead of declaring it
+   done. This records the task as awaiting verification and, when a reviewer is named,
+   asks it to verify. Submitting does not mark the work done.
+2. **Verify.** An independent role, `qa` or a skeptic reviewer, actively tries to break the
+   work against its acceptance criteria and records a verdict with `crew_verdict`. It
+   passes the task only if it could not break it.
+3. **Pass or hand back.** A pass marks the task done. A failure returns the work to the
+   owner with the specific, actionable failure, delivered to its inbox, so the owner fixes
+   exactly what broke and resubmits.
+
+The broker refuses a verdict that would let bad work through: a role cannot verify its own
+work (the verifier must differ from the owner), and a task that already passed or was
+handed back is not open to a fresh verdict until it is resubmitted. So a task reaches done
+only when a role other than the owner could not break it. Every step is a `verification`
+event on the stream, and `crew_gate` (or `GET /gate`) reads the live gate: each task under
+verification, its owner, its verifier, and whether it is submitted, passed, or failed (see
+`docs/observability.md`).
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface
@@ -75,8 +101,9 @@ boundary crossing.
 - **backend** owns server code, the database, and migrations (for example
   `api/`).
 - **frontend** owns the UI (for example `frontend/`).
-- **qa** owns verification and tests. It is the "did it actually work" gate. Keep
-  unit and e2e in one role at first.
+- **qa** owns verification and tests. It is the "did it actually work" gate: it works the
+  adversarial done-gate above, trying to break a task before it counts as done. Keep unit
+  and e2e in one role at first.
 
 ## On-demand roster
 
