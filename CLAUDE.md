@@ -155,7 +155,8 @@ The full design is in `docs/architecture.md`. In short:
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task, and `crew command` to order a role directly, bypassing the commander while
   keeping it informed, issue #42), `crew integrate` to merge the roles' branches into one
-  coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
+  coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` /
+  `crew ask` / `crew answer` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
@@ -321,14 +322,17 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes fourteen
-tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
+API; it never touches the store. It exposes sixteen
+tools with self-documenting schemas: `crew_send` (post a note as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
-fan-out handle, issue #27), `crew_inbox` (read the messages addressed to the role
-since the last call, self-filtered, over a per-session history cursor, surfacing an
-order's structured fields), `crew_roster` (list registered teammates, their owned
-paths, and liveness), `crew_lane` (check a path against the role's owned lane
+fan-out handle, issue #27), the typed-message pair `crew_ask` / `crew_answer` (post a
+`question` or an `answer` rather than a plain note, so an unanswered question surfaces a
+coordination stall instead of stalling silently; `crew_answer` names the question by the
+`in_reply_to` id the inbox shows, issue #123), `crew_inbox` (read the messages addressed to
+the role since the last call, self-filtered, over a per-session history cursor, surfacing an
+order's structured fields and each message's id so a reply can name it), `crew_roster`
+(list registered teammates, their owned paths, and liveness), `crew_lane` (check a path against the role's owned lane
 before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `boundary`
 event and, under a blocking policy, refuses, routing the change through the commander;
 issue #46), the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
@@ -620,6 +624,7 @@ exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` driv
 in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
+`crew ask` / `crew answer` (post a typed question or answer, issue #123),
 `crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue #45), the
 done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), `crew complete`
 (report the mission gracefully finished, issue #121), the

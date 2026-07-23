@@ -85,6 +85,51 @@ pub fn send(to: Option<&str>, channel: Option<&str>, body: &str) -> Result<()> {
     Ok(())
 }
 
+/// Asks a typed `question` as this agent's role (issue #123).
+///
+/// Mirrors `crew_ask`: a `question` is the kind the coordination-stall detector
+/// keys on, so asking through this rather than a plain `send` note lets an
+/// unanswered question surface a deadlock. `options` are optional suggested
+/// answers.
+///
+/// # Errors
+/// Returns an error if no role context is set, the target is not routable, or
+/// the broker rejects the message.
+pub fn ask(to: Option<&str>, channel: Option<&str>, body: &str, options: &[String]) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .ask(to, channel, body, options)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// Answers a `question` as this agent's role, naming the message it replies to
+/// (issue #123).
+///
+/// Mirrors `crew_answer`: `in_reply_to` is the id of the question, shown in the
+/// inbox as `[id ...]`; it threads the reply and clears the wait the stall
+/// detector was tracking.
+///
+/// # Errors
+/// Returns an error if no role context is set, the target is not routable,
+/// `in_reply_to` is not a message id, or the broker rejects the message.
+pub fn answer(
+    to: Option<&str>,
+    channel: Option<&str>,
+    body: &str,
+    in_reply_to: &str,
+) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .answer(to, channel, body, in_reply_to)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
 /// Prints the messages addressed to this agent's role.
 ///
 /// Mirrors `crew_inbox`, but statelessly: a short-lived shim keeps no

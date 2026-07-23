@@ -169,10 +169,10 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes fourteen tools (issues #17,
-#27, #45, #46, #47, #49, #50, #121):
+broker's HTTP API; it never touches the store. It exposes sixteen tools (issues #17,
+#27, #45, #46, #47, #49, #50, #121, #123):
 
-- `crew_send` sends a message as the role to a channel or a teammate. With
+- `crew_send` sends a note as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
   messages one role, `channel: "all-units"` reaches the unit, and a pair like
   `frontend+backend` reaches just those two. The target follows one shared rule,
@@ -180,10 +180,17 @@ broker's HTTP API; it never touches the store. It exposes fourteen tools (issues
 - `crew_order` issues an order as the role to one specialist: a scoped task with a
   title, scope, owned paths, and acceptance bar (a `MessageKind::Order`). It is the
   commander's fan-out handle for turning the General's brief into work (issue #27).
+- `crew_ask` and `crew_answer` post a typed `question` and `answer` rather than a plain
+  note (issue #123), targeted like `crew_send`. A `question` is the message kind the
+  coordination-stall detector keys on (issue #48), so asking through `crew_ask` is what
+  lets an unanswered question or a mutual-wait deadlock surface on the stream instead of
+  stalling silently; `crew_answer` names the question it replies to by the `in_reply_to`
+  id the inbox shows, threading the reply and clearing the wait.
 - `crew_inbox` reads the messages addressed to the role since the last call (its
   direct `@role` channel, any pair it belongs to, and `all-units`), with its own
   messages filtered out. It tracks a per-session cursor over the broker's history,
-  and surfaces an order's structured fields so a specialist reads the task.
+  and surfaces an order's structured fields plus each message's id (so a `crew_answer`
+  can name the question it replies to) so a specialist reads the task.
 - `crew_roster` lists every registered teammate, the paths it owns, and its
   liveness (working / idle / stopped / dead).
 - `crew_lane` checks a repo-relative path against the role's owned lane before it edits
@@ -221,7 +228,8 @@ right the first time. A tool failure comes back as an `isError` result the agent
 reads, not a protocol error.
 
 MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
-the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, `crew roster`,
+the fallback (issue #28): `crew register`, `crew send`, the typed-message pair
+`crew ask` / `crew answer`, `crew inbox`, `crew roster`,
 `crew lane`, the work-ledger pair `crew claim` / `crew ledger`, the done-gate trio
 `crew submit` / `crew verdict` / `crew gate`, `crew complete` (report the mission
 finished), the situation-board pair `crew board` / `crew record`, and `crew briefing` act as
@@ -264,7 +272,8 @@ subcommand tree.
   leaves an orphaned process. `crew up` owns the crew: it holds the fleet's driver
   threads and, when it started one, the in-process broker, so standing down tears both
   down together.
-- `crew register`, `crew send`, `crew inbox`, and `crew roster` are the agent CLI
+- `crew register`, `crew send`, `crew ask` / `crew answer`, `crew inbox`, and
+  `crew roster` are the agent CLI
   shim (issue #28): they act as the role the environment names (`CREW_ROLE_CARD`, or
   `CREW_ROLE` plus the broker config) and reach the broker through the same client the
   MCP tools use, so a runtime without MCP coordinates the same way. See `docs/codex.md`.

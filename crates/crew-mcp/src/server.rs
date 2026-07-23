@@ -113,6 +113,10 @@ impl Server {
     }
 
     /// Executes a tool against the broker.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a flat tool-dispatch match grows one self-contained arm per tool"
+    )]
     fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String, String> {
         match name {
             "crew_send" => {
@@ -136,6 +140,29 @@ impl Server {
                     &str_list_arg(arguments, "owned_paths"),
                     str_arg(arguments, "acceptance").unwrap_or_default(),
                     str_arg(arguments, "body").unwrap_or_default(),
+                )
+            }
+            "crew_ask" => {
+                let body =
+                    str_arg(arguments, "body").ok_or("crew_ask requires a non-empty `body`")?;
+                self.broker.ask(
+                    str_arg(arguments, "to"),
+                    str_arg(arguments, "channel"),
+                    body,
+                    &str_list_arg(arguments, "options"),
+                )
+            }
+            "crew_answer" => {
+                let body =
+                    str_arg(arguments, "body").ok_or("crew_answer requires a non-empty `body`")?;
+                let in_reply_to = str_arg(arguments, "in_reply_to").ok_or(
+                    "crew_answer requires the `in_reply_to` id of the question it answers",
+                )?;
+                self.broker.answer(
+                    str_arg(arguments, "to"),
+                    str_arg(arguments, "channel"),
+                    body,
+                    in_reply_to,
                 )
             }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
@@ -220,10 +247,11 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: coordination, work-ledger, done-gate,
-/// board, briefing.
+/// The tool catalog for `tools/list`: messaging, coordination, work-ledger,
+/// done-gate, board, briefing.
 fn tool_catalog() -> Value {
-    let mut tools = coordination_tools();
+    let mut tools = messaging_tools();
+    tools.extend(coordination_tools());
     tools.extend(ledger_tools());
     tools.extend(done_gate_tools());
     tools.extend(board_tools());
@@ -231,9 +259,9 @@ fn tool_catalog() -> Value {
     Value::Array(tools)
 }
 
-/// The coordination tools: message, order, read the inbox and roster, and check
-/// a lane.
-fn coordination_tools() -> Vec<Value> {
+/// The messaging tools: send a note, order a specialist, ask a question, and
+/// answer one.
+fn messaging_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "crew_send",
@@ -281,10 +309,57 @@ fn coordination_tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "crew_ask",
+            "description": "Ask a typed question and wait on a decision, as your role. Use this, \
+                not crew_send, when you need an answer before you can proceed: a question is a \
+                first-class message the unit tracks, so an unanswered one surfaces a coordination \
+                stall or deadlock instead of stalling silently. Target it like crew_send: `to` a \
+                single role, `channel` for `all-units` or a pair, or neither to reach the \
+                commander. `body` is the question; `options` optionally lists suggested answers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "A role to ask directly (its @role channel)." },
+                    "channel": { "type": "string", "description": "A channel name: `all-units`, or a pair like `frontend+backend`." },
+                    "body": { "type": "string", "description": "The question (markdown)." },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional suggested answers to choose from."
+                    }
+                },
+                "required": ["body"]
+            }
+        }),
+        json!({
+            "name": "crew_answer",
+            "description": "Answer a question a teammate asked, as your role, clearing the wait it \
+                was blocked on. `in_reply_to` is the id of the question you are answering, shown in \
+                your inbox as `[id ...]`; naming it threads the reply to its question. Target it \
+                like crew_send: `to` the asker, or a `channel`. `body` is the answer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "The role to answer (usually the asker's @role channel)." },
+                    "channel": { "type": "string", "description": "A channel name, if the question was asked on one." },
+                    "body": { "type": "string", "description": "The answer (markdown)." },
+                    "in_reply_to": { "type": "string", "description": "The id of the question being answered (from your inbox)." }
+                },
+                "required": ["body", "in_reply_to"]
+            }
+        }),
+    ]
+}
+
+/// The coordination tools: read the inbox and roster, and check a lane.
+fn coordination_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "crew_inbox",
             "description": "Read the messages addressed to you since you last called this. \
                 Returns messages on your direct `@role` channel, any pair channel you belong \
-                to, and `all-units`, and never your own. Call it to catch up on what teammates \
+                to, and `all-units`, and never your own. Each carries an `[id ...]` you can pass \
+                to crew_answer to reply to a question. Call it to catch up on what teammates \
                 have sent you.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
@@ -542,9 +617,11 @@ fn render_inbox(items: &[InboxItem]) -> String {
             };
             // A redirect or belay is a General directive to honor at once, so flag it.
             let marker = if item.directive { "[honor now] " } else { "" };
+            // Carry the message id so a reply can name it: crew_answer takes the id of
+            // the question it answers.
             format!(
-                "- {}{} on {} ({}): {}",
-                marker, item.from, item.channel, item.kind, content
+                "- {}{} on {} ({}) [id {}]: {}",
+                marker, item.from, item.channel, item.kind, item.id, content
             )
         })
         .collect();
@@ -713,6 +790,7 @@ mod tests {
         use crate::broker::InboxItem;
 
         let item = |kind: &str, directive: bool| InboxItem {
+            id: "11111111-1111-1111-1111-111111111111".to_owned(),
             from: "general".to_owned(),
             channel: "@backend".to_owned(),
             kind: kind.to_owned(),
@@ -769,6 +847,8 @@ mod tests {
             [
                 "crew_send",
                 "crew_order",
+                "crew_ask",
+                "crew_answer",
                 "crew_inbox",
                 "crew_roster",
                 "crew_lane",
@@ -870,6 +950,23 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("pass"));
+    }
+
+    #[test]
+    fn crew_answer_without_in_reply_to_is_a_tool_error_not_a_broker_call() {
+        // A missing `in_reply_to` fails before the broker is touched, so the bogus base
+        // is fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                    "params": { "name": "crew_answer", "arguments": { "body": "use JWT" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("in_reply_to"));
     }
 
     #[test]

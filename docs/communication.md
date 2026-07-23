@@ -89,6 +89,15 @@ posts to the channel named in the path, and `GET /events` reads the log.
 Typed intents are what let the commander arbitrate and let a UI show an order
 differently from a status ping.
 
+Agents post the typed kinds through dedicated tools, not by hand-tagging a note:
+`crew_send` posts a `note`, `crew_order` an `order`, and `crew_ask` / `crew_answer` a
+`question` / `answer` (issue #123). This matters beyond rendering: the coordination-stall
+detector (issue #48) keys on `question` events, so an agent that asks through `crew_ask`
+lets an unanswered question or a mutual-wait deadlock surface on the stream, where a plain
+note would stall the crew silently. `crew_answer` names the question it replies to with the
+`in_reply_to` id the inbox surfaces, so the reply threads to its question and clears the
+wait.
+
 ## Delivery and notifications
 
 An agent subscribes to its inbox stream and receives native notifications on new

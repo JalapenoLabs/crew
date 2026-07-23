@@ -5,8 +5,11 @@
 //! `docs/architecture.md`). A Claude Code (or Codex) agent connects over stdio
 //! and calls:
 //!
-//! - `crew_send` (message a channel or role),
-//! - `crew_inbox` (read the messages addressed to it, self-filtered),
+//! - `crew_send` (send a note to a channel or role),
+//! - `crew_ask` / `crew_answer` (post a typed question or answer, so an
+//!   unanswered question surfaces a coordination stall; issue #123),
+//! - `crew_inbox` (read the messages addressed to it, self-filtered, each with
+//!   an id a `crew_answer` can reference),
 //! - `crew_roster` (list teammates and the lanes they own),
 //! - `crew_lane` (check a path against its owned lane before an out-of-lane
 //!   edit),
