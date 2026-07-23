@@ -242,7 +242,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "crew-broker"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "crew-core",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "crew-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "crew-substrate",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "crew-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "crew-mcp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "crew-broker",
  "crew-core",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "crew-substrate"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "crew-broker",
  "crew-core",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "crew-supervisor"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "crew-broker",
  "crew-core",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "crew-telemetry"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",

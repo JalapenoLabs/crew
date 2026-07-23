@@ -49,10 +49,11 @@ not a reimplementation of the agent.
   reports back. The commander does not take the field (does not write code).
 - **Substrate:** one Rust crate = a localhost message **broker** + a process
   **supervisor**. Two front-ends consume it (terminal CLI now, Seraphim later).
-- **Distribution:** the substrate ships as a Rust crate consumed by both
-  front-ends, published under the **JalapenoLabs** org. GitHub Packages has no
-  cargo registry, so the path is a private Git dependency (current lean),
-  crates.io (public), or a private cargo registry. See `docs/roadmap.md`.
+- **Distribution:** the substrate ships as the `crew-substrate` umbrella crate,
+  consumed under the **JalapenoLabs** org as a private Git dependency pinned to a
+  release tag (issue #35, decided): no registry to run, private by the repo's own
+  access control, and reversible. crates.io is deferred to 1.0. See
+  `docs/distribution.md` and `docs/architecture.md`.
 - **Transport:** a localhost broker (axum + SSE), not a shared file. The broker
   routes messages, filters your own messages out of your stream (no self-echo),
   and serves a compact rolling summary so a late joiner does not read the full
@@ -103,8 +104,6 @@ not a reimplementation of the agent.
 - Codex parity: same MCP surface via a CLI shim, or a Codex-native path?
 - Persistence: SQLite for the standalone broker vs in-memory with a log file.
   (Seraphim brings Postgres; the standalone need not.)
-- Distribution registry: private Git dependency vs a private cargo registry (see
-  `docs/roadmap.md` for the tradeoff).
 - Where the coworker-skill transport upgrade lands: a `crew` dependency, or a
   standalone drop-in the skill points at. Tracked as a separate effort.
 
@@ -149,6 +148,7 @@ docs/
   communication.md   topology, channels, message schema, context management
   observability.md   one event stream: task history, activity logs, live count
   stream-contract.md the public stream contract an external viz (Runewood) consumes
+  distribution.md    how the substrate is distributed (private Git dep) and consumed
   roles.md           the roster and the ownership model
   config.md          the declarative crew config `crew up` reads
   codex.md           the Codex adapter: the agent CLI shim and its MCP parity

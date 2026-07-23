@@ -11,9 +11,12 @@ resolver = "2"
 members = ["crates/*"]
 
 # Metadata every crate inherits, so version, license, and repository stay in one
-# place across the split (`field.workspace = true` in each member).
+# place across the split (`field.workspace = true` in each member). The single
+# workspace version is the version a consumer pins by tag `v<version>` when it takes
+# the substrate as a Git dependency (issue #35; see docs/distribution.md). It is
+# pre-1.0, so a minor bump may change the API until it stabilizes.
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
