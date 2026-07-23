@@ -15,7 +15,8 @@ The type is `crew_core::CrewConfig`; it is broker-agnostic and produces the per-
 commander = "commander"   # the lead and router the General briefs
 idle_stop = "10m"         # how long a role may be quiet before it is stopped
 token_budget = 5_000_000  # the crew-wide token ceiling (issue #54)
-repos = ["api", "web"]    # the repos in scope
+repos = ["api", "web"]    # the repos in scope, by name or path (issue #126)
+workspace = "."           # where named repos live; defaults to this config's dir (#126)
 worktrees = true          # give each role its own git worktree (issue #43)
 lane_enforcement = "warn" # what happens on an out-of-lane edit (issue #46)
 
@@ -61,7 +62,17 @@ Every field is optional and takes a default:
   roster entry so the General can raise the cap and restart it. Spend against budget rides
   the stream as a `budget` event, so a cap hit is never silent. See `docs/observability.md`
   (token budget).
-- `repos` defaults to empty.
+- `repos` defaults to empty. Each entry is a **path or a name** (issue #126). An
+  absolute path is used as-is; anything else, a bare name like `api` or a relative path
+  like `../api`, resolves under the **workspace root**, which defaults to this config
+  file's own directory. Anchoring to the config, not the shell's current directory, means
+  a name points at the same clone wherever `crew up` runs, so `repos = ["api", "web"]` in a
+  `crew.toml` at the root of a workspace of sibling clones finds `./api` and `./web` next
+  to it.
+- `workspace` sets the root a bare `repos` name resolves under (issue #126); it defaults
+  to the config file's own directory. Set it, absolute, or relative to the config, to point
+  at clones that live elsewhere: for example `workspace = ".."` when the config lives inside
+  one of the repos and the clones are its siblings. Absolute `repos` entries ignore it.
 - `worktrees` defaults to `false`. With it on and `repos` set, the supervisor gives
   each role its own git worktree of those repos (on a `crew/<role>` branch), so
   parallel roles never clobber each other's edits (issue #43). An unchanged worktree is

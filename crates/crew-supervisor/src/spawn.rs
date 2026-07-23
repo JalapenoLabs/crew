@@ -229,8 +229,9 @@ impl Supervisor {
         let server = locate_server()?;
         register_server(&server)?;
 
-        // The card-based entry has no config, so no repos and no worktree isolation.
-        let (prepared, _worktrees) = self.prepare(cards, None)?;
+        // The card-based entry has no config, so no repos and no worktree isolation;
+        // `config_dir` is unused without repos to resolve.
+        let (prepared, _worktrees) = self.prepare(cards, None, Path::new("."))?;
         let roster = RosterClient::new(self.broker.base_url());
         Crew::spawn(&roster, prepared)
     }
@@ -248,10 +249,14 @@ impl Supervisor {
     /// agent stopped; bring the unit online with [`Fleet::start_all`],
     /// which registers each role on the roster.
     ///
+    /// `config_dir` is the crew config file's own directory: the crew's `repos`
+    /// names resolve against it (issue #126), so a bare name means the same
+    /// repo wherever `crew up` runs.
+    ///
     /// # Errors
     /// Returns an error if the MCP server cannot be located or registered, or a
     /// card cannot be provisioned.
-    pub fn launch(&self, config: &CrewConfig) -> Result<Fleet> {
+    pub fn launch(&self, config: &CrewConfig, config_dir: &Path) -> Result<Fleet> {
         // One-time, unit-wide: make the crew tools available with no approval gate.
         let server = locate_server()?;
         register_server(&server)?;
@@ -259,7 +264,7 @@ impl Supervisor {
         let cards = config.to_cards(&self.broker);
         // With `worktrees` on, each role gets its own worktree of the crew's repos, and
         // the fleet cleans them up on stand-down.
-        let (prepared, worktrees) = self.prepare(&cards, Some(config))?;
+        let (prepared, worktrees) = self.prepare(&cards, Some(config), config_dir)?;
         let roster = RosterClient::new(self.broker.base_url());
         let policy = LifecyclePolicy {
             idle_timeout: config.idle_stop,
@@ -286,11 +291,14 @@ impl Supervisor {
         &self,
         cards: &[RoleCard],
         config: Option<&CrewConfig>,
+        config_dir: &Path,
     ) -> Result<(Vec<PreparedAgent>, Vec<Worktree>)> {
-        // Isolation is opt-in and needs repos to isolate.
+        // Isolation is opt-in and needs repos to isolate. Each `repos` entry is
+        // resolved to a path against the workspace root, anchored to the config's
+        // own directory, so a bare name works wherever `crew up` runs (issue #126).
         let repos: Vec<PathBuf> = config
             .filter(|config| config.worktrees)
-            .map(|config| config.repos.iter().map(PathBuf::from).collect())
+            .map(|config| config.repo_paths(config_dir))
             .unwrap_or_default();
 
         let mut prepared = Vec::with_capacity(cards.len());

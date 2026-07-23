@@ -17,6 +17,7 @@ use std::{
     backtrace::Backtrace,
     collections::BTreeSet,
     fmt::{self, Display, Formatter},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -92,8 +93,17 @@ pub struct CrewConfig {
     pub token_budget: Option<u64>,
     /// How long a role may be quiet before the supervisor idle-stops it.
     pub idle_stop: Duration,
-    /// The repos in scope for the crew (paths or names the operator supplies).
+    /// The repos in scope for the crew: each a path or a bare name, resolved to
+    /// a filesystem path by [`repo_paths`](CrewConfig::repo_paths) against the
+    /// [`workspace`](CrewConfig::workspace) root (issue #126).
     pub repos: Vec<String>,
+    /// The directory the crew's named repos live under, so a bare `repos` name
+    /// resolves to a concrete clone (issue #126). Defaults to the crew config
+    /// file's own directory; set it (absolute, or relative to the config) to
+    /// point at a workspace of sibling clones elsewhere, e.g. `..` when the
+    /// config lives inside one of the repos. Absolute `repos` entries ignore
+    /// it.
+    pub workspace: Option<PathBuf>,
     /// Whether each role works in its own git worktree of the crew's repos, so
     /// parallel roles never clobber each other's edits (issue #43). Off by
     /// default; opt a crew in with `worktrees = true`.
@@ -145,6 +155,7 @@ impl Default for CrewConfig {
             token_budget: None,
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
+            workspace: None,
             worktrees: false,
             lane_enforcement: LaneEnforcement::default(),
         }
@@ -239,6 +250,47 @@ impl CrewConfig {
             .filter_map(|spec| spec.token_cap.map(|cap| (spec.role.clone(), cap)))
             .collect();
         Budget::new(self.token_budget, caps)
+    }
+
+    /// The directory a bare `repos` name resolves under (issue #126).
+    ///
+    /// The [`workspace`](Self::workspace) field if set (used as-is when
+    /// absolute, else joined onto `config_dir`), otherwise `config_dir` itself,
+    /// the crew config file's own directory. Anchoring to the config, not the
+    /// current directory, is what makes a name mean the same repo wherever
+    /// `crew up` runs.
+    #[must_use]
+    pub fn workspace_root(&self, config_dir: &Path) -> PathBuf {
+        match &self.workspace {
+            Some(workspace) if workspace.is_absolute() => workspace.clone(),
+            Some(workspace) => config_dir.join(workspace),
+            None => config_dir.to_path_buf(),
+        }
+    }
+
+    /// Resolves the crew's `repos` to filesystem paths for worktree isolation
+    /// (issue #126).
+    ///
+    /// Each entry is a path or a name (the `repos` field, see
+    /// `docs/config.md`): an absolute path is taken as-is, and anything else, a
+    /// bare name like `api` or a relative path like `../api`, resolves under
+    /// the [`workspace_root`](Self::workspace_root). Purely a path join, so
+    /// a repo that does not exist is caught later, when the worktree is
+    /// created, with a clear error rather than here.
+    #[must_use]
+    pub fn repo_paths(&self, config_dir: &Path) -> Vec<PathBuf> {
+        let root = self.workspace_root(config_dir);
+        self.repos
+            .iter()
+            .map(|repo| {
+                let path = Path::new(repo);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    root.join(path)
+                }
+            })
+            .collect()
     }
 
     /// Validates the resolved config, returning the first problem it finds.
@@ -391,6 +443,7 @@ struct RawConfig {
     commander: Option<String>,
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
+    workspace: Option<PathBuf>,
     worktrees: Option<bool>,
     lane_enforcement: Option<LaneEnforcement>,
     roles: Option<Vec<RawRole>>,
@@ -442,6 +495,7 @@ impl RawConfig {
             token_budget: self.token_budget,
             idle_stop,
             repos: self.repos.unwrap_or_default(),
+            workspace: self.workspace,
             worktrees: self.worktrees.unwrap_or(false),
             lane_enforcement: self.lane_enforcement.unwrap_or_default(),
         })
@@ -552,6 +606,8 @@ enum ErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::{parse_duration, CrewConfig};
     use crate::{BrokerEndpoint, RoleId};
 
@@ -649,6 +705,58 @@ mod tests {
             "the commander card knows it leads"
         );
         assert!(!backend.is_commander(), "a specialist card does not");
+    }
+
+    #[test]
+    fn repo_names_resolve_under_the_config_directory_by_default() {
+        // A bare name anchors to the config file's own directory, so it means the
+        // same repo wherever `crew up` runs, not just from that directory (#126).
+        let config = CrewConfig::from_toml("repos = [\"api\", \"web\"]").unwrap();
+        assert_eq!(
+            config.repo_paths(Path::new("/workspace")),
+            [
+                PathBuf::from("/workspace/api"),
+                PathBuf::from("/workspace/web")
+            ],
+        );
+    }
+
+    #[test]
+    fn absolute_and_relative_repo_entries_are_paths_not_names() {
+        let config =
+            CrewConfig::from_toml("repos = [\"/opt/api\", \"../sibling\", \"nested/web\"]")
+                .unwrap();
+        assert_eq!(
+            config.repo_paths(Path::new("/workspace/crew")),
+            [
+                // Absolute: taken as-is, ignoring the workspace root.
+                PathBuf::from("/opt/api"),
+                // Relative: joined onto the workspace root (the config dir here).
+                PathBuf::from("/workspace/crew/../sibling"),
+                PathBuf::from("/workspace/crew/nested/web"),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_workspace_field_overrides_the_root_for_named_repos() {
+        // A relative `workspace` is anchored to the config dir: `..` points a
+        // config that lives inside a repo at the surrounding clones.
+        let relative = CrewConfig::from_toml("repos = [\"api\"]\nworkspace = \"..\"").unwrap();
+        assert_eq!(
+            relative.repo_paths(Path::new("/workspace/crew")),
+            [PathBuf::from("/workspace/crew/../api")],
+        );
+
+        // An absolute `workspace` is the root outright; an absolute repo entry
+        // still ignores it.
+        let absolute =
+            CrewConfig::from_toml("repos = [\"api\", \"/opt/x\"]\nworkspace = \"/clones\"")
+                .unwrap();
+        assert_eq!(
+            absolute.repo_paths(Path::new("/anywhere")),
+            [PathBuf::from("/clones/api"), PathBuf::from("/opt/x")],
+        );
     }
 
     #[test]
