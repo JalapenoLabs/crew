@@ -32,5 +32,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-# Drive the router directly in tests (ServiceExt::oneshot) without binding a socket.
+# Drive the router directly in unit tests (ServiceExt::oneshot) without a socket.
 tower = { version = "0.5", features = ["util"] }
+# Drive a real in-process broker over HTTP + SSE in the integration suite (issue #16).
+# http-only (no TLS backend) since the broker is localhost, so the suite needs no
+# system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
