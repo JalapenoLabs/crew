@@ -32,7 +32,11 @@ use axum::{
 };
 use crew_core::{ChannelId, Event, RoleId, Sender};
 use serde::Deserialize;
-use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
+use tokio_stream::{
+    wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
+    Stream, StreamExt,
+};
+use tracing::{event, Level};
 
 use crate::{
     error::ApiError,
@@ -156,21 +160,50 @@ fn role_stream(
         })
         .collect();
 
-    let live = BroadcastStream::new(receiver).filter_map(move |result| {
-        // A lagged receiver skips the gap here; the client replays it on reconnect.
-        let Ok(Sequenced { seq, event }) = result else {
-            return None;
-        };
-        // Only events after the snapshot; earlier ones are already in `replay`.
-        if seq >= live_from && keep(&event, &role) {
-            to_sse(seq, &event).map(Ok)
-        } else {
-            None
-        }
-    });
+    let live = BroadcastStream::new(receiver)
+        .filter_map(move |result| map_live_event(result, &role, live_from, keep));
 
     let stream = tokio_stream::iter(replay).chain(live);
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Maps one broadcast result to a live SSE item for `role`, surfacing a lag.
+///
+/// A [`Lagged`](BroadcastStreamRecvError::Lagged) receiver has fallen behind
+/// the broadcast capacity and skipped events. Observability is a first-class
+/// output, so the lag is logged (`broker.inbox.lagged`, with the role and
+/// skipped count) rather than dropped silently, and the gap is skipped here:
+/// the client recovers it from its `Last-Event-ID` on reconnect, so nothing is
+/// lost, but a recurring lag tells the operator the broadcast capacity is too
+/// small under load. Otherwise the event is delivered when it passes `keep` and
+/// is newer than the pre-subscription snapshot (`live_from`); earlier ones are
+/// already in the replay.
+fn map_live_event(
+    result: Result<Sequenced, BroadcastStreamRecvError>,
+    role: &RoleId,
+    live_from: u64,
+    keep: Keep,
+) -> Option<Result<SseEvent, Infallible>> {
+    let Sequenced { seq, event } = match result {
+        Ok(sequenced) => sequenced,
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            event!(
+                name: "broker.inbox.lagged",
+                Level::WARN,
+                crew.role = %role,
+                skipped,
+                "inbox subscriber for `{{crew.role}}` lagged off the broadcast and skipped \
+                 {{skipped}} events; the client replays them from Last-Event-ID. Raise the \
+                 broadcast capacity if this recurs under load.",
+            );
+            return None;
+        }
+    };
+    if seq >= live_from && keep(&event, role) {
+        to_sse(seq, &event).map(Ok)
+    } else {
+        None
+    }
 }
 
 /// Parses the `Last-Event-ID` reconnect cursor from the request headers.
@@ -240,11 +273,15 @@ mod tests {
     };
     use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender};
     use serde_json::{json, Value};
-    use tokio_stream::StreamExt;
+    use tokio_stream::{wrappers::errors::BroadcastStreamRecvError, StreamExt};
     use tower::ServiceExt;
 
-    use super::{channel_addresses_role, event_reaches_role};
-    use crate::{api, config::Config, state::AppState};
+    use super::{channel_addresses_role, event_reaches_role, map_live_event};
+    use crate::{
+        api,
+        config::Config,
+        state::{AppState, Sequenced},
+    };
 
     fn role(name: &str) -> RoleId {
         RoleId::new(name)
@@ -308,6 +345,56 @@ mod tests {
             ..message_from("backend", "all-units")
         };
         assert!(event_reaches_role(&from_general, &role("backend")));
+    }
+
+    #[test]
+    fn a_lagged_receiver_skips_the_gap_rather_than_delivering_it() {
+        // A lagged receiver has fallen behind the broadcast capacity; the gap is
+        // skipped (the client replays it from Last-Event-ID) and logged as
+        // `broker.inbox.lagged`.
+        let mapped = map_live_event(
+            Err(BroadcastStreamRecvError::Lagged(7)),
+            &role("backend"),
+            0,
+            event_reaches_role,
+        );
+        assert!(
+            mapped.is_none(),
+            "a lag skips the gap here rather than delivering it out of order"
+        );
+    }
+
+    #[test]
+    fn a_live_event_is_delivered_only_when_it_passes_the_filter_and_is_after_the_snapshot() {
+        // Addressed to backend and after the snapshot: delivered.
+        let addressed = Sequenced {
+            seq: 3,
+            event: message_from("frontend", "@backend"),
+        };
+        assert!(
+            map_live_event(Ok(addressed), &role("backend"), 0, event_reaches_role).is_some(),
+            "a live, addressed event is delivered",
+        );
+
+        // Its own message: filtered out even though it is live.
+        let own = Sequenced {
+            seq: 3,
+            event: message_from("backend", "all-units"),
+        };
+        assert!(
+            map_live_event(Ok(own), &role("backend"), 0, event_reaches_role).is_none(),
+            "a role never receives its own message",
+        );
+
+        // Before the snapshot (already in the replay): skipped, not delivered twice.
+        let early = Sequenced {
+            seq: 0,
+            event: message_from("frontend", "@backend"),
+        };
+        assert!(
+            map_live_event(Ok(early), &role("backend"), 5, event_reaches_role).is_none(),
+            "an event before the live snapshot is already in the replay",
+        );
     }
 
     /// Posts a note from `from` to `channel`, asserting it is accepted. The
