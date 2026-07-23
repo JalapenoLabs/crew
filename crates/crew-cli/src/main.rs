@@ -7,8 +7,9 @@
 //!   (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue #28):
 //!   `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew lane`, the
-//!   done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), and the
-//!   situation-board pair `crew board` / `crew record` (issue #49) act as the
+//!   done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), the
+//!   situation-board pair `crew board` / `crew record` (issue #49), and `crew briefing`
+//!   (issue #50) act as the
 //!   role the
 //!   environment names, mapping its I/O onto the broker the same way the MCP tools do
 //!   (see `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered inbox
@@ -176,6 +177,15 @@ enum Command {
         #[arg(long, value_name = "SECTION")]
         section: Option<String>,
     },
+    /// Get this role's bounded briefing packet: catch up without reading the whole log.
+    Briefing {
+        /// Narrow the summary to this task id, if you have one.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// Cap the packet size in bytes (defaults to a few KB).
+        #[arg(long, value_name = "BYTES")]
+        budget: Option<usize>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -221,5 +231,6 @@ fn main() -> Result<()> {
             retract,
         } => shim::record(&key, section.as_deref(), body.as_deref(), retract),
         Command::Board { section } => shim::board(section.as_deref()),
+        Command::Briefing { task, budget } => shim::briefing(task.as_deref(), budget),
     }
 }

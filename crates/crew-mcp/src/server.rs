@@ -11,7 +11,9 @@ use std::io::{BufRead, Write};
 use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
-use crate::broker::{BoardSnapshot, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing};
+use crate::broker::{
+    BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, RosterSnapshot, Standing,
+};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -182,6 +184,11 @@ impl Server {
                     self.broker.record(key, section, body)
                 }
             }
+            "crew_briefing" => Ok(render_briefing(
+                &self
+                    .broker
+                    .briefing(str_arg(arguments, "task"), usize_arg(arguments, "budget"))?,
+            )),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
@@ -201,11 +208,12 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`: coordination, then done-gate, then board tools.
+/// The tool catalog for `tools/list`: coordination, done-gate, board, then briefing.
 fn tool_catalog() -> Value {
     let mut tools = coordination_tools();
     tools.extend(done_gate_tools());
     tools.extend(board_tools());
+    tools.extend(briefing_tools());
     Value::Array(tools)
 }
 
@@ -379,6 +387,25 @@ fn board_tools() -> Vec<Value> {
     ]
 }
 
+/// The briefing tool: catch up with a bounded packet instead of the whole log.
+fn briefing_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "crew_briefing",
+        "description": "Get your bounded briefing packet: the current decision board and a \
+            rolling summary scoped to your lane (what has been said to you and about your \
+            work), instead of reading the whole log. Call this first thing when you boot to \
+            catch up in seconds. `budget` optionally caps the packet size in bytes; `task` \
+            optionally narrows the summary to one task's id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget": { "type": "integer", "description": "Cap the packet size in bytes (defaults to a few KB)." },
+                "task": { "type": "string", "description": "Narrow the summary to this task id, if you have one." }
+            }
+        }
+    })]
+}
+
 /// A JSON-RPC success response, moving `result` into the envelope.
 fn rpc_result(id: &Value, result: Value) -> Value {
     Value::Object(serde_json::Map::from_iter([
@@ -410,6 +437,14 @@ fn str_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
 /// A boolean argument, if present and a JSON boolean.
 fn bool_arg(arguments: &Value, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Value::as_bool)
+}
+
+/// A non-negative integer argument as a `usize`, if present and in range.
+fn usize_arg(arguments: &Value, key: &str) -> Option<usize> {
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 /// A string-array argument as owned strings, dropping blanks; empty if absent.
@@ -548,6 +583,19 @@ fn render_board(snapshot: &BoardSnapshot) -> String {
     )
 }
 
+/// Renders the briefing packet an agent reads on boot: the bounded text plus its size.
+fn render_briefing(packet: &BriefingPacket) -> String {
+    let note = if packet.capped {
+        format!(
+            "\n\n[briefing capped to {} of {} bytes; call crew_board or crew_inbox for more]",
+            packet.size, packet.budget
+        )
+    } else {
+        format!("\n\n[briefing: {} of {} bytes]", packet.size, packet.budget)
+    };
+    format!("{}{note}", packet.text)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -642,7 +690,8 @@ mod tests {
                 "crew_verdict",
                 "crew_gate",
                 "crew_board",
-                "crew_record"
+                "crew_record",
+                "crew_briefing"
             ]
         );
         // Each tool documents itself and its arguments.

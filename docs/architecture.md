@@ -49,6 +49,10 @@ Planned surface (illustrative, not final):
   entry (issue #49): the crew's durable memory of decisions, interfaces, and gotchas. It
   is a projection of the `board` events, rebuilt from the log on a restart. See
   `docs/communication.md` (context management).
+- `GET /briefing?role=<role>` assembles the bounded new-role briefing packet (issue #50):
+  the decision board plus a rolling summary scoped to the role's timeline, rendered to
+  text and capped to a byte budget, so a fresh role catches up without reading the whole
+  log. See `docs/roles.md` (the briefing packet).
 
 Why a broker beats the old shared file:
 
@@ -161,8 +165,8 @@ newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one o
 per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
 role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
 config. It registers the role on the roster at boot and is a thin client over the
-broker's HTTP API; it never touches the store. It exposes ten tools (issues #17,
-#27, #46, #47, #49):
+broker's HTTP API; it never touches the store. It exposes eleven tools (issues #17,
+#27, #46, #47, #49, #50):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct
@@ -195,6 +199,10 @@ broker's HTTP API; it never touches the store. It exposes ten tools (issues #17,
   a gotcha, keyed by a stable topic); `crew_board` reads it. A role reads the board before
   re-deriving a settled decision. It is a projection of the durable `board` events, so it
   survives an idle-stop or a restart. See `docs/roles.md` (the situation board).
+- `crew_briefing` returns the bounded new-role briefing packet (issue #50): the decision
+  board plus a rolling summary scoped to the role's lane, capped to a byte budget. A role
+  calls it first on boot to catch up in seconds instead of reading the whole log. See
+  `docs/roles.md` (the briefing packet).
 
 Each tool documents itself and its arguments in `tools/list` so an agent calls it
 right the first time. A tool failure comes back as an `isError` result the agent
@@ -202,8 +210,8 @@ reads, not a protocol error.
 
 MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
 the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, `crew roster`,
-`crew lane`, the done-gate trio `crew submit` / `crew verdict` / `crew gate`, and the
-situation-board pair `crew board` / `crew record` act as
+`crew lane`, the done-gate trio `crew submit` / `crew verdict` / `crew gate`, the
+situation-board pair `crew board` / `crew record`, and `crew briefing` act as
 the role the environment names and reach the broker through the
 **same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
 broker identically. A Codex agent registers on boot and then sends and reads through

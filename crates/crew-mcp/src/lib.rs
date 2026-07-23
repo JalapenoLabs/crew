@@ -11,7 +11,9 @@
 //! - `crew_submit` / `crew_verdict` / `crew_gate` (the adversarial done-gate: submit
 //!   work for verification, judge a teammate's work, and read the gate),
 //! - `crew_board` / `crew_record` (the shared situation board: read the crew's durable
-//!   memory, and record or retract a decision, interface, or gotcha).
+//!   memory, and record or retract a decision, interface, or gotcha),
+//! - `crew_briefing` (the bounded new-role briefing packet: the board and a lane-scoped
+//!   rolling summary, so a fresh role catches up without reading the whole log).
 //!
 //! The server is a thin client over the broker's HTTP + SSE API ([`crew_broker`]);
 //! it never touches the store. It acts as one role, configured when the supervisor
@@ -24,7 +26,7 @@ mod broker;
 mod server;
 
 pub use broker::{
-    BoardEntryView, BoardSnapshot, Broker, GateSnapshot, GateTask, InboxItem, RoleEntry,
-    RosterSnapshot, Standing,
+    BoardEntryView, BoardSnapshot, BriefingPacket, Broker, GateSnapshot, GateTask, InboxItem,
+    RoleEntry, RosterSnapshot, Standing,
 };
 pub use server::Server;

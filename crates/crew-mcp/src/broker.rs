@@ -334,6 +334,38 @@ impl Broker {
         }
     }
 
+    /// Fetches this role's bounded new-role briefing packet (issue #50).
+    ///
+    /// The packet is the current decision board plus a rolling summary scoped to the
+    /// role's own timeline, capped to a byte budget, so a freshly spawned role catches up
+    /// in seconds without reading the whole log. `task` optionally narrows the summary,
+    /// and `budget` overrides the byte cap.
+    ///
+    /// # Errors
+    /// Returns a message if the broker cannot be reached or its response is malformed.
+    pub fn briefing(
+        &self,
+        task: Option<&str>,
+        budget: Option<usize>,
+    ) -> Result<BriefingPacket, String> {
+        let url = format!("{}/briefing", self.base);
+        let mut request = self.agent.get(&url).query("role", self.role.as_str());
+        if let Some(task) = task {
+            request = request.query("task", task);
+        }
+        let budget = budget.map(|budget| budget.to_string());
+        if let Some(budget) = &budget {
+            request = request.query("budget", budget);
+        }
+        let text = request
+            .call()
+            .map_err(|err| self.explain(err))?
+            .into_string()
+            .map_err(|err| format!("could not read the broker response: {err}"))?;
+        serde_json::from_str(&text)
+            .map_err(|err| format!("could not parse the broker response: {err}"))
+    }
+
     /// Posts a JSON `payload` to `path`, discarding the body on success.
     fn post_json(&self, path: &str, payload: &Value) -> Result<(), String> {
         let url = format!("{}{path}", self.base);
@@ -518,6 +550,19 @@ pub struct BoardEntryView {
     pub author: String,
     /// The entry's content.
     pub body: String,
+}
+
+/// The bounded new-role briefing packet from `GET /briefing` (issue #50).
+#[derive(Debug, Deserialize)]
+pub struct BriefingPacket {
+    /// The rendered packet text a role reads on boot.
+    pub text: String,
+    /// The packet's size in bytes.
+    pub size: usize,
+    /// The byte budget it was held to.
+    pub budget: usize,
+    /// Whether content was dropped to fit the budget.
+    pub capped: bool,
 }
 
 /// The shape of `GET /roster`.
