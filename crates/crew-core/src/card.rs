@@ -73,8 +73,21 @@ pub struct RoleCard {
     /// Free-form prose. Empty means the role falls back to the crew's standard bar.
     #[serde(default)]
     pub acceptance: String,
+    /// The role that leads and routes the unit: the hub of the hub-and-spoke topology.
+    ///
+    /// Every card names the commander so a role knows where an unaddressed message
+    /// goes (to the commander) and whether it is itself the commander (see
+    /// [`is_commander`](RoleCard::is_commander)). Defaults to `commander`, the
+    /// conventional name, when a hand-authored card omits it.
+    #[serde(default = "default_commander")]
+    pub commander: RoleId,
     /// How to reach the unit: the broker's address.
     pub broker: BrokerEndpoint,
+}
+
+/// The conventional commander name, used when a card does not name one.
+fn default_commander() -> RoleId {
+    RoleId::new("commander")
 }
 
 impl RoleCard {
@@ -90,8 +103,26 @@ impl RoleCard {
             role,
             owned_paths,
             acceptance: acceptance.into(),
+            commander: default_commander(),
             broker,
         }
+    }
+
+    /// Sets the crew's commander, returning the card so calls can chain.
+    ///
+    /// The supervisor builds cards from the crew config, which names the commander
+    /// (see [`CrewConfig`](crate::CrewConfig)); a bare [`new`](RoleCard::new) card
+    /// falls back to the conventional `commander`.
+    #[must_use]
+    pub fn with_commander(mut self, commander: RoleId) -> Self {
+        self.commander = commander;
+        self
+    }
+
+    /// Whether this card's role is the commander, the unit's lead and router.
+    #[must_use]
+    pub fn is_commander(&self) -> bool {
+        self.role == self.commander
     }
 
     /// Parses a card from its TOML form.
@@ -157,14 +188,41 @@ impl RoleCard {
         }
 
         out.push('\n');
-        let _ = write!(
+        let _ = writeln!(
             out,
             "Reach the unit through the crew MCP tools: crew_send to message a teammate or \
              channel, crew_inbox to read what is addressed to you, crew_roster to see the team. \
              The broker is at {}. The coordination rules live in crew; do not restate them.",
             self.broker.base_url(),
         );
+
+        out.push('\n');
+        out.push_str(&self.topology_briefing());
         out
+    }
+
+    /// The role's place in the hub-and-spoke topology: commander duties or how a
+    /// specialist reaches its commander (see `docs/communication.md`).
+    fn topology_briefing(&self) -> String {
+        if self.is_commander() {
+            return "You are the commander: the unit's lead and router. The General briefs you. \
+                Decompose the work and issue an order to each specialist with crew_order (name \
+                the role, a title, the scope, the paths it owns, and the acceptance bar). \
+                Arbitrate at lane boundaries and report progress back to the General. You route \
+                and decide; you do not take the field, so you write no feature code yourself. A \
+                direct peer message and the rare all-units broadcast are available but are not \
+                the default."
+                .to_owned();
+        }
+
+        format!(
+            "Your commander is {commander}: brief it and report to it by default (a crew_send \
+             with no `to` or `channel` reaches the commander). It may send you an order; work it \
+             within your lane and report status back. For a tight loop you may direct-message a \
+             peer (crew_send with `to`), and `all-units` reaches the whole unit for the rare \
+             broadcast.",
+            commander = self.commander,
+        )
     }
 }
 
@@ -371,5 +429,63 @@ mod tests {
             !briefing.contains("Acceptance bar:"),
             "omits the acceptance line when there is none",
         );
+    }
+
+    #[test]
+    fn the_commander_briefing_states_its_duties_and_fan_out_handle() {
+        // A card whose role is the commander gets the commander's briefing.
+        let card = RoleCard::new(
+            RoleId::new("commander"),
+            Vec::new(),
+            String::new(),
+            BrokerEndpoint::new("127.0.0.1", 2739),
+        );
+        assert!(card.is_commander(), "the role matches the commander");
+        let briefing = card.briefing();
+        assert!(briefing.contains("Decompose"), "states decomposition duty");
+        assert!(briefing.contains("Arbitrate"), "states arbitration duty");
+        assert!(
+            briefing.contains("crew_order"),
+            "gives the handle to issue orders",
+        );
+    }
+
+    #[test]
+    fn a_specialist_briefing_names_its_commander() {
+        // The default crew names the commander `commander`; a specialist is told so.
+        let card = sample();
+        assert!(!card.is_commander(), "backend is not the commander");
+        let briefing = card.briefing();
+        assert!(
+            briefing.contains("Your commander is commander"),
+            "names the commander to brief and report to",
+        );
+        assert!(
+            briefing.contains("reaches the commander"),
+            "explains the default addressing",
+        );
+    }
+
+    #[test]
+    fn with_commander_sets_a_configured_commander_and_round_trips() {
+        // A crew may name a different commander; the card carries it and survives TOML.
+        let card = sample().with_commander(RoleId::new("lead"));
+        assert_eq!(card.commander, RoleId::new("lead"));
+        assert!(!card.is_commander(), "backend is not the `lead` commander");
+
+        let parsed = RoleCard::from_toml(&card.to_toml().unwrap()).unwrap();
+        assert_eq!(parsed, card, "the commander survives a TOML round trip");
+        assert!(
+            parsed.briefing().contains("Your commander is lead"),
+            "the briefing names the configured commander",
+        );
+    }
+
+    #[test]
+    fn a_card_without_a_commander_defaults_to_the_conventional_one() {
+        // A hand-authored card that omits the commander gets the conventional default.
+        let toml = "role = \"qa\"\n\n[broker]\nhost = \"127.0.0.1\"\nport = 2739\n";
+        let card = RoleCard::from_toml(toml).unwrap();
+        assert_eq!(card.commander, RoleId::new("commander"));
     }
 }

@@ -60,7 +60,11 @@ fn a_role_boots_from_its_card_and_reaches_the_broker() {
     // Boot exactly as the binary does: parse the card with the shared loader, then
     // build the broker client straight from the card's address.
     let card = RoleCard::from_toml(&card_toml).expect("the card parses");
-    let broker = Broker::new(card.broker.base_url(), card.role.clone());
+    let broker = Broker::new(
+        card.broker.base_url(),
+        card.role.clone(),
+        card.commander.clone(),
+    );
 
     // The briefing proves the role boots knowing its lane and where the unit is.
     let briefing = card.briefing();

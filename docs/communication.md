@@ -32,6 +32,17 @@ escape valves stay open:
 The General addresses the commander by default and can drop into any role's
 channel directly when they want.
 
+This default is one rule the whole crew shares (issue #27): `Channel::resolve`
+(`crew-core`) resolves a message's target from an optional role, an optional
+channel, and the crew's commander. A named role wins; otherwise a named channel is
+parsed; otherwise the message goes to the commander. Both the General's front-end
+and an agent's `crew_send` obey it, so "brief the commander by default" means the
+same everywhere. Every role card names the crew's commander (from the config, issue
+#25), so each agent boots knowing where an unaddressed message goes and whether it
+is itself the commander. The commander fans work out with `order` messages, one per
+specialist (the `crew_order` MCP tool); the peer direct message and the rare
+`all-units` broadcast stay open as the escape valves above.
+
 ## Channels
 
 - `all-units` reaches every live role. Reserved for genuine team-wide orders.

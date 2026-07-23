@@ -101,6 +101,51 @@ impl Channel {
             Self::Pair(first, second) => first == role || second == role,
         }
     }
+
+    /// Resolves the channel a message addresses under the hub-and-spoke default.
+    ///
+    /// This is the one addressing rule the whole crew obeys (see
+    /// `docs/communication.md`), so "brief the commander by default" means the same
+    /// whether the General's front-end or an agent's `crew_send` sends it:
+    ///
+    /// - a non-blank `to` names a role for a direct message and wins if given;
+    /// - otherwise a non-blank `channel` is parsed (`all-units`, a `@role`, or a pair);
+    /// - if neither is given, the message goes to the `commander`.
+    ///
+    /// Returns `None` when `to` is not a plain role name, or `channel` is given but is
+    /// not a recognized channel, so an unroutable target is rejected, not guessed.
+    ///
+    /// # Examples
+    /// ```
+    /// use crew_core::{Channel, RoleId};
+    ///
+    /// let commander = RoleId::new("commander");
+    ///
+    /// // Neither given: the brief reaches the commander.
+    /// assert_eq!(
+    ///     Channel::resolve(None, None, &commander),
+    ///     Some(Channel::Direct(commander.clone())),
+    /// );
+    /// // A named role wins: a direct message to that role.
+    /// assert_eq!(
+    ///     Channel::resolve(Some("backend"), None, &commander),
+    ///     Some(Channel::Direct(RoleId::new("backend"))),
+    /// );
+    /// // A channel name is parsed.
+    /// assert_eq!(Channel::resolve(None, Some("all-units"), &commander), Some(Channel::AllUnits));
+    /// // An unrecognized channel is rejected.
+    /// assert_eq!(Channel::resolve(None, Some("nonsense"), &commander), None);
+    /// ```
+    #[must_use]
+    pub fn resolve(to: Option<&str>, channel: Option<&str>, commander: &RoleId) -> Option<Self> {
+        let to = to.map(str::trim).filter(|name| !name.is_empty());
+        let channel = channel.map(str::trim).filter(|name| !name.is_empty());
+        match (to, channel) {
+            (Some(role), _) => is_plain_role(role).then(|| Self::Direct(RoleId::new(role))),
+            (None, Some(name)) => Self::parse(name),
+            (None, None) => Some(Self::Direct(commander.clone())),
+        }
+    }
 }
 
 impl fmt::Display for Channel {
@@ -184,6 +229,44 @@ mod tests {
         ] {
             assert_eq!(Channel::parse(bad), None, "{bad:?} must not parse");
         }
+    }
+
+    #[test]
+    fn resolve_follows_the_hub_and_spoke_default() {
+        let commander = role("commander");
+
+        // Neither target given: the message reaches the commander.
+        assert_eq!(
+            Channel::resolve(None, None, &commander),
+            Some(Channel::Direct(commander.clone())),
+            "an unaddressed message defaults to the commander",
+        );
+        // A blank target is treated as absent, so it still defaults to the commander.
+        assert_eq!(
+            Channel::resolve(Some("  "), Some("  "), &commander),
+            Some(Channel::Direct(commander.clone())),
+        );
+
+        // A named role wins over the default and over a channel.
+        assert_eq!(
+            Channel::resolve(Some("backend"), Some("all-units"), &commander),
+            Some(Channel::Direct(role("backend"))),
+            "a direct `to` takes precedence",
+        );
+
+        // A channel name resolves to its parsed meaning.
+        assert_eq!(
+            Channel::resolve(None, Some("all-units"), &commander),
+            Some(Channel::AllUnits),
+        );
+        assert_eq!(
+            Channel::resolve(None, Some("frontend+backend"), &commander),
+            Channel::pair(role("frontend"), role("backend")),
+        );
+
+        // An unroutable target is rejected rather than guessed.
+        assert_eq!(Channel::resolve(None, Some("nonsense"), &commander), None);
+        assert_eq!(Channel::resolve(Some("a+b"), None, &commander), None);
     }
 
     #[test]

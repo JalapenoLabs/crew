@@ -30,7 +30,11 @@ fn main() -> Result<()> {
     // lane; stdout is reserved for the JSON-RPC protocol.
     eprintln!("{}", card.briefing());
 
-    let broker = Broker::new(card.broker.base_url(), card.role.clone());
+    let broker = Broker::new(
+        card.broker.base_url(),
+        card.role.clone(),
+        card.commander.clone(),
+    );
 
     // Reach the broker at boot: announce the role and its lane on the roster. A
     // failure is reported but not fatal, so a briefly unavailable broker does not
