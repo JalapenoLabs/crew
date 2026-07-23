@@ -32,7 +32,9 @@ use std::fmt::{self, Display, Formatter, Write as _};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::LaneEnforcement;
 use crate::id::RoleId;
+use crate::lane::path_in_lane;
 
 /// The environment variable naming the role card a spawned agent boots from.
 ///
@@ -81,6 +83,10 @@ pub struct RoleCard {
     /// conventional name, when a hand-authored card omits it.
     #[serde(default = "default_commander")]
     pub commander: RoleId,
+    /// How the crew enforces this role's lane: whether an out-of-lane edit warns,
+    /// blocks, or is unchecked (issue #46). Defaults to `warn`.
+    #[serde(default)]
+    pub lane_enforcement: LaneEnforcement,
     /// How to reach the unit: the broker's address.
     pub broker: BrokerEndpoint,
 }
@@ -104,8 +110,25 @@ impl RoleCard {
             owned_paths,
             acceptance: acceptance.into(),
             commander: default_commander(),
+            lane_enforcement: LaneEnforcement::default(),
             broker,
         }
+    }
+
+    /// Sets how the crew enforces this role's lane, returning the card so calls chain.
+    #[must_use]
+    pub fn with_lane_enforcement(mut self, enforcement: LaneEnforcement) -> Self {
+        self.lane_enforcement = enforcement;
+        self
+    }
+
+    /// Whether `path` is within this role's owned lane (issue #46).
+    ///
+    /// A path outside every owned boundary is out of lane; a role that owns no lane is
+    /// unrestricted. See [`path_in_lane`](crate::path_in_lane).
+    #[must_use]
+    pub fn owns(&self, path: &str) -> bool {
+        path_in_lane(&self.owned_paths, path)
     }
 
     /// Sets the crew's commander, returning the card so calls can chain.
@@ -195,6 +218,16 @@ impl RoleCard {
              The broker is at {}. The coordination rules live in crew; do not restate them.",
             self.broker.base_url(),
         );
+
+        if !self.owned_paths.is_empty() && self.lane_enforcement != LaneEnforcement::Off {
+            out.push('\n');
+            out.push_str(
+                "Stay in your lane. Before you edit a file outside your owned paths, check it \
+                 with crew_lane. An out-of-lane edit is reported to the unit and, under a \
+                 blocking policy, refused: route a genuine cross-lane change through the \
+                 commander (crew_send), never a silent edit.\n",
+            );
+        }
 
         out.push('\n');
         out.push_str(
@@ -434,6 +467,10 @@ mod tests {
             "gives the broker address"
         );
         assert!(briefing.contains("crew_send"), "points at the MCP tools");
+        assert!(
+            briefing.contains("Stay in your lane") && briefing.contains("crew_lane"),
+            "tells a role with a lane and enforcement on to stay in it"
+        );
         assert!(
             briefing.contains("redirect") && briefing.contains("belay"),
             "tells the role to honor the General's redirect and belay"

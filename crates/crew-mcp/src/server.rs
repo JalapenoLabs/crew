@@ -8,6 +8,7 @@
 
 use std::io::{BufRead, Write};
 
+use crew_core::LaneEnforcement;
 use serde_json::{json, Value};
 
 use crate::broker::{Broker, InboxItem, LedgerItem, RosterSnapshot, Standing};
@@ -22,13 +23,26 @@ const SERVER_NAME: &str = "crew-mcp";
 #[derive(Debug)]
 pub struct Server {
     broker: Broker,
+    /// The role's owned lane, for `crew_lane` (issue #46).
+    owned_paths: Vec<String>,
+    /// How the crew enforces this role's lane.
+    lane_enforcement: LaneEnforcement,
 }
 
 impl Server {
-    /// Builds a server that dispatches tool calls to `broker`.
+    /// Builds a server that dispatches tool calls to `broker`, enforcing the role's
+    /// lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
     #[must_use]
-    pub fn new(broker: Broker) -> Self {
-        Self { broker }
+    pub fn new(
+        broker: Broker,
+        owned_paths: Vec<String>,
+        lane_enforcement: LaneEnforcement,
+    ) -> Self {
+        Self {
+            broker,
+            owned_paths,
+            lane_enforcement,
+        }
     }
 
     /// Runs the stdio JSON-RPC loop, reading requests and writing responses, until
@@ -123,6 +137,12 @@ impl Server {
             }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
             "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
+            "crew_lane" => {
+                let path =
+                    str_arg(arguments, "path").ok_or("crew_lane requires a `path` to check")?;
+                self.broker
+                    .check_lane(&self.owned_paths, self.lane_enforcement, path)
+            }
             "crew_claim" => {
                 let task =
                     str_arg(arguments, "task").ok_or("crew_claim requires a `task` to claim")?;
@@ -152,10 +172,17 @@ fn initialize(params: Option<&Value>) -> Value {
     })
 }
 
-/// The tool catalog for `tools/list`, with docs written for a first-try correct call.
+/// The tool catalog for `tools/list`: the coordination tools, then the ledger tools.
 fn tool_catalog() -> Value {
-    json!([
-        {
+    let mut tools = coordination_tools();
+    tools.extend(ledger_tools());
+    Value::Array(tools)
+}
+
+/// The coordination tools: message, order, read the inbox and roster, and check a lane.
+fn coordination_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "crew_send",
             "description": "Send a message to a teammate or a channel, as your role. \
                 By default it goes to the commander (the unit's router), so an unaddressed \
@@ -174,8 +201,8 @@ fn tool_catalog() -> Value {
                 },
                 "required": ["body"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "crew_order",
             "description": "Issue an order: assign a scoped task to one specialist, as your \
                 role. This is the commander's fan-out handle for decomposing the General's \
@@ -199,23 +226,44 @@ fn tool_catalog() -> Value {
                 },
                 "required": ["to", "title"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "crew_inbox",
             "description": "Read the messages addressed to you since you last called this. \
                 Returns messages on your direct `@role` channel, any pair channel you belong \
                 to, and `all-units`, and never your own. Call it to catch up on what teammates \
                 have sent you.",
             "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
+        }),
+        json!({
             "name": "crew_roster",
             "description": "List the unit's roles: each teammate, the paths (lanes) it owns, \
                 and whether it is working, idle, stopped, or dead. Use it to see who is on the \
                 team and what they own before sending or claiming work.",
             "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
+        }),
+        json!({
+            "name": "crew_lane",
+            "description": "Check whether a file `path` is inside your owned lane before you \
+                edit it, so you do not wander into a teammate's lane. An in-lane path is yours: \
+                proceed. An out-of-lane path is reported to the unit; do not edit it silently, \
+                route the change through the commander (crew_send) instead. Under a blocking \
+                policy the edit is refused. Call it before editing outside your obvious lane.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "The repo-relative file path you are about to edit." }
+                },
+                "required": ["path"]
+            }
+        }),
+    ]
+}
+
+/// The work-ledger tools: claim a task or move a claim forward, and read the ledger.
+fn ledger_tools() -> Vec<Value> {
+    vec![
+        json!({
             "name": "crew_claim",
             "description": "Claim a piece of work before you start it, so no two roles touch \
                 the same work. `task` is a stable key the crew agrees on (a path, a feature, an \
@@ -236,14 +284,14 @@ fn tool_catalog() -> Value {
                 },
                 "required": ["task"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "crew_ledger",
             "description": "Read the work ledger: every claimed task, who owns it, and its \
                 state. Check it before claiming, so you never grab work a teammate already holds.",
             "inputSchema": { "type": "object", "properties": {} }
-        }
-    ])
+        }),
+    ]
 }
 
 /// A JSON-RPC success response, moving `result` into the envelope.
@@ -380,11 +428,15 @@ mod tests {
 
     /// A server whose broker points nowhere; the protocol paths under test never call it.
     fn server() -> Server {
-        Server::new(Broker::new(
-            "http://127.0.0.1:1",
-            RoleId::new("backend"),
-            RoleId::new("commander"),
-        ))
+        Server::new(
+            Broker::new(
+                "http://127.0.0.1:1",
+                RoleId::new("backend"),
+                RoleId::new("commander"),
+            ),
+            vec!["api/".to_owned()],
+            crew_core::LaneEnforcement::Warn,
+        )
     }
 
     fn handle(server: &mut Server, message: &Value) -> Option<Value> {
@@ -455,6 +507,7 @@ mod tests {
                 "crew_order",
                 "crew_inbox",
                 "crew_roster",
+                "crew_lane",
                 "crew_claim",
                 "crew_ledger"
             ]

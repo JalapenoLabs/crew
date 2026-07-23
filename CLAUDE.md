@@ -87,9 +87,12 @@ not a reimplementation of the agent.
 - **Coordination robustness.** Parallel roles work in isolated git worktrees
   (`worktrees` in the crew config, issue #43) and integrate through a deliberate step;
   a commander-maintained work ledger with claims prevents collisions (`crew_claim` /
-  `crew_ledger`, issue #45); lane ownership is enforced; nothing is done until an
-  adversarial gate fails to break it; the defibrillator also catches coordination
-  stalls, not just dead agents.
+  `crew_ledger`, issue #45); lane ownership is enforced (`lane_enforcement` policy plus
+  the `crew_lane` tool, issue #46: a role checks a path against its owned lane before an
+  out-of-lane edit, which is reported to the unit as a `boundary` event and, under a
+  blocking policy, refused, so a cross-lane change routes through the commander instead of
+  a silent edit); nothing is done until an adversarial gate fails to break it; the
+  defibrillator also catches coordination stalls, not just dead agents.
 - **Team memory.** A shared decision board (agreed interfaces, decisions,
   gotchas) the crew reads and writes, distinct from the transient message stream;
   a new role boots from a briefing packet (role card + board + rolling summary),
@@ -125,8 +128,8 @@ The full design is in `docs/architecture.md`. In short:
   `crew pause` / `crew resume` / `crew standdown` brake and kill switch), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
-  `crew roster` / `crew claim` / `crew ledger`) for a runtime without MCP, and
-  `crew watch` to tail a role's self-filtered inbox stream live.
+  `crew roster` / `crew lane` / `crew claim` / `crew ledger`) for a runtime without MCP,
+  and `crew watch` to tail a role's self-filtered inbox stream live.
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -201,7 +204,8 @@ Design of record plus the workspace scaffold. The crates build/test green.
 structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
-`EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`) stream
+`EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Ledger`, `Boundary`)
+stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -276,16 +280,22 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
-API; it never touches the store. It exposes four
+API; it never touches the store. It exposes seven
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
 fan-out handle, issue #27), `crew_inbox` (read the messages addressed to the role
 since the last call, self-filtered, over a per-session history cursor, surfacing an
-order's structured fields), and `crew_roster` (list registered teammates, their owned
-paths, and liveness). A tool failure returns as an `isError` result, not a protocol
-error. The roadmap step is `crew_inbox` push over the per-role SSE stream instead of
-the current history read.
+order's structured fields), `crew_roster` (list registered teammates, their owned
+paths, and liveness), `crew_lane` (check a path against the role's owned lane
+before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `boundary`
+event and, under a blocking policy, refuses, routing the change through the commander;
+issue #46), and the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
+touching shared work, moving the claim through `in_progress` / `blocked` / `done`, and
+read the ledger; the broker refuses a claim another role holds, issue #45). A tool
+failure returns as an `isError` result, not a protocol error. The
+roadmap step is `crew_inbox` push over the per-role SSE stream instead of the current
+history read.
 
 `crew-core` also carries the role card (issue #18): `RoleCard` is the thin bootstrap
 an agent boots from, a TOML document naming the role, its owned lane, its acceptance
@@ -316,6 +326,19 @@ so a documented config produces a valid crew and an invalid one fails with a pre
 empty role, or a typo'd field). `to_cards(&broker)` produces the per-role `RoleCard`s
 the supervisor spawns, and `model_for(role)` resolves the spawn model. See
 `docs/config.md`.
+
+Lane-ownership enforcement makes those owned paths a checked boundary (issue #46). The
+config carries a crew-wide `lane_enforcement` policy (`warn` the default, `block`, or
+`off`) that `to_cards` stamps onto every `RoleCard`. `crew_core::path_in_lane` decides
+in-lane against a role's owned paths, matched on whole path segments so `api/` never
+matches `apiv2/`, and a role with no owned paths is unrestricted. Before an out-of-lane
+edit a role checks the path with the `crew_lane` MCP tool (or `crew lane` on the shim):
+in-lane it proceeds, out-of-lane the broker records a `boundary` event (`POST /boundary`,
+a new `EventKind::Boundary` carrying the role, path, and whether it was blocked) on the
+stream to `all-units`, and under `block` the edit is refused so a cross-lane change routes
+through the commander instead of a silent edit. The event is filterable with
+`GET /history?kind=boundary`. See `docs/roles.md` (lane enforcement) and
+`docs/observability.md` (the `boundary` event).
 
 `crew-supervisor` also auto-registers the crew MCP server so a spawned agent gets the
 crew tools with no per-task approval (issue #20), the way Seraphim registers the
@@ -385,8 +408,10 @@ exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` driv
 in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
-`crew inbox`, `crew roster`, `crew claim`, and `crew ledger` let an agent on a runtime
-without MCP, such as Codex, coordinate through subcommands instead of tools. Each boots from the same role context
+`crew inbox`, `crew roster`, `crew lane`, `crew claim`, and `crew ledger` let an agent on
+a runtime without MCP, such as Codex, coordinate through subcommands instead of tools
+(`crew lane <path>` is the shim's `crew_lane`, issue #46). Each boots from the same role
+context
 the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_BROKER_*`
 config) and reuses the same `crew_mcp::Broker` client, so a shim agent's I/O maps onto
 the broker identically to the MCP path: it registers on boot (appearing on the roster

@@ -48,6 +48,31 @@ timeout, and the commander. `crew up` reads it, and it validates itself (an unkn
 commander or an overlapping ownership boundary fails with a precise message). Omit it
 and the default crew below applies. See `docs/config.md`.
 
+### Lane enforcement
+
+A lane is only a boundary if crossing it is caught. Lane enforcement (issue #46) turns
+"roles trace directory boundaries" into a checked contract, so a role does not wander
+into a teammate's lane by a silent edit.
+
+Before it edits a file outside its owned paths, a role checks the path against its lane
+with the `crew_lane` tool (or `crew lane <path>` on the CLI shim). The verdict follows
+the crew's `lane_enforcement` policy:
+
+- **`warn`** (the default): an out-of-lane edit is reported to the unit as a `boundary`
+  event and the role is told to route the change through the commander, but it may
+  proceed. A role with no owned paths is unrestricted.
+- **`block`**: an out-of-lane edit is reported and refused. The role must route a
+  genuine cross-lane change through the commander (`crew_send`), never edit it directly.
+- **`off`**: no lane check; the boundary is advisory only.
+
+Whatever the policy, a boundary crossing rides the event stream (from the role, to
+`all-units`) so the operator sees who reached where and whether the crew warned or
+blocked (see `docs/observability.md`). `path_in_lane` decides in-lane against the role's
+owned paths: a path is in-lane if it equals an owned file or sits under an owned
+directory boundary, matched on whole path segments so `api/` never matches `apiv2/`.
+A genuine cross-lane need is a message to the commander or a pair channel, not a
+boundary crossing.
+
 ## Default crew (start with 3 to 4)
 
 - **commander** is the lead and router. It owns decomposition, interface
@@ -88,6 +113,7 @@ role = "backend"
 owned_paths = ["api/", "db/"]
 acceptance = "Tests green, migrations reversible, no clippy warnings."
 commander = "commander"
+lane_enforcement = "block"
 
 [broker]
 host = "127.0.0.1"
@@ -95,8 +121,9 @@ port = 2739
 ```
 
 `role` and `[broker]` are required; `owned_paths` and `acceptance` default to
-empty, and `commander` defaults to `commander`. Only these per-agent facts live
-here. The channels, the message schema, and the chain of command are common to the
+empty, `commander` defaults to `commander`, and `lane_enforcement` defaults to
+`warn` (the crew-wide policy the card carries from the config, see lane enforcement
+above). Only these per-agent facts live here. The channels, the message schema, and the chain of command are common to the
 crew and stay in crew.
 
 The `commander` names the unit's hub (issue #27), so every card carries it. From

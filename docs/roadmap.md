@@ -84,8 +84,8 @@ it.
   the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
   config, issue #43, done) with an integrator to follow, a work ledger with claims
-  (issue #45, done), lane-ownership enforcement, an adversarial done-gate, and
-  coordination-stall detection.
+  (issue #45, done), lane-ownership enforcement (`lane_enforcement` and the `crew_lane`
+  tool, issue #46, done), an adversarial done-gate, and coordination-stall detection.
 - **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
   the `crew top` terminal cockpit, and push notifications on the actionable
   moments.

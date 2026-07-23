@@ -406,7 +406,10 @@ mod tests {
 
         let body_of = |event: &Event| match &event.kind {
             EventKind::Message(message) => message.body.clone(),
-            EventKind::Lifecycle(_) | EventKind::Activity(_) | EventKind::Ledger(_) => {
+            EventKind::Lifecycle(_)
+            | EventKind::Activity(_)
+            | EventKind::Ledger(_)
+            | EventKind::Boundary(_) => {
                 panic!("expected a message")
             }
         };

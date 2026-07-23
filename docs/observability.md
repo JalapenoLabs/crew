@@ -42,6 +42,8 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   and the General's control gestures (paused, resumed, stood_down; issue #41).
 - `activity` an agent's own work, parsed from its stream-json (turn boundaries,
   tool calls, text output).
+- `boundary` a role reaching outside its owned lane (issue #46): the role, the
+  out-of-lane path, and whether the crew's policy blocked the edit or only warned.
 - `ledger` a change to the shared work ledger: a role claiming a task or moving it
   to `in_progress`, `blocked`, or `done` (issue #45).
 
@@ -88,6 +90,18 @@ writes, so a consumer or a late joiner reads the past without holding the stream
 open. `summary=true` returns the rolling compaction instead (issue #19): the older
 events folded into bounded aggregates plus the recent raw tail, so joining a
 long-running conversation costs bounded context rather than the full log.
+
+### Lane boundary crossings
+
+When a role reaches for a file outside its owned paths, the crossing is surfaced on the
+stream rather than passing silently (issue #46). The agent checks a path with the
+`crew_lane` tool before an out-of-lane edit; the broker records the result as a
+`boundary` event (from the role, to `all-units`) over `POST /boundary`, so the operator
+sees who reached where and whether the crew's policy warned or blocked. It rides
+`/history`, `/stream`, and each inbox like any other event, and `GET /history?kind=boundary`
+filters to just the crossings. The policy itself (`warn` / `block` / `off`) lives in the
+crew config and rides each role card; see `docs/config.md` and `docs/roles.md` (lane
+enforcement).
 
 ## Live agent count and roster
 

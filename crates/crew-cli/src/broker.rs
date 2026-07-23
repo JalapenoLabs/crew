@@ -121,6 +121,19 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
             "ledger",
             format!("{} {} {}", ledger.owner, ledger.state.label(), ledger.task),
         ),
+        EventKind::Boundary(boundary) => (
+            "boundary",
+            format!(
+                "{} reached {} ({})",
+                boundary.role,
+                boundary.path,
+                if boundary.blocked {
+                    "blocked"
+                } else {
+                    "warned"
+                }
+            ),
+        ),
     }
 }
 

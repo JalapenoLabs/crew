@@ -133,10 +133,11 @@ impl Event {
     }
 }
 
-/// The three kinds of item on the event stream (see `docs/observability.md`).
+/// A typed item on the crew event stream (see `docs/observability.md`).
 ///
-/// `message` is inter-agent communication, `lifecycle` is a supervised state
-/// change, and `activity` is an agent's own work parsed from its stream-json.
+/// `message` is inter-agent communication, `lifecycle` is a supervised state change,
+/// `activity` is an agent's own work parsed from its stream-json, `ledger` is a change to
+/// the shared work ledger (issue #45), and `boundary` is a lane crossing (issue #46).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -148,6 +149,8 @@ pub enum EventKind {
     Activity(Activity),
     /// A change to the shared work ledger: a role claiming or updating work (issue #45).
     Ledger(LedgerEvent),
+    /// A role reaching outside its owned lane (issue #46).
+    Boundary(BoundaryEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -350,6 +353,22 @@ impl TaskState {
             Self::Done => "done",
         }
     }
+}
+
+/// A role reaching outside its owned lane: a boundary crossing (issue #46).
+///
+/// Lane enforcement (`docs/roles.md`, ownership model) warns or blocks a role editing a
+/// path outside its owned boundaries, and records the crossing here so the operator sees
+/// it on the stream. A genuine cross-lane need should go through the commander, not a
+/// silent edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryEvent {
+    /// The role that reached outside its lane.
+    pub role: RoleId,
+    /// The out-of-lane path it reached for.
+    pub path: String,
+    /// Whether the crew's policy blocked the edit (`true`) or only warned (`false`).
+    pub blocked: bool,
 }
 
 #[cfg(test)]

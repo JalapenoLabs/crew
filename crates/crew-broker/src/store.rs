@@ -178,6 +178,8 @@ pub enum EventKindTag {
     Activity,
     /// A work-ledger change (issue #45).
     Ledger,
+    /// A lane boundary crossing (issue #46).
+    Boundary,
 }
 
 impl EventKindTag {
@@ -189,6 +191,7 @@ impl EventKindTag {
             "lifecycle" => Some(Self::Lifecycle),
             "activity" => Some(Self::Activity),
             "ledger" => Some(Self::Ledger),
+            "boundary" => Some(Self::Boundary),
             _ => None,
         }
     }
@@ -201,6 +204,7 @@ impl EventKindTag {
                 | (Self::Lifecycle, EventKind::Lifecycle(_))
                 | (Self::Activity, EventKind::Activity(_))
                 | (Self::Ledger, EventKind::Ledger(_))
+                | (Self::Boundary, EventKind::Boundary(_))
         )
     }
 }
