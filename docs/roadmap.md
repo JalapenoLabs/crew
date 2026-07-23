@@ -79,10 +79,12 @@ it.
 
 - **Command & Control.** Interject to redirect and belay a role mid-task (`crew
   redirect` / `crew belay`, issue #38, done); rules-of-engagement approval gates for
-  risky actions; pause and stand-down; direct override of the commander.
+  risky actions; pause, resume, and emergency stand-down per role and crew-wide
+  (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
+  the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
-  config, issue #43, done) with an integrator to follow (issue #48), a work ledger with
-  claims, lane-ownership enforcement, an adversarial done-gate, and coordination-stall
+  config, issue #43, done) with an integrator to follow, a work ledger with claims,
+  lane-ownership enforcement, an adversarial done-gate, and coordination-stall
   detection.
 - **Team Memory + Cockpit.** A shared decision board, a new-role briefing packet,
   the `crew top` terminal cockpit, and push notifications on the actionable

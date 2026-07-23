@@ -1,14 +1,43 @@
 //! The broker's shared application state.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crew_core::Event;
+use crew_core::{Event, RoleId};
+use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::router::ChannelRouter;
 use crate::secrets::Scrubber;
 use crate::store::{MemoryStore, Storage};
+
+/// The crew's control standing: whether the General has gated the crew's work (issue
+/// #41).
+///
+/// It rises from `Running` to `Paused` (the brake) to `StoodDown` (the kill switch).
+/// Under `Paused` or `StoodDown` every role is gated regardless of its own pause flag;
+/// `Running` leaves each role to its own [`is_role_paused`](AppState::is_role_paused)
+/// state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    /// Normal: roles pull work as usual.
+    #[default]
+    Running,
+    /// Globally paused: no role pulls new work until the crew is resumed.
+    Paused,
+    /// Stood down: an emergency halt. Every role stops and the durable state is
+    /// preserved, so the crew is recoverable.
+    StoodDown,
+}
+
+/// The crew-wide control state: the standing, plus the individually paused roles.
+#[derive(Debug, Default)]
+struct Control {
+    standing: Standing,
+    paused_roles: BTreeSet<RoleId>,
+}
 
 /// How many events a subscriber may fall behind before the broker drops the oldest
 /// for it. Large enough to absorb a burst while a slow reader catches up; a lagged
@@ -52,6 +81,10 @@ pub struct AppState {
     /// Serializes [`publish`](AppState::publish) so a sequence number is broadcast in
     /// the same order it is assigned, keeping every subscriber's `id` cursor monotonic.
     publish_order: Arc<Mutex<()>>,
+    /// The crew's pause / stand-down state (issue #41). In memory: the broker is the
+    /// live recoverable authority, and every pause change is also recorded as a
+    /// `lifecycle` event in the durable log.
+    control: Arc<Mutex<Control>>,
 }
 
 impl AppState {
@@ -80,7 +113,62 @@ impl AppState {
             scrubber: Arc::new(scrubber),
             broadcast,
             publish_order: Arc::new(Mutex::new(())),
+            control: Arc::new(Mutex::new(Control::default())),
         }
+    }
+
+    /// Pauses one role: it pulls no new work until resumed (issue #41).
+    pub fn pause_role(&self, role: RoleId) {
+        self.control().paused_roles.insert(role);
+    }
+
+    /// Resumes one role, clearing its own pause. The crew-wide standing is unchanged,
+    /// so a role stays gated while the crew is paused or stood down.
+    pub fn resume_role(&self, role: &RoleId) {
+        self.control().paused_roles.remove(role);
+    }
+
+    /// Pauses the whole crew: no role pulls new work until resumed. A stand-down is not
+    /// weakened to a pause.
+    pub fn pause_crew(&self) {
+        let mut control = self.control();
+        if control.standing != Standing::StoodDown {
+            control.standing = Standing::Paused;
+        }
+    }
+
+    /// Resumes the crew, clearing a crew-wide pause or stand-down. Roles paused on their
+    /// own stay paused until resumed individually.
+    pub fn resume_crew(&self) {
+        self.control().standing = Standing::Running;
+    }
+
+    /// Stands the crew down: the emergency halt. Every role is gated at once; the
+    /// durable log and roster are preserved, so the crew is recoverable.
+    pub fn stand_down(&self) {
+        self.control().standing = Standing::StoodDown;
+    }
+
+    /// Whether `role` is gated from new work: the crew is paused or stood down, or the
+    /// role is paused on its own.
+    #[must_use]
+    pub fn is_role_paused(&self, role: &RoleId) -> bool {
+        let control = self.control();
+        control.standing != Standing::Running || control.paused_roles.contains(role)
+    }
+
+    /// A snapshot of the control state for the roster view: the crew standing and the
+    /// set of individually paused roles.
+    #[must_use]
+    pub fn control_snapshot(&self) -> (Standing, BTreeSet<RoleId>) {
+        let control = self.control();
+        (control.standing, control.paused_roles.clone())
+    }
+
+    /// The control state behind its lock, recovering from a poisoned mutex (a panic in
+    /// another handler must not wedge the brake).
+    fn control(&self) -> std::sync::MutexGuard<'_, Control> {
+        self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Scrubs an event of secrets, appends it to the log, and fans it to subscribers.

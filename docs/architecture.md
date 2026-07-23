@@ -35,7 +35,9 @@ Planned surface (illustrative, not final):
 - `GET /history?channel=all-units&summary=true` returns a compact rolling
   summary rather than the full transcript, so a late joiner spends little
   context catching up.
-- `GET /roster` lists roles, their liveness, and their owned paths.
+- `GET /roster` lists roles, their liveness, their owned paths, and the crew's pause
+  `standing`; `POST /pause`, `POST /resume`, and `POST /standdown` gate the crew's work
+  (issue #41).
 
 Why a broker beats the old shared file:
 
@@ -215,6 +217,11 @@ subcommand tree.
   direct channel a `redirect` (steer, keep the task) or a `belay` (halt and re-task),
   which the role honors at its next tool boundary. They need no role card, resolving the
   broker from `--broker` or the `CREW_BROKER_*` environment. See `docs/communication.md`.
+- `crew pause [role]`, `crew resume [role]`, and `crew standdown` are the General's
+  brake and kill switch (issue #41): they post to the broker's control endpoints, so a
+  paused role, or a stood-down crew, pulls no new work, and the state shows on the
+  roster and the stream. A stand-down halts every role and preserves the durable state,
+  so the crew is recoverable. The broker is the authority; a role honors the gate.
 - `crew watch` tails the conversation live with routing visible (issue #15),
   rendering each event from the broker's SSE feed as `from -> channel (kind) body`. It
   reads the whole firehose (`/stream`) by default, or one role's self-filtered inbox

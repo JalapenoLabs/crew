@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{BrokerEndpoint, RoleCard, RoleId, ROLE_CARD_ENV};
-use crew_substrate::mcp::{Broker, InboxItem, RoleEntry};
+use crew_substrate::mcp::{Broker, InboxItem, RosterSnapshot, Standing};
 use eyre::{eyre, Result, WrapErr};
 
 /// The resolved agent context a shim command acts as: its broker, role, and lane.
@@ -95,11 +95,11 @@ pub fn inbox() -> Result<()> {
 /// Returns an error if no role context is set, or the broker cannot be reached.
 pub fn roster() -> Result<()> {
     let agent = load_agent()?;
-    let roles = agent
+    let snapshot = agent
         .broker()
         .roster()
         .map_err(|reason| eyre!("{reason}"))?;
-    print_roster(&roles);
+    print_roster(&snapshot);
     Ok(())
 }
 
@@ -166,19 +166,31 @@ fn print_inbox(items: &[InboxItem]) {
     }
 }
 
-/// Prints the roster entries, one per line.
-fn print_roster(roles: &[RoleEntry]) {
-    if roles.is_empty() {
+/// Prints the roster: the crew standing, then each role, its lane, and its liveness.
+fn print_roster(snapshot: &RosterSnapshot) {
+    if snapshot.roles.is_empty() {
         println!("The roster is empty.");
         return;
     }
-    println!("{} role(s):", roles.len());
-    for role in roles {
+    let crew_gated = snapshot.standing != Standing::Running;
+    match snapshot.standing {
+        Standing::Running => println!("{} role(s):", snapshot.roles.len()),
+        Standing::Paused => println!("{} role(s) (the crew is PAUSED):", snapshot.roles.len()),
+        Standing::StoodDown => {
+            println!("{} role(s) (the crew is STOOD DOWN):", snapshot.roles.len());
+        }
+    }
+    for role in &snapshot.roles {
         let owns = if role.owned_paths.is_empty() {
             String::new()
         } else {
             format!(" owns {}", role.owned_paths.join(", "))
         };
-        println!("- {} [{}]{}", role.role, role.liveness, owns);
+        let gated = if role.paused || crew_gated {
+            " [paused]"
+        } else {
+            ""
+        };
+        println!("- {} [{}]{}{}", role.role, role.liveness, owns, gated);
     }
 }

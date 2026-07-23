@@ -124,11 +124,15 @@ fn an_agent_sends_receives_self_filtered_and_lists_the_roster() {
 
     // The roster lists every registered teammate and the lanes it owns.
     let roster = backend.roster().unwrap();
-    let backend_entry = roster.iter().find(|entry| entry.role == "backend").unwrap();
+    let backend_entry = roster
+        .roles
+        .iter()
+        .find(|entry| entry.role == "backend")
+        .unwrap();
     assert_eq!(backend_entry.owned_paths, ["api/"]);
     assert_eq!(backend_entry.liveness, "working");
     assert!(
-        roster.iter().any(|entry| entry.role == "frontend"),
+        roster.roles.iter().any(|entry| entry.role == "frontend"),
         "the roster lists the other teammate too",
     );
 }
