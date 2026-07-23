@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::state::AppState;
-use crate::{board, boundary, briefing, control, events, gate, history, inbox, roster};
+use crate::{board, boundary, briefing, budget, control, events, gate, history, inbox, roster};
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
 ///
@@ -29,6 +29,7 @@ pub(crate) fn build(state: AppState) -> Router {
         .merge(roster::routes())
         .merge(control::routes())
         .merge(boundary::routes())
+        .merge(budget::routes())
         .merge(gate::routes())
         .merge(board::routes())
         .merge(briefing::routes())

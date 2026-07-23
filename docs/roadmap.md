@@ -99,7 +99,10 @@ it.
 - **Economy.** Model per role (`ModelTier` plus a per-crew tier map and a sensible
   default mapping by role, issue #53, done: strong for the lead and architect, cheap for
   docs / ci / lint / test, standard for the builders, retunable in config with no code
-  change), a shared token budget with per-role caps, auto-idle with cost telemetry, and
+  change); a shared token budget with per-role caps (issue #54, done: a crew-wide
+  `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the crew at a
+  cap and surfaced as a `budget` event over the stream, with the live token feed awaiting
+  the stream-json activity parser, issue #24); auto-idle with cost telemetry; and
   subscription usage awareness.
 
 ## Parallel track: coworker skill transport upgrade (done)

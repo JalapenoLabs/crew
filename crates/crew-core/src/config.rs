@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::Budget;
 use crate::card::{BrokerEndpoint, RoleCard};
 use crate::id::RoleId;
 use crate::model::{default_tier_for, ModelTier, ModelTiers};
@@ -73,6 +74,11 @@ pub struct CrewConfig {
     /// The concrete model alias each tier resolves to, so retuning spend is a config
     /// change, not a code change (issue #53). Defaults to `opus` / `sonnet` / `haiku`.
     pub models: ModelTiers,
+    /// The crew-wide token budget: the ceiling on total spend across every role (issue
+    /// #54). `None` (the default) leaves the crew unbounded. When the crew reaches it,
+    /// the supervisor idle-stops the whole crew rather than overrun (see
+    /// [`Budget`](crate::Budget) and `docs/observability.md`).
+    pub token_budget: Option<u64>,
     /// How long a role may be quiet before the supervisor idle-stops it.
     pub idle_stop: Duration,
     /// The repos in scope for the crew (paths or names the operator supplies).
@@ -103,6 +109,10 @@ pub struct RoleSpec {
     ///
     /// [`tier`]: RoleSpec::tier
     pub model: Option<String>,
+    /// The role's token cap: the ceiling on its own spend (issue #54). `None` leaves the
+    /// role bounded only by the crew-wide [`token_budget`](CrewConfig::token_budget). When
+    /// the role reaches its cap, the supervisor idle-stops it rather than overrun.
+    pub token_cap: Option<u64>,
 }
 
 impl Default for CrewConfig {
@@ -116,6 +126,7 @@ impl Default for CrewConfig {
             commander: RoleId::new(DEFAULT_COMMANDER),
             model: None,
             models: ModelTiers::default(),
+            token_budget: None,
             idle_stop: DEFAULT_IDLE_STOP,
             repos: Vec::new(),
             worktrees: false,
@@ -191,6 +202,21 @@ impl CrewConfig {
             return model;
         }
         self.models.resolve(default_tier_for(role))
+    }
+
+    /// The crew's token [`Budget`]: the crew-wide ceiling and each role's cap (issue #54).
+    ///
+    /// The supervisor holds one and records spend against it, idle-stopping a role or the
+    /// crew when it reaches a cap. A crew with no `token_budget` and no per-role
+    /// `token_cap` is unbounded, so the budget never breaches.
+    #[must_use]
+    pub fn budget(&self) -> Budget {
+        let caps = self
+            .roles
+            .iter()
+            .filter_map(|spec| spec.token_cap.map(|cap| (spec.role.clone(), cap)))
+            .collect();
+        Budget::new(self.token_budget, caps)
     }
 
     /// Validates the resolved config, returning the first problem it finds.
@@ -271,6 +297,7 @@ fn default_roles() -> Vec<RoleSpec> {
         acceptance: String::new(),
         tier: None,
         model: None,
+        token_cap: None,
     };
     vec![
         role("commander", &[]),
@@ -332,6 +359,7 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 struct RawConfig {
     model: Option<String>,
     models: Option<RawModels>,
+    token_budget: Option<u64>,
     commander: Option<String>,
     idle_stop: Option<String>,
     repos: Option<Vec<String>>,
@@ -358,6 +386,7 @@ struct RawRole {
     acceptance: Option<String>,
     tier: Option<ModelTier>,
     model: Option<String>,
+    token_cap: Option<u64>,
 }
 
 impl RawConfig {
@@ -381,6 +410,7 @@ impl RawConfig {
             )),
             model: normalize_alias(self.model),
             models: self.models.map(RawModels::resolve).unwrap_or_default(),
+            token_budget: self.token_budget,
             idle_stop,
             repos: self.repos.unwrap_or_default(),
             worktrees: self.worktrees.unwrap_or(false),
@@ -405,6 +435,7 @@ impl RawRole {
             acceptance: self.acceptance.unwrap_or_default(),
             tier: self.tier,
             model: normalize_alias(self.model),
+            token_cap: self.token_cap,
         }
     }
 }

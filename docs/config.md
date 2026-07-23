@@ -14,6 +14,7 @@ The type is `crew_core::CrewConfig`; it is broker-agnostic and produces the per-
 ```toml
 commander = "commander"   # the lead and router the General briefs
 idle_stop = "10m"         # how long a role may be quiet before it is stopped
+token_budget = 5_000_000  # the crew-wide token ceiling (issue #54)
 repos = ["api", "web"]    # the repos in scope
 worktrees = true          # give each role its own git worktree (issue #43)
 lane_enforcement = "warn" # what happens on an out-of-lane edit (issue #46)
@@ -33,6 +34,7 @@ role = "backend"
 owned_paths = ["api/", "db/"]
 acceptance = "Tests green, migrations reversible."
 model = "haiku"           # an exact model, the escape hatch that wins over any tier
+token_cap = 1_000_000     # this role's own token ceiling (issue #54)
 
 [[roles]]
 role = "frontend"
@@ -52,6 +54,13 @@ Every field is optional and takes a default:
 - `commander` defaults to `commander`.
 - `idle_stop` defaults to `5m`. It accepts a number of seconds or a number with an
   `s` / `m` / `h` suffix (`30s`, `5m`, `2h`).
+- `token_budget` (issue #54) is the crew-wide ceiling on total token spend across every
+  role; a role's `token_cap` is the ceiling on its own spend. Both default to unset, which
+  leaves the crew (or the role) unbounded. When the crew reaches its budget the supervisor
+  idle-stops every role; when a role reaches its cap it idle-stops that role, keeping its
+  roster entry so the General can raise the cap and restart it. Spend against budget rides
+  the stream as a `budget` event, so a cap hit is never silent. See `docs/observability.md`
+  (token budget).
 - `repos` defaults to empty.
 - `worktrees` defaults to `false`. With it on and `repos` set, the supervisor gives
   each role its own git worktree of those repos (on a `crew/<role>` branch), so

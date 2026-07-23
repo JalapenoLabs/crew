@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crew_core::RoleId;
+use crew_core::{Budget, BudgetEvent, BudgetScope, RoleId};
 use eyre::{eyre, Result};
 use tracing::{event, Level};
 
@@ -185,6 +185,12 @@ pub struct Fleet {
     /// The per-role git worktrees to clean up on stand-down (issue #43); empty unless
     /// the crew opted into worktree isolation.
     worktrees: Vec<Worktree>,
+    /// The crew's token budget (issue #54): the accountant [`record_spend`](Fleet::record_spend)
+    /// charges spend against, idle-stopping a role or the crew at a cap. Unbounded by
+    /// default; the crew opts in through the config.
+    budget: Arc<Mutex<Budget>>,
+    /// A client for surfacing budget reports on the stream, shared with the fleet threads.
+    roster: RosterClient,
 }
 
 impl Fleet {
@@ -252,6 +258,8 @@ impl Fleet {
             stall_stop,
             stall_monitor: Some(stall_monitor),
             worktrees: Vec::new(),
+            budget: Arc::new(Mutex::new(Budget::default())),
+            roster: roster.clone(),
         }
     }
 
@@ -263,6 +271,82 @@ impl Fleet {
     pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
         self.worktrees = worktrees;
         self
+    }
+
+    /// Sets the crew token budget the fleet enforces (issue #54).
+    ///
+    /// Build it from the crew config with [`CrewConfig::budget`](crew_core::CrewConfig::budget).
+    /// An unbounded budget (no crew-wide budget and no per-role cap) leaves
+    /// [`record_spend`](Fleet::record_spend) a no-op, so a crew that opts out pays nothing.
+    #[must_use]
+    pub fn with_budget(self, budget: Budget) -> Self {
+        *self.budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;
+        self
+    }
+
+    /// Charges `tokens` of spend to `role` against the crew budget, enforcing the caps.
+    ///
+    /// Surfaces a `budget` event so spend against budget is visible on the stream, and when
+    /// the spend reaches a ceiling idle-stops the role (its own cap) or the whole crew (the
+    /// crew-wide budget) rather than overrun (issue #54). An unbounded crew is a no-op.
+    ///
+    /// This is the seam the activity parser (issue #24) drives with each turn's token
+    /// usage once it lands; until then the budget is enforced against spend fed here
+    /// directly. Reporting the spend to the broker is best-effort (a failure is logged, not
+    /// fatal); the enforcement idle-stop still happens.
+    ///
+    /// # Errors
+    /// Returns an error if idle-stopping a role fails (its driver is gone).
+    pub fn record_spend(&self, role: &RoleId, tokens: u64) -> Result<()> {
+        let spend = {
+            let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
+            if !budget.is_bounded() {
+                return Ok(());
+            }
+            budget.record(role, tokens)
+        };
+        let breach = spend.breach;
+
+        // Surface the spend against budget on the stream, so a cap hit is never silent.
+        if let Err(err) = self.roster.report_budget(&BudgetEvent::from(spend)) {
+            event!(
+                name: "supervisor.budget.report_failed",
+                Level::WARN,
+                crew.role = %role,
+                "could not report budget for `{{crew.role}}`: {err}",
+            );
+        }
+
+        // Enforce: idle-stop rather than overrun. A crew breach stands the whole crew down;
+        // a role breach stops just that role.
+        match breach {
+            Some(BudgetScope::Crew) => {
+                event!(
+                    name: "supervisor.budget.crew_exhausted",
+                    Level::WARN,
+                    "the crew reached its token budget; idle-stopping every role",
+                );
+                self.stop_all()
+            }
+            Some(BudgetScope::Role) => {
+                event!(
+                    name: "supervisor.budget.role_capped",
+                    Level::WARN,
+                    crew.role = %role,
+                    "`{{crew.role}}` reached its token cap; idle-stopping it",
+                );
+                self.stop(role)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Idle-stops every agent in the fleet, keeping each roster entry (a crew budget hit).
+    fn stop_all(&self) -> Result<()> {
+        for driver in &self.drivers {
+            self.command(&driver.shared.role, Command::Stop)?;
+        }
+        Ok(())
     }
 
     /// Starts (or restarts) `role`'s agent: lazy start on first work, restart on demand.

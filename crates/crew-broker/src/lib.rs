@@ -24,6 +24,7 @@ mod api;
 mod board;
 mod boundary;
 mod briefing;
+mod budget;
 mod config;
 mod control;
 mod error;

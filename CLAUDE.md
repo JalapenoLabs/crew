@@ -109,8 +109,10 @@ not a reimplementation of the agent.
 - **Economy.** Model per role (issue #53, done: a `strong` / `standard` / `cheap` tier
   per role over a per-crew tier map, with a sensible default mapping by name, strong for
   the commander and architect, cheap for mechanical roles, standard for the builders, so
-  changing the mapping changes spend with no code change), a shared token budget with
-  per-role caps, auto-idle with cost telemetry, and subscription usage awareness.
+  changing the mapping changes spend with no code change); a shared token budget with
+  per-role caps (issue #54, done: a crew-wide `token_budget` and per-role `token_cap`,
+  enforced by idle-stopping a role or the crew at a cap and surfaced as a `budget` event,
+  never a silent overrun); auto-idle with cost telemetry; and subscription usage awareness.
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -219,7 +221,7 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Boundary`,
-`Verification`, `Board`) stream
+`Verification`, `Board`, `Budget`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -480,6 +482,20 @@ is escalated as a specific `supervisor.stall.detected` warning (who is waiting o
 and recorded (read with `Fleet::stalls`), once per stall until it resolves. It reads the
 stream over HTTP rather than adding an event kind, keeping it out of the in-flight ledger
 PR's path; surfacing a stall on the stream for the cockpit is a later refinement.
+
+The fleet also keeps a crew from quietly burning a fortune (issue #54, `crew_core::budget`).
+A crew sets a crew-wide `token_budget` and optional per-role `token_cap` in its config;
+`CrewConfig::budget()` builds the pure `Budget` accountant (a crew ceiling, per-role caps,
+running totals, modeled on the Workflow budget pattern), which the `Fleet` holds.
+`Fleet::record_spend(role, tokens)` charges the spend, publishes a `budget` event (spend
+against budget, to `all-units`, so a cap hit is never silent), and on a breach idle-stops
+the role (its own cap) or the whole crew (the crew budget) rather than overrun; a ceiling
+fires once, and an unbounded crew records nothing. The token feed is the one deferred piece:
+`record_spend` is the seam the stream-json activity parser (issue #24) drives with each
+turn's usage; until then the accounting, enforcement, and `budget` events are exercised
+against spend fed to the seam directly (proven end to end in `tests/budget.rs`). The broker
+accepts a report at `POST /budget` and streams it as `EventKind::Budget`, filterable with
+`GET /history?kind=budget`. See `docs/observability.md` (token budget) and `docs/config.md`.
 
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config
