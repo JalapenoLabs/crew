@@ -96,5 +96,9 @@ soon as Phase 1's broker is usable.
   `docs/architecture.md` for the full tradeoff.
 - **Persistence backend** for the standalone broker (in-memory plus log vs
   SQLite).
-- **Codex parity** path (CLI shim vs native).
+- **Codex parity.** A Codex agent joins a crew through the CLI shim (issue #28):
+  `crew register` / `crew send` / `crew inbox` / `crew roster` reach the broker through
+  the same client the MCP tools use (see `docs/codex.md`). Open: auto-spawning a Codex
+  agent per role from the crew config (a per-role runtime choice), and whether a
+  Codex-native MCP path is worth adding beyond the shim.
 - Whether the General always speaks through the commander or can address any role.

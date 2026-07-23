@@ -124,8 +124,10 @@ activity parser's turn boundaries (issue #24); until then the heartbeat is a coa
 output-silence signal, so by default a quiet agent parks (idle-stop) rather than being
 force-recovered.
 
-The supervisor targets Claude Code by default and Codex through the same
-interface via a CLI shim.
+The supervisor targets Claude Code by default. A Codex agent (a runtime without MCP)
+reaches the same broker through the CLI shim instead of MCP tools (issue #28), so a
+unit can mix runtimes; the broker and roster do not care which runtime produced a
+role. See `docs/codex.md`.
 
 ### MCP server (agent-facing surface)
 
@@ -151,8 +153,14 @@ Each tool documents itself and its arguments in `tools/list` so an agent calls i
 right the first time. A tool failure comes back as an `isError` result the agent
 reads, not a protocol error.
 
-MCP is the clean path. A thin CLI shim (`crew send`, `crew inbox`) is the
-fallback for a runtime without MCP.
+MCP is the clean path. For a runtime without MCP, such as Codex, a thin CLI shim is
+the fallback (issue #28): `crew register`, `crew send`, `crew inbox`, and
+`crew roster` act as the role the environment names and reach the broker through the
+**same** `Broker` client the MCP server uses, so a shim agent's I/O maps onto the
+broker identically. A Codex agent registers on boot and then sends and reads through
+the shim, so it appears on the roster and the stream like any other role. The parity
+and its gaps (a stateless inbox with no per-session cursor, no push, operator-launched
+rather than supervisor-spawned) are in `docs/codex.md`.
 
 The roadmap step is `crew_inbox` push: subscribing to the broker's per-role SSE
 stream for native notifications instead of the current history read on each call.
@@ -181,8 +189,13 @@ subcommand tree.
   leaves an orphaned process. `crew up` owns the crew: it holds the fleet's driver
   threads and, when it started one, the in-process broker, so standing down tears both
   down together.
-- `crew send` posts a message as the General, to the commander by default.
-- `crew watch` tails the conversation with routing visible.
+- `crew register`, `crew send`, `crew inbox`, and `crew roster` are the agent CLI
+  shim (issue #28): they act as the role the environment names (`CREW_ROLE_CARD`, or
+  `CREW_ROLE` plus the broker config) and reach the broker through the same client the
+  MCP tools use, so a runtime without MCP coordinates the same way. See `docs/codex.md`.
+- `crew watch` tails the conversation with routing visible, and a `crew send` run
+  without a role context posts as the General to the commander by default: the human's
+  own front-end, alongside the agent shim above.
 
 ### Observability
 
