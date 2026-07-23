@@ -1,13 +1,15 @@
-//! The roster endpoints: who is in the unit, and whether each role is live.
+//! The roster endpoints: who is in the unit, whether each role is live, and how many.
 //!
-//! `GET /roster` lists the registered roles with their owned paths and current
-//! liveness (working / idle / stopped / dead), the substrate for the live agent
-//! count. A role or the supervisor registers on join with `POST /roster` and leaves
-//! with `DELETE /roster/{role}`. Every change is a first-class event on the stream:
-//! the transition publishes a [`Lifecycle`] event to `all-units`, so history, the
-//! `/stream` feed, and each role's inbox all see who came and went (see
-//! `docs/observability.md`). The roster itself lives behind the storage trait, so a
-//! durable backend keeps it across a restart.
+//! `GET /roster` reports the live agent count and lists the registered roles with
+//! their owned paths and current liveness (working / idle / stopped / dead), so a UI
+//! shows the count and per-role status with no polling (issue #32). A role or the
+//! supervisor registers on join with `POST /roster` and leaves with
+//! `DELETE /roster/{role}`. Every change is a first-class event on the stream: the
+//! transition publishes a [`Lifecycle`] event to `all-units`, so history, the
+//! `/stream` feed, and each role's inbox all see who came and went, and a subscriber
+//! keeps the count current from those events (see `docs/observability.md`). The roster
+//! itself lives behind the storage trait, so a durable backend keeps it across a
+//! restart.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -30,11 +32,34 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/roster/{role}", delete(deregister))
 }
 
-/// The `GET /roster` response: the registered roles and their status.
+/// The `GET /roster` response: the live agent count and the registered roles.
 #[derive(Debug, Serialize)]
 struct RosterView {
+    /// The live agent count and its per-liveness breakdown.
+    count: Count,
     /// The roles, sorted by id.
     roles: Vec<RoleView>,
+}
+
+/// The live agent count and the per-liveness breakdown behind it (issue #32).
+///
+/// The count is the current liveness projection, so a UI shows it with no polling: it
+/// reads this snapshot once and keeps it current from the `lifecycle` events every
+/// roster change publishes to the stream (see `docs/observability.md`).
+#[derive(Debug, Default, Serialize)]
+struct Count {
+    /// Agents present and up or resumable, `working` + `idle`: the headline live
+    /// count. A `stopped` role has cleanly left the field and a `dead` one gave up,
+    /// so neither is counted.
+    live: usize,
+    /// Agents up and working.
+    working: usize,
+    /// Agents registered but idle: parked to save context, resumable on demand.
+    idle: usize,
+    /// Agents cleanly stood down.
+    stopped: usize,
+    /// Agents that died and are not recovering.
+    dead: usize,
 }
 
 /// One role's entry in the roster view.
@@ -49,17 +74,27 @@ struct RoleView {
 }
 
 impl RosterView {
-    /// Renders a roster snapshot as the wire view.
+    /// Renders a roster snapshot as the wire view, tallying the live count as it goes.
     fn of(roster: &Roster) -> Self {
+        let mut count = Count::default();
         let roles = roster
             .iter()
-            .map(|(role, status)| RoleView {
-                role: role.clone(),
-                owned_paths: status.owned_paths.clone(),
-                liveness: status.liveness,
+            .map(|(role, status)| {
+                match status.liveness {
+                    Liveness::Working => count.working += 1,
+                    Liveness::Idle => count.idle += 1,
+                    Liveness::Stopped => count.stopped += 1,
+                    Liveness::Dead => count.dead += 1,
+                }
+                RoleView {
+                    role: role.clone(),
+                    owned_paths: status.owned_paths.clone(),
+                    liveness: status.liveness,
+                }
             })
             .collect();
-        Self { roles }
+        count.live = count.working + count.idle;
+        Self { count, roles }
     }
 }
 
@@ -272,6 +307,50 @@ mod tests {
         );
         assert_eq!(backend["owned_paths"], json!(["crates/crew-broker"]));
         assert_eq!(entry(&roster, "frontend").unwrap()["liveness"], "idle");
+    }
+
+    #[tokio::test]
+    async fn the_roster_reports_the_live_count_across_transitions() {
+        let state = AppState::new(Config::default());
+
+        // An empty roster has no live agents.
+        assert_eq!(get_roster(&state).await["count"]["live"], 0);
+
+        // Two start working, one registers idle: all three are live.
+        register(&state, json!({ "role": "backend" })).await;
+        register(&state, json!({ "role": "frontend" })).await;
+        register(&state, json!({ "role": "qa", "liveness": "idle" })).await;
+        let count = get_roster(&state).await["count"].clone();
+        assert_eq!(count["working"], 2);
+        assert_eq!(count["idle"], 1);
+        assert_eq!(count["stopped"], 0);
+        assert_eq!(count["dead"], 0);
+        assert_eq!(count["live"], 3, "working and idle are both live");
+
+        // backend idles: still live, but the breakdown shifts.
+        register(&state, json!({ "role": "backend", "liveness": "idle" })).await;
+        let count = get_roster(&state).await["count"].clone();
+        assert_eq!(count["working"], 1);
+        assert_eq!(count["idle"], 2);
+        assert_eq!(count["live"], 3, "an idle agent stays live");
+
+        // frontend dies and qa stops: both drop out of the live count.
+        register(&state, json!({ "role": "frontend", "liveness": "dead" })).await;
+        register(&state, json!({ "role": "qa", "liveness": "stopped" })).await;
+        let count = get_roster(&state).await["count"].clone();
+        assert_eq!(count["dead"], 1);
+        assert_eq!(count["stopped"], 1);
+        assert_eq!(count["live"], 1, "only the idle backend is still live");
+
+        // Deregistering removes the role from the roster entirely.
+        deregister(&state, "backend").await;
+        let roster = get_roster(&state).await;
+        assert_eq!(roster["count"]["live"], 0);
+        assert_eq!(
+            roster["roles"].as_array().unwrap().len(),
+            2,
+            "the dead and stopped roles stay listed",
+        );
     }
 
     #[tokio::test]
