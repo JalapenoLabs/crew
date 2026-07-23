@@ -299,7 +299,7 @@ fn spawn_agent(
 }
 
 /// Spawns the agent's OS process with its command, env, and cwd, output piped.
-fn spawn_process(command: &AgentCommand) -> Result<Child> {
+pub(crate) fn spawn_process(command: &AgentCommand) -> Result<Child> {
     Command::new(&command.program)
         .args(&command.args)
         .envs(command.env.iter().map(|(key, value)| (key, value)))
