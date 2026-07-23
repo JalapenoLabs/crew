@@ -33,10 +33,10 @@ clap.workspace = true
 # API, not the individual crates.
 crew-substrate.workspace = true
 # `crew up` runs the broker in-process (async) and waits on a shutdown signal; ureq
-# probes an already-running broker's health before starting one.
+# probes an already-running broker's health before starting one, and posts the
+# General's `crew redirect` / `crew belay` directives to the broker.
 tokio.workspace = true
 ureq.workspace = true
-
-[dev-dependencies]
-# The shim integration test starts a broker in-process and inspects its JSON.
+# Builds the JSON body of a General directive (`crew redirect` / `crew belay`), and
+# lets the shim integration test inspect the broker's JSON.
 serde_json.workspace = true

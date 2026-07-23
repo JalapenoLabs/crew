@@ -267,9 +267,11 @@ fn render_inbox(items: &[InboxItem]) -> String {
                 (detail, "") => detail.to_owned(),
                 (detail, body) => format!("{detail}. {body}"),
             };
+            // A redirect or belay is a General directive to honor at once, so flag it.
+            let marker = if item.directive { "[honor now] " } else { "" };
             format!(
-                "- {} on {} ({}): {}",
-                item.from, item.channel, item.kind, content
+                "- {}{} on {} ({}): {}",
+                marker, item.from, item.channel, item.kind, content
             )
         })
         .collect();
@@ -314,6 +316,34 @@ mod tests {
 
     fn handle(server: &mut Server, message: &Value) -> Option<Value> {
         server.handle_line(&message.to_string())
+    }
+
+    #[test]
+    fn render_inbox_flags_a_general_directive_to_honor_at_once() {
+        use super::render_inbox;
+        use crate::broker::InboxItem;
+
+        let item = |kind: &str, directive: bool| InboxItem {
+            from: "general".to_owned(),
+            channel: "@backend".to_owned(),
+            kind: kind.to_owned(),
+            detail: String::new(),
+            body: "switch to the login bug".to_owned(),
+            directive,
+        };
+
+        let rendered = render_inbox(&[item("redirect", true)]);
+        assert!(
+            rendered.contains("[honor now]"),
+            "a directive is flagged: {rendered}"
+        );
+        assert!(rendered.contains("(redirect)"), "and names the kind");
+
+        let plain = render_inbox(&[item("note", false)]);
+        assert!(
+            !plain.contains("[honor now]"),
+            "a plain message is not flagged: {plain}"
+        );
     }
 
     #[test]

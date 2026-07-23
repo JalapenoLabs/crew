@@ -121,9 +121,10 @@ The full design is in `docs/architecture.md`. In short:
 - **Supervisor:** spawns one agent process per role with its role card, wires
   each to the broker, and manages lifecycle (start, idle-stop, restart).
 - **MCP server:** the agent-facing surface (`crew_send`, `crew_inbox`, ...).
-- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`) plus the agent
-  CLI shim (`crew register` / `crew send` / `crew inbox` / `crew roster`) for a runtime
-  without MCP.
+- **CLI (`crew`):** the operator front-end (`crew up` / `crew down`), the General's
+  command-and-control directives (`crew redirect` / `crew belay` to steer a role
+  mid-task), and the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
+  `crew roster`) for a runtime without MCP.
 
 ## Roles (summary)
 
