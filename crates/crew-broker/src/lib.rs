@@ -7,10 +7,11 @@
 //! (issue #8). A `POST /channels/{channel}/messages` stamps the timestamp
 //! server-side (rejecting a spoofed one), masks configured secret values out of
 //! the event with the [`Scrubber`], persists it, and fans it to every subscriber
-//! on the `GET /stream` SSE feed (issue #9). A `GET /history` reads past events,
-//! filtered, time-ordered, and paginated with a cursor stable under concurrent
-//! writes (issue #12). The self-filtered per-role streams, the roster, and the
-//! rolling-summary history come in later tickets.
+//! (issue #9). Subscribers read either `GET /stream`, the whole live feed, or
+//! `GET /inbox?role=<role>`, a role's live, self-filtered events resumable from a
+//! `Last-Event-ID` cursor (issue #10). A `GET /history` reads past events, filtered,
+//! time-ordered, and paginated with a cursor stable under concurrent writes
+//! (issue #12). The roster and the rolling-summary history come in later tickets.
 //!
 //! Run it with the `crewd` binary, or drive it as a library through [`run`].
 //!
@@ -21,6 +22,7 @@ mod config;
 mod error;
 mod events;
 mod history;
+mod inbox;
 mod router;
 mod secrets;
 mod serve;
@@ -32,7 +34,7 @@ pub use error::ApiError;
 pub use router::ChannelRouter;
 pub use secrets::{mask, Scrubber};
 pub use serve::run;
-pub use state::AppState;
+pub use state::{AppState, Sequenced};
 pub use store::{
     EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, LogStore, MemoryStore, Roster,
     Storage,
