@@ -38,7 +38,8 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
 - `message` inter-agent communication, carrying the `communication.md` kind
   (order / question / answer / status / artifact / note).
 - `lifecycle` an agent's supervised state change (started, idle, stopped,
-  restarted, died, recovered), including the defibrillator's death and recovery.
+  restarted, died, recovered), including the defibrillator's death and recovery,
+  and the General's control gestures (paused, resumed, stood_down; issue #41).
 - `activity` an agent's own work, parsed from its stream-json (turn boundaries,
   tool calls, text output).
 
@@ -112,6 +113,21 @@ or resumable; a `stopped` role has left the field and a `dead` one gave up) and 
 per-liveness breakdown. A UI reads that snapshot once and keeps it current from the
 `lifecycle` events every roster change publishes, so it shows the live count updating
 as agents start, idle, stop, and die.
+
+**Pause and stand-down** ride the same roster and stream (issue #41). The General's
+brake and kill switch are broker control endpoints: `POST /pause` and `POST /resume`
+gate work per role (a `role` in the body) or crew-wide (none), and `POST /standdown`
+halts the whole crew at once. Each records a `lifecycle` event (`paused` / `resumed` /
+`stood_down`, a per-role change `from` the role and a crew-wide one `from` the General)
+to `all-units`, so the change rides `/history`, `/stream`, and each inbox like any
+other. `GET /roster` carries the state too: a crew-wide `standing` (`running` /
+`paused` / `stood_down`) and a `paused` flag per role. A role is gated from new work
+whenever it is paused on its own or the crew is not `running`; it honors this by
+pulling no work while gated (its role card says so). The control state lives in the
+broker, the live recoverable authority, and a stand-down preserves the durable log and
+roster, so the crew resumes with `crew resume` or a fresh `crew up`. Persisting the
+control state across a broker restart is a later refinement; the stream already records
+every transition.
 
 The supervisor's lifecycle state machine drives these transitions (issue #22): it
 marks a role working on start, idle after a quiet period, and stopped on stand-down,

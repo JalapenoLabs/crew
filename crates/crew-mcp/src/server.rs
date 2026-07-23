@@ -10,7 +10,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{json, Value};
 
-use crate::broker::{Broker, InboxItem, RoleEntry};
+use crate::broker::{Broker, InboxItem, RosterSnapshot, Standing};
 
 /// The MCP protocol version this server implements.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -279,11 +279,14 @@ fn render_inbox(items: &[InboxItem]) -> String {
 }
 
 /// Renders the roster an agent reads.
-fn render_roster(roles: &[RoleEntry]) -> String {
-    if roles.is_empty() {
+fn render_roster(snapshot: &RosterSnapshot) -> String {
+    if snapshot.roles.is_empty() {
         return "The roster is empty.".to_owned();
     }
-    let lines: Vec<String> = roles
+    // The crew is gated whenever it is not running; a role is also gated on its own.
+    let crew_gated = snapshot.standing != Standing::Running;
+    let lines: Vec<String> = snapshot
+        .roles
         .iter()
         .map(|role| {
             let owns = if role.owned_paths.is_empty() {
@@ -291,10 +294,23 @@ fn render_roster(roles: &[RoleEntry]) -> String {
             } else {
                 format!(" owns {}", role.owned_paths.join(", "))
             };
-            format!("- {} [{}]{}", role.role, role.liveness, owns)
+            // Flag a role that must pull no new work: paused on its own, or crew-gated.
+            let gated = if role.paused || crew_gated {
+                " [PAUSED: pull no new work]"
+            } else {
+                ""
+            };
+            format!("- {} [{}]{}{}", role.role, role.liveness, owns, gated)
         })
         .collect();
-    format!("{} role(s):\n{}", roles.len(), lines.join("\n"))
+    let header = match snapshot.standing {
+        Standing::Running => format!("{} role(s):", snapshot.roles.len()),
+        Standing::Paused => format!("{} role(s) (the crew is PAUSED):", snapshot.roles.len()),
+        Standing::StoodDown => {
+            format!("{} role(s) (the crew is STOOD DOWN):", snapshot.roles.len())
+        }
+    };
+    format!("{header}\n{}", lines.join("\n"))
 }
 
 #[cfg(test)]

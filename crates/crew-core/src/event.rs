@@ -257,6 +257,14 @@ pub enum Lifecycle {
     Died,
     /// The defibrillator revived the agent after a death, within its recovery budget.
     Recovered,
+    /// The role was paused: it pulls no new work until resumed (issue #41). The
+    /// General's brake, per role or crew-wide.
+    Paused,
+    /// The role was resumed: it may pull work again (issue #41).
+    Resumed,
+    /// The crew was stood down: every role halts at once and the state is preserved so
+    /// the crew is recoverable (issue #41). The General's emergency kill switch.
+    StoodDown,
 }
 
 /// An agent's own work item, parsed from its `claude -p` stream-json.
@@ -330,6 +338,9 @@ mod tests {
             envelope(message(MessageKind::Belay)),
             envelope(EventKind::Lifecycle(Lifecycle::Started)),
             envelope(EventKind::Lifecycle(Lifecycle::Died)),
+            envelope(EventKind::Lifecycle(Lifecycle::Paused)),
+            envelope(EventKind::Lifecycle(Lifecycle::Resumed)),
+            envelope(EventKind::Lifecycle(Lifecycle::StoodDown)),
             envelope(EventKind::Activity(Activity::TurnStarted)),
             envelope(EventKind::Activity(Activity::ToolCall {
                 tool: "cargo".to_owned(),

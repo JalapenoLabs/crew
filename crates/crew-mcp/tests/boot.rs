@@ -85,6 +85,7 @@ fn a_role_boots_from_its_card_and_reaches_the_broker() {
     // The unit now sees the role, owning exactly the lane its card declared.
     let roster = broker.roster().expect("the roster is readable");
     let entry = roster
+        .roles
         .iter()
         .find(|entry| entry.role == "backend")
         .expect("the booted role appears on the roster");
