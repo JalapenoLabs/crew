@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader};
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{
     Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind, MessageKind,
-    Sender, TelemetryEvent, Verdict, VerificationEvent,
+    Sender, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -151,6 +151,23 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Board(board) => ("board", board_body(board)),
         EventKind::Budget(budget) => ("budget", budget_body(budget)),
         EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
+        EventKind::Usage(usage) => ("usage", usage_body(usage)),
+    }
+}
+
+/// A short description of a shared-subscription usage reading (issue #56).
+fn usage_body(usage: &UsageEvent) -> String {
+    if usage.paused {
+        match usage.window_reset {
+            Some(reset) => format!(
+                "subscription at {}%; new work paused until {}",
+                usage.percent,
+                reset.to_datetime().format("%H:%M:%S")
+            ),
+            None => format!("subscription at {}%; new work paused", usage.percent),
+        }
+    } else {
+        format!("subscription at {}%; work resumed", usage.percent)
     }
 }
 

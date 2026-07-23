@@ -43,6 +43,76 @@ struct Control {
     paused_roles: BTreeSet<RoleId>,
 }
 
+/// The shared-subscription usage gauge and auto-pause (issue #56).
+///
+/// The crew shares one subscription, so the broker keeps one gauge across the crew. A usage
+/// report at or above the [`threshold`](Usage::threshold) auto-pauses new work until the
+/// window resets; the gate lifts lazily at the reset instant (the pause event advertises
+/// it), and the operator can resume early. It is distinct from the manual pause control, so
+/// an auto-pause never clobbers a manual pause and the reset never lifts one.
+#[derive(Debug)]
+struct Usage {
+    /// The usage percent (`0..=100`) at which new work auto-pauses.
+    threshold: u8,
+    /// The latest reported usage percent.
+    percent: u8,
+    /// When the auto-pause lifts, if the crew is usage-paused now; `None` when it is not.
+    paused_until: Option<Timestamp>,
+}
+
+impl Usage {
+    /// A gauge that auto-pauses at `threshold` percent, starting un-paused.
+    fn new(threshold: u8) -> Self {
+        Self {
+            threshold,
+            percent: 0,
+            paused_until: None,
+        }
+    }
+
+    /// Records a usage reading as of `now`, returning `true` if it newly engaged the pause.
+    ///
+    /// At or above the threshold it (re)arms the auto-pause to lift at `window_reset`; a
+    /// reading below the threshold leaves an active pause in place, since the window reset
+    /// is the clear signal, not a dip. "Newly" is measured against whether the crew was
+    /// usage-paused a moment ago, so a pause that already expired can engage afresh.
+    fn report(&mut self, now: Timestamp, percent: u8, window_reset: Timestamp) -> bool {
+        self.percent = percent;
+        if percent < self.threshold {
+            return false;
+        }
+        let was_paused = self.is_paused(now);
+        self.paused_until = Some(window_reset);
+        !was_paused
+    }
+
+    /// Lifts the auto-pause early, returning `true` if one was active as of `now`.
+    fn resume(&mut self, now: Timestamp) -> bool {
+        let was_paused = self.is_paused(now);
+        self.paused_until = None;
+        was_paused
+    }
+
+    /// Whether new work is auto-paused as of `now`: paused with the reset still ahead.
+    fn is_paused(&self, now: Timestamp) -> bool {
+        self.paused_until.is_some_and(|until| now < until)
+    }
+}
+
+/// The shared-subscription usage gauge, as `GET /usage` reports it (issue #56).
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageView {
+    /// The latest reported usage percent (`0..=100`).
+    pub percent: u8,
+    /// The percent at which new work auto-pauses.
+    pub threshold: u8,
+    /// Whether new work is auto-paused right now.
+    pub paused: bool,
+    /// When the auto-pause lifts, while paused; `None` when it is not paused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<Timestamp>,
+}
+
 /// A task's live standing in the adversarial done-gate (issue #47).
 ///
 /// It records who submitted the work and owns any rework, the independent role that
@@ -337,6 +407,9 @@ pub struct AppState {
     /// The usage rollup: cost, tokens, and working time per role (issue #55). A projection
     /// of the `telemetry` and `lifecycle` events in the log, rebuilt from it on a restart.
     stats: Arc<Mutex<Stats>>,
+    /// The shared-subscription usage gauge and auto-pause (issue #56). In memory like the
+    /// pause control: the broker is the live authority, distinct from the manual pause.
+    usage: Arc<Mutex<Usage>>,
 }
 
 impl AppState {
@@ -364,6 +437,7 @@ impl AppState {
         let events = storage.events();
         let board = Board::rebuild(&events);
         let stats = Stats::rebuild(&events);
+        let usage = Usage::new(config.usage_threshold);
         Self {
             config: Arc::new(config),
             storage,
@@ -375,6 +449,7 @@ impl AppState {
             gate: Arc::new(Mutex::new(Gate::default())),
             board: Arc::new(Mutex::new(board)),
             stats: Arc::new(Mutex::new(stats)),
+            usage: Arc::new(Mutex::new(usage)),
         }
     }
 
@@ -398,10 +473,16 @@ impl AppState {
         }
     }
 
-    /// Resumes the crew, clearing a crew-wide pause or stand-down. Roles paused on their
-    /// own stay paused until resumed individually.
-    pub fn resume_crew(&self) {
+    /// Resumes the crew, clearing a crew-wide pause or stand-down, and lifts any usage
+    /// auto-pause (issue #56), so `crew resume` is the one escape hatch. Roles paused on
+    /// their own stay paused until resumed individually.
+    ///
+    /// Returns `true` if a usage auto-pause was active, so the caller can surface that it
+    /// lifted; a manual resume clears it early, before the window reset.
+    #[must_use = "the return says whether a usage auto-pause lifted, to surface on the stream"]
+    pub fn resume_crew(&self) -> bool {
         self.control().standing = Standing::Running;
+        self.usage().resume(Timestamp::now())
     }
 
     /// Stands the crew down: the emergency halt. Every role is gated at once; the
@@ -410,12 +491,14 @@ impl AppState {
         self.control().standing = Standing::StoodDown;
     }
 
-    /// Whether `role` is gated from new work: the crew is paused or stood down, or the
-    /// role is paused on its own.
+    /// Whether `role` is gated from new work: the crew is paused, stood down, or usage
+    /// auto-paused (issue #56), or the role is paused on its own.
     #[must_use]
     pub fn is_role_paused(&self, role: &RoleId) -> bool {
         let control = self.control();
-        control.standing != Standing::Running || control.paused_roles.contains(role)
+        control.standing != Standing::Running
+            || control.paused_roles.contains(role)
+            || self.is_usage_paused()
     }
 
     /// A snapshot of the control state for the roster view: the crew standing and the
@@ -424,6 +507,39 @@ impl AppState {
     pub fn control_snapshot(&self) -> (Standing, BTreeSet<RoleId>) {
         let control = self.control();
         (control.standing, control.paused_roles.clone())
+    }
+
+    /// Records a shared-subscription usage reading, returning `true` if it newly engaged
+    /// the auto-pause (issue #56). At or above the threshold it pauses new work until
+    /// `window_reset`; the operator can resume early with `crew resume`.
+    #[must_use = "the return says whether the reading newly auto-paused, to surface it"]
+    pub fn report_usage(&self, percent: u8, window_reset: Timestamp) -> bool {
+        self.usage().report(Timestamp::now(), percent, window_reset)
+    }
+
+    /// Whether new work is auto-paused on shared-subscription usage right now (issue #56).
+    #[must_use]
+    pub fn is_usage_paused(&self) -> bool {
+        self.usage().is_paused(Timestamp::now())
+    }
+
+    /// The usage gauge for `GET /usage`: the latest reading, the threshold, and the pause.
+    #[must_use]
+    pub fn usage_snapshot(&self) -> UsageView {
+        let usage = self.usage();
+        let now = Timestamp::now();
+        let paused = usage.is_paused(now);
+        UsageView {
+            percent: usage.percent,
+            threshold: usage.threshold,
+            paused,
+            resets_at: paused.then_some(usage.paused_until).flatten(),
+        }
+    }
+
+    /// The usage gauge behind its lock, recovering from a poisoned mutex.
+    fn usage(&self) -> std::sync::MutexGuard<'_, Usage> {
+        self.usage.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The control state behind its lock, recovering from a poisoned mutex (a panic in

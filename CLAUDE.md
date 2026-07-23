@@ -113,7 +113,10 @@ not a reimplementation of the agent.
   cost and token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role,
   and per-turn `telemetry` events plus the roles' `lifecycle` events feed a `GET /stats`
   rollup of tokens, cost, and working time per role and in aggregate); and subscription
-  usage awareness.
+  usage awareness (issue #56, done: one shared usage gauge across the crew auto-pauses new
+  work when a reading crosses `CREW_BROKER_USAGE_THRESHOLD`, lifts lazily at the window
+  reset, and lets the operator resume early with `crew resume`, distinct from the manual
+  pause).
 - **Stack:** Rust (axum + tokio + eyre + mimalloc), toolchain pinned. Follows the
   global Rust conventions in `~/.claude/docs/rust.md`.
 - **Not a new runtime:** crew supervises Claude Code / Codex, it does not replace
@@ -144,9 +147,10 @@ The full design is in `docs/architecture.md`. In short:
   mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew submit` / `crew verdict` / `crew gate` /
   `crew board` / `crew record`) for a
-  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live, and
+  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
   `crew notify` to push a native notification on each actionable moment (a question, a
-  death, a stand-down) over that same stream.
+  death, a stand-down) over that same stream, and `crew usage` to read the shared-subscription
+  usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
@@ -222,7 +226,7 @@ structured logging (issue #4); `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Boundary`,
-`Verification`, `Board`, `Budget`, `Telemetry`) stream
+`Verification`, `Board`, `Budget`, `Telemetry`, `Usage`) stream
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
@@ -500,6 +504,19 @@ the budget (issue #24); working time needs no feed. This is the data the `crew t
 (issue #51) and the Seraphim per-role stats render. See `docs/observability.md` (cost,
 tokens, and time telemetry).
 
+Subscription usage awareness keeps a crew from exhausting the shared window (issue #56). The
+crew shares one subscription, so the broker keeps one `Usage` gauge across the crew (in
+`AppState`, distinct from the manual pause `Control`). `POST /usage` records a reading (the
+window percent plus its reset); at or above `CREW_BROKER_USAGE_THRESHOLD` (default 90) it
+auto-pauses new work, publishing a `usage` event with the reset time so the pause is never
+silent. `is_role_paused` folds in the usage auto-pause, so every role is gated (one shared
+subscription). The gate lifts lazily at the reset instant, so work auto-resumes; `crew
+resume` (which now also clears a usage pause) is the escape hatch to resume early. `GET
+/usage` and `crew usage` read the gauge. The usage signal is the supervisor's to detect from
+the agents' rate-limit output (the stream-json parser, issue #24) and report via
+`RosterClient::report_usage`; the auto-pause mechanism is exercised through `POST /usage`
+directly until then. See `docs/observability.md` (subscription usage auto-pause).
+
 `crew-cli` carries the headline `crew up` / `crew down` orchestration (issue #26). The
 `crew` binary is a `clap` subcommand tree. `crew up` reads the crew config
 (`--config`, else `./crew.toml`, else the default crew), resolves the broker address,
@@ -553,9 +570,10 @@ classifier when their events land. See `docs/observability.md` (push notificatio
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
-`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`), and
+`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`),
 `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
-out of every message before storing or streaming it).
+out of every message before storing or streaming it), and `CREW_BROKER_USAGE_THRESHOLD`
+(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56).
 Binding a non-loopback address is refused unless the non-local flag is set, so the
 broker never exposes itself to the network by accident.
 

@@ -170,6 +170,26 @@ impl RosterClient {
             })
     }
 
+    /// Reports a shared-subscription usage reading (`POST /usage`, issue #56).
+    ///
+    /// The crew shares one subscription, so a single reading of the window against its limit
+    /// drives the broker's one gauge: at or above the threshold it auto-pauses new work until
+    /// `window_reset`. This is the seam the rate-limit detection (the stream-json parser,
+    /// issue #24) drives; `percent` is the window fill (`0..=100`).
+    ///
+    /// # Errors
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn report_usage(&self, percent: u8, window_reset: Timestamp) -> Result<()> {
+        let url = format!("{}/usage", self.base);
+        let body = json!({ "percent": percent, "window_reset": window_reset });
+        self.agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .map(|_response| ())
+            .map_err(|err| eyre!("could not report subscription usage: {err}"))
+    }
+
     /// Adds the task id to a roster request body when a task context is set.
     fn attach_task(&self, body: &mut Value) {
         if let (Some(task), Value::Object(fields)) = (self.task, body) {

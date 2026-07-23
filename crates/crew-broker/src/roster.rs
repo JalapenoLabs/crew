@@ -39,6 +39,10 @@ pub(crate) fn routes() -> Router<AppState> {
 pub(crate) struct RosterView {
     /// The crew's control standing: running, paused, or stood down (issue #41).
     standing: Standing,
+    /// Whether new work is auto-paused on shared-subscription usage (issue #56). Gates
+    /// every role while set, since the crew shares one subscription; distinct from the
+    /// manual `standing`, so a role honors either. Read the gauge with `GET /usage`.
+    usage_paused: bool,
     /// The live agent count and its per-liveness breakdown.
     count: Count,
     /// The roles, sorted by id.
@@ -84,11 +88,21 @@ impl RosterView {
     /// The roster view for the current state: the roster snapshot and the control state.
     pub(crate) fn from_state(state: &AppState) -> Self {
         let (standing, paused) = state.control_snapshot();
-        Self::of(&state.storage.roster(), standing, &paused)
+        Self::of(
+            &state.storage.roster(),
+            standing,
+            &paused,
+            state.is_usage_paused(),
+        )
     }
 
     /// Renders a roster snapshot as the wire view, tallying the live count as it goes.
-    fn of(roster: &Roster, standing: Standing, paused: &BTreeSet<RoleId>) -> Self {
+    fn of(
+        roster: &Roster,
+        standing: Standing,
+        paused: &BTreeSet<RoleId>,
+        usage_paused: bool,
+    ) -> Self {
         let mut count = Count::default();
         let roles = roster
             .iter()
@@ -110,6 +124,7 @@ impl RosterView {
         count.live = count.working + count.idle;
         Self {
             standing,
+            usage_paused,
             count,
             roles,
         }

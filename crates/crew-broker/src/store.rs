@@ -186,6 +186,8 @@ pub enum EventKindTag {
     Budget,
     /// A per-turn token-and-cost usage report (issue #55).
     Telemetry,
+    /// A shared-subscription usage reading and its auto-pause (issue #56).
+    Usage,
 }
 
 impl EventKindTag {
@@ -201,6 +203,7 @@ impl EventKindTag {
             "board" => Some(Self::Board),
             "budget" => Some(Self::Budget),
             "telemetry" => Some(Self::Telemetry),
+            "usage" => Some(Self::Usage),
             _ => None,
         }
     }
@@ -217,6 +220,7 @@ impl EventKindTag {
                 | (Self::Board, EventKind::Board(_))
                 | (Self::Budget, EventKind::Budget(_))
                 | (Self::Telemetry, EventKind::Telemetry(_))
+                | (Self::Usage, EventKind::Usage(_))
         )
     }
 }
