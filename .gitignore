@@ -3,7 +3,7 @@
 **/target
 Cargo.lock.orig
 
-# Broker runtime state (planned)
+# Broker runtime state: the durable log and roster the daemon writes to the state dir.
 *.crew.db
 *.crew.db-*
 /.crew

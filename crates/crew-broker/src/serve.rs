@@ -6,9 +6,12 @@ use eyre::{eyre, Result, WrapErr};
 use tokio::net::TcpListener;
 use tracing::{event, Level};
 
+use std::sync::Arc;
+
 use crate::api;
 use crate::config::{is_bind_allowed, Config};
 use crate::state::AppState;
+use crate::store::LogStore;
 
 /// Runs the broker until a shutdown signal, then returns.
 ///
@@ -33,11 +36,15 @@ pub async fn run(config: Config) -> Result<()> {
         .await
         .wrap_err_with(|| format!("could not create state dir {}", config.state_dir.display()))?;
 
+    // Open the durable log rooted at the state directory, replaying any prior events.
+    let storage = Arc::new(LogStore::open(&config.state_dir)?);
+
     let listener = TcpListener::bind(addr)
         .await
         .wrap_err_with(|| format!("could not bind {addr}"))?;
 
-    serve(listener, AppState::new(config), shutdown_signal()).await
+    let state = AppState::with_storage(config, storage);
+    serve(listener, state, shutdown_signal()).await
 }
 
 /// Serves the HTTP surface on `listener` until `shutdown` resolves.

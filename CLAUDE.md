@@ -176,8 +176,12 @@ vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 model, all serde round-tripping, plus the `Channel` model (issue #11) that parses
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
-`crewd` (the broker, issues #7, #8, #9, #11 and #12)
-starts on loopback, serves `GET /health`, and shuts down gracefully. It stores the
+`crewd` (the broker, issues #7, #8, #9, #11, #12 and #13)
+starts on loopback, serves `GET /health`, and shuts down gracefully. It keeps state
+behind a swappable `Storage` trait (append, query, roster read/write; issue #13): the
+daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus an in-memory
+index, rooted at the state dir), so a restart replays the full log; tests use the
+in-memory `MemoryStore`. It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
 reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
@@ -195,9 +199,10 @@ build in `docs/roadmap.md`. Verify with `cargo build` and `cargo test` at the ro
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
-`CREW_BROKER_STATE_DIR` (default `.crew`), `CREW_BROKER_ALLOW_NON_LOCAL`
-(`1`/`true`/`yes`), and `CREW_BROKER_SECRETS` (a whitespace-separated list of secret
-values the broker masks out of every message before storing or streaming it).
+`CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
+`roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`), and
+`CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
+out of every message before storing or streaming it).
 Binding a non-loopback address is refused unless the non-local flag is set, so the
 broker never exposes itself to the network by accident.
 

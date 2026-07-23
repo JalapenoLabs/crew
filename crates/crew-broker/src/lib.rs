@@ -33,4 +33,7 @@ pub use router::ChannelRouter;
 pub use secrets::{mask, Scrubber};
 pub use serve::run;
 pub use state::AppState;
-pub use store::{MemoryStore, Storage};
+pub use store::{
+    EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, LogStore, MemoryStore, Roster,
+    Storage,
+};
