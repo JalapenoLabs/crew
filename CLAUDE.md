@@ -83,11 +83,11 @@ not a reimplementation of the agent.
   (push, merge, delete, spend, external post) behind rules-of-engagement
   approval, pause or stand down per role and globally, and override the commander
   to command a specialist directly.
-- **Coordination robustness.** Parallel roles work in isolated git worktrees and
-  integrate through a deliberate step; a commander-maintained work ledger with
-  claims prevents collisions; lane ownership is enforced; nothing is done until an
-  adversarial gate fails to break it; the defibrillator also catches coordination
-  stalls, not just dead agents.
+- **Coordination robustness.** Parallel roles work in isolated git worktrees
+  (`worktrees` in the crew config, issue #43) and integrate through a deliberate step;
+  a commander-maintained work ledger with claims prevents collisions; lane ownership is
+  enforced; nothing is done until an adversarial gate fails to break it; the
+  defibrillator also catches coordination stalls, not just dead agents.
 - **Team memory.** A shared decision board (agreed interfaces, decisions,
   gotchas) the crew reads and writes, distinct from the transient message stream;
   a new role boots from a briefing packet (role card + board + rolling summary),
