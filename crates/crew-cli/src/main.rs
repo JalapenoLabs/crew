@@ -32,6 +32,7 @@ use mimalloc::MiMalloc;
 
 mod broker;
 mod control;
+mod cursor;
 mod down;
 mod integrate;
 mod notify;

@@ -276,3 +276,45 @@ fn a_typed_question_lands_on_the_stream_for_stall_detection() {
         "the question is on the stream as a `question` event: {events:?}"
     );
 }
+
+#[test]
+fn a_seeded_read_cursor_shows_only_messages_past_it() {
+    // The shim persists this cursor so a per-call process resumes where the last
+    // one left off, instead of reprinting the whole inbox (issue #130).
+    let broker = TestBroker::start();
+    broker.register("reader", &[]);
+    broker.register("sender", &[]);
+
+    let sender = broker.client("sender");
+    sender.send(Some("reader"), None, "first").unwrap();
+
+    // A fresh client (a new shim process) reads from the start: it sees the
+    // message and reports how far it read.
+    let mut first = broker.client("reader");
+    assert_eq!(
+        first.inbox().unwrap().len(),
+        1,
+        "the first read sees the message"
+    );
+    let cursor = first.read_through();
+    assert!(cursor > 0, "reading advanced the cursor past the message");
+
+    // A second message arrives after that read.
+    sender.send(Some("reader"), None, "second").unwrap();
+
+    // The next process seeds from the saved cursor: it sees only the new message,
+    // not the one already read.
+    let mut resumed = broker.client("reader").with_read_through(cursor);
+    let items = resumed.inbox().unwrap();
+    assert_eq!(items.len(), 1, "only the message past the cursor");
+    assert_eq!(items[0].body, "second");
+
+    // Seeding at the current end shows nothing new.
+    let mut caught_up = broker
+        .client("reader")
+        .with_read_through(resumed.read_through());
+    assert!(
+        caught_up.inbox().unwrap().is_empty(),
+        "nothing is past the end of the log",
+    );
+}
