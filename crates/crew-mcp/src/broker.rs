@@ -291,6 +291,49 @@ impl Broker {
         self.get("/gate")
     }
 
+    /// Records a decision, interface, or gotcha on the shared situation board (issue #49).
+    ///
+    /// The board is the crew's durable memory: recording here so the crew stops
+    /// re-deriving a settled `key`. Recording the same key again updates the entry.
+    ///
+    /// # Errors
+    /// Returns a message if the broker rejects the change or cannot be reached.
+    pub fn record(&self, key: &str, section: &str, body: &str) -> Result<String, String> {
+        let payload = json!({
+            "role": self.role.as_str(),
+            "key": key,
+            "section": section,
+            "body": body,
+        });
+        self.post_json("/board", &payload)?;
+        Ok(format!("recorded `{key}` on the board ({section})."))
+    }
+
+    /// Retracts a board entry the crew no longer holds (issue #49).
+    ///
+    /// # Errors
+    /// Returns a message if the entry is not on the board, or the broker cannot be reached.
+    pub fn retract(&self, key: &str) -> Result<String, String> {
+        let payload = json!({
+            "role": self.role.as_str(),
+            "key": key,
+            "retract": true,
+        });
+        self.post_json("/board", &payload)?;
+        Ok(format!("retracted `{key}` from the board."))
+    }
+
+    /// Reads the shared situation board, optionally filtered to one section (issue #49).
+    ///
+    /// # Errors
+    /// Returns a message if the broker cannot be reached or its response is malformed.
+    pub fn board(&self, section: Option<&str>) -> Result<BoardSnapshot, String> {
+        match section {
+            Some(section) => self.get(&format!("/board?section={section}")),
+            None => self.get("/board"),
+        }
+    }
+
     /// Posts a JSON `payload` to `path`, discarding the body on success.
     fn post_json(&self, path: &str, payload: &Value) -> Result<(), String> {
         let url = format!("{}{path}", self.base);
@@ -455,6 +498,26 @@ pub struct GateTask {
     /// The acceptance being claimed, or the failure on a handback.
     #[serde(default)]
     pub detail: String,
+}
+
+/// The situation board read from `GET /board`: the crew's durable memory (issue #49).
+#[derive(Debug, Deserialize)]
+pub struct BoardSnapshot {
+    /// The board's entries, ordered by section then topic.
+    pub entries: Vec<BoardEntryView>,
+}
+
+/// One entry on the situation board.
+#[derive(Debug, Deserialize)]
+pub struct BoardEntryView {
+    /// The entry's stable key (its topic).
+    pub key: String,
+    /// Which section it belongs to: `decision`, `interface`, or `gotcha`.
+    pub section: String,
+    /// The role that recorded it.
+    pub author: String,
+    /// The entry's content.
+    pub body: String,
 }
 
 /// The shape of `GET /roster`.

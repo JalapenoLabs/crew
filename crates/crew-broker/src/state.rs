@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crew_core::{Event, RoleId, Verdict};
+use crew_core::{BoardEvent, BoardSection, Event, EventKind, RoleId, Verdict};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -93,6 +93,60 @@ pub struct VerdictOutcome {
     pub detail: String,
 }
 
+/// One entry on the shared situation board: its section, author, and content (issue #49).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardEntry {
+    /// Which section it belongs to: a decision, an interface, or a gotcha.
+    pub section: BoardSection,
+    /// The role that last recorded it.
+    pub author: RoleId,
+    /// The entry's content: a decision and its rationale, an interface, or a gotcha.
+    pub body: String,
+}
+
+/// The shared situation board: the crew's durable memory, keyed by entry topic (issue #49).
+///
+/// A projection of the `board` events in the durable log, so it is rebuilt on a restart
+/// rather than kept in a separate persistence path: recording an entry inserts or replaces
+/// it, retracting one removes it. Keyed and sorted by topic for a stable read order.
+#[derive(Debug, Default)]
+struct Board {
+    entries: BTreeMap<String, BoardEntry>,
+}
+
+impl Board {
+    /// Rebuilds the board by folding every `board` event in the log, oldest first.
+    ///
+    /// This is how the board survives a restart (issue #49): the durable log is the
+    /// source of truth, and replaying it restores the live projection.
+    fn rebuild(events: &[Event]) -> Self {
+        let mut board = Self::default();
+        for event in events {
+            if let EventKind::Board(change) = &event.kind {
+                board.apply(change);
+            }
+        }
+        board
+    }
+
+    /// Applies one board change: a record inserts or replaces the entry, a retraction
+    /// removes it.
+    fn apply(&mut self, change: &BoardEvent) {
+        if change.retracted {
+            self.entries.remove(&change.key);
+        } else {
+            self.entries.insert(
+                change.key.clone(),
+                BoardEntry {
+                    section: change.section,
+                    author: change.author.clone(),
+                    body: change.body.clone(),
+                },
+            );
+        }
+    }
+}
+
 /// How many events a subscriber may fall behind before the broker drops the oldest
 /// for it. Large enough to absorb a burst while a slow reader catches up; a lagged
 /// subscriber reconnects with its `Last-Event-ID` and replays the gap from the log,
@@ -142,6 +196,9 @@ pub struct AppState {
     /// The adversarial done-gate: tasks under verification (issue #47). In memory like
     /// the control state, with every transition also recorded as a `verification` event.
     gate: Arc<Mutex<Gate>>,
+    /// The shared situation board: the crew's durable memory (issue #49). A projection of
+    /// the `board` events in the log, so it is rebuilt from the log on a restart.
+    board: Arc<Mutex<Board>>,
 }
 
 impl AppState {
@@ -163,6 +220,9 @@ impl AppState {
     pub fn with_storage(config: Config, storage: Arc<dyn Storage>) -> Self {
         let scrubber = Scrubber::new(config.secrets.iter().cloned());
         let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
+        // Rebuild the durable board from the log the storage just replayed, so a decision
+        // recorded before a restart is still on the board after it (issue #49).
+        let board = Board::rebuild(&storage.events());
         Self {
             config: Arc::new(config),
             storage,
@@ -172,6 +232,7 @@ impl AppState {
             publish_order: Arc::new(Mutex::new(())),
             control: Arc::new(Mutex::new(Control::default())),
             gate: Arc::new(Mutex::new(Gate::default())),
+            board: Arc::new(Mutex::new(board)),
         }
     }
 
@@ -301,6 +362,42 @@ impl AppState {
     /// another handler must not wedge the done-gate).
     fn gate(&self) -> std::sync::MutexGuard<'_, Gate> {
         self.gate.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records a board entry under `key`, or replaces the existing one (issue #49).
+    ///
+    /// Updates the live projection; the endpoint also publishes a `board` event, so the
+    /// change is durable and the board rebuilds from the log on a restart.
+    pub fn record_board(&self, key: String, section: BoardSection, author: RoleId, body: String) {
+        self.board().entries.insert(
+            key,
+            BoardEntry {
+                section,
+                author,
+                body,
+            },
+        );
+    }
+
+    /// Retracts the board entry under `key`, returning the entry it removed (issue #49).
+    ///
+    /// Returns `None` if no entry was recorded under `key`, so the endpoint can report a
+    /// retraction of nothing as a 404.
+    #[must_use = "the removed entry tells the caller whether the key was present"]
+    pub fn retract_board(&self, key: &str) -> Option<BoardEntry> {
+        self.board().entries.remove(key)
+    }
+
+    /// A snapshot of the whole board: every entry, keyed and ordered by topic (issue #49).
+    #[must_use]
+    pub fn board_snapshot(&self) -> BTreeMap<String, BoardEntry> {
+        self.board().entries.clone()
+    }
+
+    /// The board projection behind its lock, recovering from a poisoned mutex (a panic
+    /// in another handler must not wedge the board).
+    fn board(&self) -> std::sync::MutexGuard<'_, Board> {
+        self.board.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Scrubs an event of secrets, appends it to the log, and fans it to subscribers.

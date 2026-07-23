@@ -21,6 +21,7 @@
 //! [`crew_core`]: crew_core
 
 mod api;
+mod board;
 mod boundary;
 mod config;
 mod control;

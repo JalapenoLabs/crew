@@ -156,12 +156,21 @@ it:
   (`channel`, `role`, `kind`, `task`, `since`), so a joiner can summarize one task
   or channel. A fresh SSE connection with no cursor starts at the live tail, so the
   summary is the deliberate catch-up path.
-- **Scoped reads.** A role fetches its own channels, not the whole board.
+- **Scoped reads.** A role fetches its own channels, not the whole stream.
 - **Pruning.** Old raw events age out behind the summary in the joiner's view: the
   summary stands in for them so a joiner never reads them. Physically dropping the
   aged-out events from storage (bounding the broker's own footprint over a very long
   run) is a later optimization; the durable log stays the append-only source of
   truth in the meantime.
+- **Situation board.** The rolling summary bounds the *transient* stream; the shared
+  situation board bounds re-derivation (issue #49). It is the crew's durable memory,
+  distinct from the message stream: agreed interfaces, decisions and their rationale, and
+  known gotchas. A role reads it with `crew_board` before re-deriving a settled decision,
+  and records one with `crew_record` so no one relitigates it; the commander curates it. It
+  is a projection of `board` events, so it is auditable and rebuilt from the durable log
+  across an idle-stop or a restart (see `docs/observability.md`, the situation board). A
+  new role boots from its role card plus the board and the rolling summary, never the raw
+  log.
 
 ## Relationship to the coworker skill
 

@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::state::AppState;
-use crate::{boundary, control, events, gate, history, inbox, roster};
+use crate::{board, boundary, control, events, gate, history, inbox, roster};
 
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
 ///
@@ -16,8 +16,9 @@ use crate::{boundary, control, events, gate, history, inbox, roster};
 /// `GET /activity?agent=<role>` (a role's live activity timeline over SSE),
 /// `GET /history` (read past events, filtered and paginated, or `summary=true` for the
 /// rolling-summary compaction), the `/roster` endpoints (list, register, deregister),
-/// the control endpoints (`POST /pause`, `POST /resume`, `POST /standdown`), and the
-/// done-gate endpoints (`GET /gate`, `POST /gate/submit`, `POST /gate/verdict`).
+/// the control endpoints (`POST /pause`, `POST /resume`, `POST /standdown`), the
+/// done-gate endpoints (`GET /gate`, `POST /gate/submit`, `POST /gate/verdict`), and the
+/// situation-board endpoints (`GET /board`, `POST /board`).
 pub(crate) fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -28,6 +29,7 @@ pub(crate) fn build(state: AppState) -> Router {
         .merge(control::routes())
         .merge(boundary::routes())
         .merge(gate::routes())
+        .merge(board::routes())
         .with_state(state)
 }
 

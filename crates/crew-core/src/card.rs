@@ -241,6 +241,15 @@ impl RoleCard {
 
         out.push('\n');
         out.push_str(
+            "The crew keeps a shared situation board, its durable memory: agreed interfaces, \
+             decisions and their rationale, and known gotchas. Read it with crew_board before you \
+             re-derive a settled decision or re-open a resolved one, and record a new decision, \
+             interface, or gotcha with crew_record so no one relitigates it. The board outlives \
+             the message stream and survives a restart; the commander curates it.\n",
+        );
+
+        out.push('\n');
+        out.push_str(
             "A redirect or belay in your inbox is a command from the General: honor it at your \
              very next tool boundary, not when your current step finishes. A redirect steers you: \
              keep your task and adjust course. A belay overrides you: stop your current work and \
@@ -475,6 +484,10 @@ mod tests {
         assert!(
             briefing.contains("Done means verified") && briefing.contains("crew_submit"),
             "tells the role to verify before done and to be a skeptic"
+        );
+        assert!(
+            briefing.contains("situation board") && briefing.contains("crew_board"),
+            "points the role at the shared situation board"
         );
         assert!(
             briefing.contains("redirect") && briefing.contains("belay"),
