@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader};
 use crew_substrate::broker::Config as BrokerConfig;
 use crew_substrate::core::{
     Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind, MessageKind,
-    Sender, Verdict, VerificationEvent,
+    Sender, TelemetryEvent, Verdict, VerificationEvent,
 };
 use eyre::{eyre, Result, WrapErr};
 use tracing::{event, Level};
@@ -150,7 +150,19 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Verification(verification) => ("verification", verification_body(verification)),
         EventKind::Board(board) => ("board", board_body(board)),
         EventKind::Budget(budget) => ("budget", budget_body(budget)),
+        EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
     }
+}
+
+/// A short description of a per-turn token-and-cost usage report (issue #55).
+fn telemetry_body(telemetry: &TelemetryEvent) -> String {
+    // Cost rides the wire in micro-USD; render whole dollars and cents.
+    let dollars = telemetry.cost_micro_usd / 1_000_000;
+    let cents = (telemetry.cost_micro_usd % 1_000_000) / 10_000;
+    format!(
+        "{} spent {} tokens (${dollars}.{cents:02})",
+        telemetry.role, telemetry.tokens
+    )
 }
 
 /// A short description of a token-spend report against the crew budget (issue #54).

@@ -99,8 +99,11 @@ it.
 - **Economy.** Model per role; a shared token budget with per-role caps (issue #54, done: a
   crew-wide `token_budget` and per-role `token_cap`, enforced by idle-stopping a role or the
   crew at a cap and surfaced as a `budget` event over the stream, with the live token feed
-  awaiting the stream-json activity parser, issue #24); auto-idle with cost telemetry; and
-  subscription usage awareness.
+  awaiting the stream-json activity parser, issue #24); auto-idle on quiet with cost and
+  token telemetry (issue #55, done: the lifecycle machine idle-stops a quiet role, and a
+  `GET /stats` rollup folds per-turn `telemetry` events and the roles' `lifecycle` events
+  into tokens, cost, and working time per role and in aggregate, feeding the cockpit and the
+  Seraphim stats); and subscription usage awareness.
 
 ## Parallel track: coworker skill transport upgrade (done)
 

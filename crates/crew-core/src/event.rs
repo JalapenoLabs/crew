@@ -139,8 +139,9 @@ impl Event {
 /// `message` is inter-agent communication, `lifecycle` is a supervised state change,
 /// `activity` is an agent's own work parsed from its stream-json, `boundary` is a lane
 /// crossing (issue #46), `verification` is a step through the adversarial done-gate
-/// (issue #47), `board` is a change to the shared situation board (issue #49), and
-/// `budget` is a token-spend report against the crew budget (issue #54).
+/// (issue #47), `board` is a change to the shared situation board (issue #49),
+/// `budget` is a token-spend report against the crew budget (issue #54), and
+/// `telemetry` is a per-turn token-and-cost usage report (issue #55).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -158,6 +159,8 @@ pub enum EventKind {
     Board(BoardEvent),
     /// A token-spend report against the crew budget, and any cap it hit (issue #54).
     Budget(BudgetEvent),
+    /// A per-turn usage report: the tokens and cost a role spent on a turn (issue #55).
+    Telemetry(TelemetryEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown body.
@@ -445,6 +448,26 @@ impl From<Spend> for BudgetEvent {
             breach: spend.breach,
         }
     }
+}
+
+/// A per-turn usage report: the tokens and cost a role spent on one turn (issue #55).
+///
+/// The supervisor publishes one as it records each turn's usage, so per-role and aggregate
+/// spend is legible off the stream regardless of any budget. The broker folds these (with
+/// the role's working time, read from its `lifecycle` events) into the `GET /stats` rollup
+/// that feeds the cockpit and the Seraphim stats. The counts are per turn (incremental), so
+/// the rollup is their running sum.
+///
+/// Cost is carried as micro-USD (millionths of a dollar) so it accumulates exactly, without
+/// floating-point drift; a consumer divides by 1,000,000 to render dollars.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryEvent {
+    /// The role whose turn this usage belongs to.
+    pub role: RoleId,
+    /// The tokens the turn spent.
+    pub tokens: u64,
+    /// The turn's cost in micro-USD (millionths of a dollar).
+    pub cost_micro_usd: u64,
 }
 
 impl BoardSection {

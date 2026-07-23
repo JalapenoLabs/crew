@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crew_core::{Budget, BudgetEvent, BudgetScope, RoleId};
+use crew_core::{Budget, BudgetEvent, BudgetScope, RoleId, TelemetryEvent};
 use eyre::{eyre, Result};
 use tracing::{event, Level};
 
@@ -284,16 +284,44 @@ impl Fleet {
         self
     }
 
+    /// Records a turn's `tokens` and `cost_micro_usd` for `role`: telemetry then budget.
+    ///
+    /// This is the full turn-usage seam the activity parser (issue #24) drives with each
+    /// turn's usage once it lands. It surfaces a `telemetry` event so per-role and aggregate
+    /// spend is legible off the stream regardless of any budget (issue #55, feeding
+    /// `GET /stats`), then charges the tokens against the crew budget, idle-stopping a role
+    /// or the crew at a cap (issue #54). Reporting the telemetry is best-effort (a failure
+    /// is logged, not fatal); the budget enforcement still runs.
+    ///
+    /// # Errors
+    /// Returns an error if idle-stopping a role on a budget breach fails (its driver is gone).
+    pub fn record_usage(&self, role: &RoleId, tokens: u64, cost_micro_usd: u64) -> Result<()> {
+        // Always surface the usage, so an unbounded crew is still legible (issue #55).
+        let telemetry = TelemetryEvent {
+            role: role.clone(),
+            tokens,
+            cost_micro_usd,
+        };
+        if let Err(err) = self.roster.report_telemetry(&telemetry) {
+            event!(
+                name: "supervisor.telemetry.report_failed",
+                Level::WARN,
+                crew.role = %role,
+                "could not report telemetry for `{{crew.role}}`: {err}",
+            );
+        }
+        // Then charge it against the crew budget, which enforces the caps (issue #54).
+        self.record_spend(role, tokens)
+    }
+
     /// Charges `tokens` of spend to `role` against the crew budget, enforcing the caps.
     ///
     /// Surfaces a `budget` event so spend against budget is visible on the stream, and when
     /// the spend reaches a ceiling idle-stops the role (its own cap) or the whole crew (the
     /// crew-wide budget) rather than overrun (issue #54). An unbounded crew is a no-op.
     ///
-    /// This is the seam the activity parser (issue #24) drives with each turn's token
-    /// usage once it lands; until then the budget is enforced against spend fed here
-    /// directly. Reporting the spend to the broker is best-effort (a failure is logged, not
-    /// fatal); the enforcement idle-stop still happens.
+    /// Prefer [`record_usage`](Fleet::record_usage), which also emits the per-turn telemetry
+    /// the `GET /stats` rollup folds; this is the budget-only path.
     ///
     /// # Errors
     /// Returns an error if idle-stopping a role fails (its driver is gone).
