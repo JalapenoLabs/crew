@@ -207,14 +207,23 @@ rolling-summary history are still scaffolds waiting for the phased build in
 `crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 `initialize` / `tools/list` / `tools/call`), which the supervisor spawns one of per
-agent. It acts as a single role (`CREW_ROLE`) and is a thin synchronous client
-(`ureq`) over the broker's HTTP API; it never touches the store. It exposes three
+agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
+the roster at boot, and is a thin synchronous client (`ureq`) over the broker's HTTP
+API; it never touches the store. It exposes three
 tools with self-documenting schemas: `crew_send` (post as the role to a channel or a
 teammate, defaulting to the commander), `crew_inbox` (read the messages addressed to
 the role since the last call, self-filtered, over a per-session history cursor), and
 `crew_roster` (list registered teammates, their owned paths, and liveness). A tool
 failure returns as an `isError` result, not a protocol error. The roadmap step is
 `crew_inbox` push over the per-role SSE stream instead of the current history read.
+
+`crew-core` also carries the role card (issue #18): `RoleCard` is the thin bootstrap
+an agent boots from, a TOML document naming the role, its owned lane, its acceptance
+bar, and the broker address (`BrokerEndpoint`), with `from_toml` / `to_toml` the
+loader and `briefing()` rendering the boot prompt (the shape the `coworker` skill
+shrinks to). One loader serves both paths: `crew_supervisor::provision` writes a
+role's card and returns the `CREW_ROLE_CARD` environment plus its briefing, and the
+`crew-mcp` binary reads the same card to boot and register. See `docs/roles.md`.
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

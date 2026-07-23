@@ -58,6 +58,13 @@ It spawns each agent as a `claude -p --output-format stream-json` process and
 parses that stream into per-agent activity events, the same way Seraphim parses
 the agent stream today (see `observability.md`).
 
+Each agent boots from a **role card** (issue #18): a thin TOML document naming the
+role, its owned lane, its acceptance bar, and the broker address (see
+`docs/roles.md`). `crew_supervisor::provision` writes a card per role and returns
+the `CREW_ROLE_CARD` environment plus the briefing the agent starts from. The
+standalone flow reads the very same card, so one loader (`crew_core::RoleCard`)
+serves both.
+
 The supervisor targets Claude Code by default and Codex through the same
 interface via a CLI shim.
 
@@ -66,9 +73,10 @@ interface via a CLI shim.
 Agents coordinate through MCP tools, not by shelling out to append to a file.
 The `crew-mcp` crate ships the `crew-mcp` binary: a JSON-RPC 2.0 server over
 newline-delimited stdio (protocol `2024-11-05`) that the supervisor spawns one of
-per agent. It acts as a single role (`CREW_ROLE`) and is a thin client over the
-broker's HTTP API (`CREW_BROKER_HOST` / `CREW_BROKER_PORT`); it never touches the
-store. It exposes three tools (issue #17):
+per agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18) that names the
+role, its lane, and the broker, or falls back to `CREW_ROLE` plus the broker
+config. It registers the role on the roster at boot and is a thin client over the
+broker's HTTP API; it never touches the store. It exposes three tools (issue #17):
 
 - `crew_send` sends a message as the role to a channel or a teammate. With
   neither `to` nor `channel` it reaches the commander; `to: "backend"` direct

@@ -56,6 +56,41 @@ thin bootstrap; the coordination rules live in crew itself, not restated per
 agent. This is the shape the `coworker` skill should shrink to once crew exists:
 "you are the backend role, here is your lane, here is the broker."
 
+### Format
+
+A card is a TOML document, chosen so a human can read and author one at a glance
+(issue #18). The type is `crew_core::RoleCard`:
+
+```toml
+role = "backend"
+owned_paths = ["api/", "db/"]
+acceptance = "Tests green, migrations reversible, no clippy warnings."
+
+[broker]
+host = "127.0.0.1"
+port = 2739
+```
+
+`role` and `[broker]` are required; `owned_paths` and `acceptance` default to
+empty. Only the four per-agent facts live here. The channels, the message schema,
+and the chain of command are common to the crew and stay in crew.
+
+### Loader
+
+One loader serves both boot paths, so a card means the same thing everywhere:
+
+- **Supervised.** `crew_supervisor::provision` writes a role's card into the
+  agent's directory and returns the `CREW_ROLE_CARD` path plus the briefing. The
+  supervisor spawns the agent with that environment set.
+- **Standalone.** The `crew-mcp` server reads `CREW_ROLE_CARD`, parses it with
+  `RoleCard::from_toml`, and registers the role on the roster so the unit sees it.
+  Without a card it falls back to `CREW_ROLE` plus the broker's own config, so a
+  bare manual boot still works.
+
+`RoleCard::briefing()` renders the thin bootstrap prompt: it names the role,
+states its lane and acceptance bar, and points at the broker and the MCP tools,
+and stops there. That prompt is the shape the `coworker` skill shrinks to.
+
 ## Sizing guidance
 
 Match the crew to the mission:
