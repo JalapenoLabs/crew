@@ -93,7 +93,9 @@ it.
   rebuilt from the log across a restart), a new-role briefing packet (`crew_briefing`,
   issue #50, done: the board plus a lane-scoped rolling summary, size-capped, so a fresh
   role catches up in seconds without the whole log), the `crew top` terminal cockpit, and
-  push notifications on the actionable moments.
+  push notifications on the actionable moments (`crew notify`, issue #52, done: a native
+  notification when a question is asked, a role dies, or the crew stands down, configurable
+  per moment and quiet on routine chatter, over the same event stream).
 - **Economy.** Model per role, a shared token budget with per-role caps,
   auto-idle with cost telemetry, and subscription usage awareness.
 

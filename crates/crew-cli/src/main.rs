@@ -33,6 +33,7 @@ use mimalloc::MiMalloc;
 mod broker;
 mod control;
 mod down;
+mod notify;
 mod paths;
 mod pause;
 mod shim;
@@ -80,6 +81,18 @@ enum Command {
         /// Watch one role's self-filtered inbox instead of the whole firehose.
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Push a native notification on each actionable moment: a question, a death, a stand-down.
+    Notify {
+        /// Mute one or more moments (comma-separated): `question`, `died`, `stood-down`.
+        #[arg(long, value_delimiter = ',', value_name = "MOMENT")]
+        mute: Vec<notify::Moment>,
+        /// Skip the terminal bell; still show the desktop notification and the log line.
+        #[arg(long)]
+        no_sound: bool,
         /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT` environment).
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
@@ -198,6 +211,14 @@ fn main() -> Result<()> {
         Command::Send { to, channel, body } => shim::send(to.as_deref(), channel.as_deref(), &body),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
+        Command::Notify {
+            mute,
+            no_sound,
+            broker,
+        } => notify::notify(
+            broker.as_deref(),
+            &notify::NotifyPolicy::new(mute, !no_sound),
+        ),
         Command::Redirect {
             role,
             message,
