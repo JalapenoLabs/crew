@@ -27,6 +27,7 @@
 //!   deadlock, an unanswered question, or a ledger with no forward motion, and escalates
 //!   the specific [`Stall`] so silence never reads as progress.
 
+mod integrate;
 mod lifecycle;
 mod mcp;
 mod roster;
@@ -40,6 +41,9 @@ use std::path::{Path, PathBuf};
 use crew_core::{RoleCard, ROLE_CARD_ENV};
 use eyre::{Result, WrapErr};
 
+pub use integrate::{
+    CheckOutcome, Conflict, IntegrationReport, Integrator, Standing, DEFAULT_INTEGRATION_BRANCH,
+};
 pub use lifecycle::{AgentState, DeathCause, Fleet, Incident, LifecyclePolicy, Recovery};
 pub use mcp::{agent_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
 pub use roster::{Liveness, RosterClient};

@@ -83,7 +83,9 @@ it.
   (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
   the commander.
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
-  config, issue #43, done) with an integrator to follow, a work ledger with claims
+  config, issue #43, done) with an integration step to follow (`crew integrate`, issue #44,
+  done: merge each role's `crew/<role>` branch into one branch, surface conflicts rather than
+  drop them, and run the acceptance checks on the merged result), a work ledger with claims
   (`crew_claim` / `crew_ledger`, issue #45, done), lane-ownership enforcement
   (`lane_enforcement` and the `crew_lane` tool, issue #46, done), an adversarial done-gate
   (`crew_submit` / `crew_verdict` / `crew_gate`, issue #47, done), and coordination-stall

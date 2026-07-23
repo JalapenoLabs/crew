@@ -32,6 +32,7 @@ use mimalloc::MiMalloc;
 mod broker;
 mod control;
 mod down;
+mod integrate;
 mod notify;
 mod paths;
 mod pause;
@@ -145,6 +146,21 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Integrate the roles' `crew/<role>` branches into one coherent, green branch (issue #44).
+    Integrate {
+        /// The repo whose `crew/<role>` branches to merge. Defaults to the current directory.
+        #[arg(long, value_name = "PATH", default_value = ".")]
+        repo: String,
+        /// The base ref the integration branch is cut from. Defaults to `HEAD`.
+        #[arg(long, value_name = "REF", default_value = "HEAD")]
+        base: String,
+        /// The integration branch to merge onto. Defaults to `crew/integration`.
+        #[arg(long, value_name = "NAME", default_value = "crew/integration")]
+        branch: String,
+        /// An acceptance check to run on the merged result, a shell command, e.g. "cargo test".
+        #[arg(long, value_name = "CMD")]
+        check: Option<String>,
+    },
     /// List the unit's roster: every role, its lane, and its liveness.
     Roster,
     /// Check whether a file path is in this role's lane before editing it.
@@ -252,6 +268,12 @@ fn main() -> Result<()> {
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
         Command::Usage { broker } => usage::usage(broker.as_deref()),
+        Command::Integrate {
+            repo,
+            base,
+            branch,
+            check,
+        } => integrate::integrate(&repo, &base, &branch, check.as_deref()),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
         Command::Claim { task, state, title } => {

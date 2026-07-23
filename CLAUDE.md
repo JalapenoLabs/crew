@@ -85,7 +85,10 @@ not a reimplementation of the agent.
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
   commander to command a specialist directly.
 - **Coordination robustness.** Parallel roles work in isolated git worktrees
-  (`worktrees` in the crew config, issue #43) and integrate through a deliberate step;
+  (`worktrees` in the crew config, issue #43) and integrate through a deliberate step
+  (`crew integrate`, issue #44: merge each role's `crew/<role>` branch into one branch,
+  surface conflicts rather than drop them, and run the acceptance checks on the merged
+  result, so the integrated whole is green before it ships);
   a commander-maintained work ledger with claims prevents collisions (`crew_claim` /
   `crew_ledger`, issue #45); lane ownership is enforced (`lane_enforcement` policy plus
   the `crew_lane` tool, issue #46: a role checks a path against its owned lane before an
@@ -147,7 +150,8 @@ The full design is in `docs/architecture.md`. In short:
 - **CLI (`crew`):** the operator front-end (`crew up` / `crew down`, and the
   `crew pause` / `crew resume` / `crew standdown` brake and kill switch), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
-  mid-task), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
+  mid-task), `crew integrate` to merge the roles' branches into one coherent, green branch
+  (issue #44), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
@@ -504,6 +508,25 @@ is escalated as a specific `supervisor.stall.detected` warning (who is waiting o
 and recorded (read with `Fleet::stalls`), once per stall until it resolves. It reads the
 stream over HTTP rather than adding an event kind, keeping it out of the in-flight ledger
 PR's path; surfacing a stall on the stream for the cockpit is a later refinement.
+
+The **integration step** brings the roles' isolated work together (issue #44,
+`crew_supervisor::integrate`). Parallel roles work on `crew/<role>` branches in their own
+worktrees (issue #43); their work is done only when it merges into one coherent whole.
+`Integrator::integrate` resets the integration branch (`crew/integration`) to a base in a
+dedicated worktree (so it never disturbs the main checkout or the role worktrees), merges
+each role branch in order, and runs the crew's acceptance checks (a `sh -c` command, build
+or tests) on the merged result. It returns an `IntegrationReport` with a `Standing`
+(`Green` / `Merged` / `Conflicts` / `ChecksFailed`). Conflicts are resolved, not dropped: a
+conflicting merge is aborted and reported with the branch and the files it collides on, for a
+human or the commander to resolve, never a force-merge that discards a role's work. Migrations
+and other ordering concerns stay linear because the acceptance checks run on the integrated
+branch, so a collision that breaks the build or the tests fails the integration rather than
+shipping. `crew integrate --repo . --base HEAD --check "cargo test"` runs it from the CLI:
+it discovers the `crew/<role>` branches, integrates them, and prints the standing and what to
+do next (resolve conflicts, or push `crew/integration` and open a PR). The stacked-PR strategy
+for roles that build on each other is to order the branches so a dependency merges before its
+dependents. Depends on the done-gate (issue #47): the gate judges a part done, the integration
+judges the whole green. See `docs/roles.md` (the integration step).
 
 The fleet also keeps a crew from quietly burning a fortune (issue #54, `crew_core::budget`).
 A crew sets a crew-wide `token_budget` and optional per-role `token_cap` in its config;
