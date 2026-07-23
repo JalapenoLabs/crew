@@ -386,8 +386,12 @@ yields the default crew: commander, backend, frontend, qa) and validates the who
 so a documented config produces a valid crew and an invalid one fails with a precise
 `ConfigError` (an unknown commander, an overlapping ownership boundary, a duplicate or
 empty role, or a typo'd field). `to_cards(&broker)` produces the per-role `RoleCard`s
-the supervisor spawns, and `model_for(role)` resolves the spawn model. See
-`docs/config.md`.
+the supervisor spawns, and `model_for(role)` resolves the spawn model. Each `repos` entry
+is a path or a bare name; `repo_paths(config_dir)` resolves it for worktree isolation
+(issue #126): an absolute path as-is, else joined under the `workspace` root, which
+defaults to the crew config file's own directory (overridable with the `workspace` field).
+Anchoring to the config, not the shell's cwd, means a name points at the same clone
+wherever `crew up` runs. See `docs/config.md`.
 
 Model per role spends strong-model budget where it matters and a cheap model everywhere
 else (issue #53, `crew_core::model`). A role runs a **model tier** (`strong` / `standard`
