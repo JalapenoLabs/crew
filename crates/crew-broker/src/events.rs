@@ -22,7 +22,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::error::ApiError;
-use crate::state::AppState;
+use crate::state::{AppState, Sequenced};
 
 /// The message routes: post to a channel, read the log, and subscribe to the feed.
 pub(crate) fn routes() -> Router<AppState> {
@@ -143,7 +143,7 @@ async fn post_message(
     let request = PostMessage::from_json(raw)?;
     request.validate(&channel)?;
 
-    let mut event = Event {
+    let event = Event {
         ts: crew_core::Timestamp::now(),
         from: request.from,
         channel: ChannelId::new(channel),
@@ -154,10 +154,10 @@ async fn post_message(
             body: request.body,
         }),
     };
-    // `publish` scrubs, stores, and fans out under the shared path, so the response,
-    // the log, and every live stream carry the same scrubbed event.
-    state.publish(&mut event);
-    Ok((StatusCode::CREATED, Json(event)))
+    // `publish` masks any secret, stores the event, and fans out the scrubbed result
+    // to every subscriber, so the response, the log, and every stream agree.
+    let sequenced = state.publish(event);
+    Ok((StatusCode::CREATED, Json(sequenced.event)))
 }
 
 /// The body of `GET /events`: the stored event log, oldest first.
@@ -173,17 +173,23 @@ async fn list_events(State(state): State<AppState>) -> Json<EventLog> {
     })
 }
 
-/// `GET /stream`: subscribe to the live event feed as Server-Sent Events.
+/// `GET /stream`: subscribe to the whole live event feed as Server-Sent Events.
 ///
-/// Each event arrives already scrubbed. A subscriber that lags past the channel's
-/// buffer skips the dropped events rather than closing the stream, so a slow reader
-/// still receives everything after the gap.
+/// Each event arrives already scrubbed and carries its log sequence as the SSE `id`.
+/// A subscriber that lags past the channel's buffer skips the dropped events rather
+/// than closing the stream, so a slow reader still receives everything after the gap.
+/// This is the unfiltered firehose; `GET /inbox?role=<role>` is the per-role,
+/// self-filtered view.
 async fn stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = state.broadcast.subscribe();
     let events = BroadcastStream::new(receiver).filter_map(|result| match result {
-        Ok(event) => SseEvent::default().json_data(&event).ok().map(Ok),
+        Ok(Sequenced { seq, event }) => SseEvent::default()
+            .id(seq.to_string())
+            .json_data(&event)
+            .ok()
+            .map(Ok),
         Err(BroadcastStreamRecvError::Lagged(_)) => None,
     });
     Sse::new(events).keep_alive(KeepAlive::default())
@@ -357,7 +363,8 @@ mod tests {
         let streamed = subscriber
             .recv()
             .await
-            .expect("the message must reach the subscriber");
+            .expect("the message must reach the subscriber")
+            .event;
         assert_eq!(
             streamed, returned,
             "the subscriber receives the posted event"

@@ -108,8 +108,7 @@ async fn register(
             liveness,
         },
     );
-    let mut event = roster_event(&role, lifecycle_for(liveness, existed));
-    state.publish(&mut event);
+    state.publish(roster_event(&role, lifecycle_for(liveness, existed)));
 
     let code = if existed {
         StatusCode::OK
@@ -133,8 +132,7 @@ async fn deregister(
             "role `{role}` is not registered"
         )));
     }
-    let mut event = roster_event(&role, Lifecycle::Stopped);
-    state.publish(&mut event);
+    state.publish(roster_event(&role, Lifecycle::Stopped));
     Ok(Json(RosterView::of(&state.storage.roster())))
 }
 
@@ -313,7 +311,8 @@ mod tests {
         let started = stream
             .recv()
             .await
-            .expect("a roster change reaches the stream");
+            .expect("a roster change reaches the stream")
+            .event;
         assert!(matches!(
             started.kind,
             EventKind::Lifecycle(Lifecycle::Started)
@@ -325,7 +324,11 @@ mod tests {
 
         // Deregister publishes a Lifecycle::Stopped.
         deregister(&state, "backend").await;
-        let stopped = stream.recv().await.expect("deregister reaches the stream");
+        let stopped = stream
+            .recv()
+            .await
+            .expect("deregister reaches the stream")
+            .event;
         assert!(matches!(
             stopped.kind,
             EventKind::Lifecycle(Lifecycle::Stopped)
