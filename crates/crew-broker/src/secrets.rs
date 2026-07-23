@@ -1,11 +1,13 @@
-//! Masking and scrubbing of secret values (mirrors Seraphim's Scrubber posture).
+//! Masking and scrubbing of secret values (mirrors Seraphim's Scrubber
+//! posture).
 //!
 //! A crew agent might echo a token it was given into a message. [`Scrubber`]
-//! removes a configured set of secret values from an [`Event`] before the broker
-//! persists it or streams it to subscribers, so a leaked secret never reaches the
-//! log, the stream, or a front-end. [`mask`] turns a secret into an identifiable
-//! preview (used as the replacement text), so an operator can still tell two
-//! tokens apart without either being revealed. Both are pure and unit-tested.
+//! removes a configured set of secret values from an [`Event`] before the
+//! broker persists it or streams it to subscribers, so a leaked secret never
+//! reaches the log, the stream, or a front-end. [`mask`] turns a secret into an
+//! identifiable preview (used as the replacement text), so an operator can
+//! still tell two tokens apart without either being revealed. Both are pure and
+//! unit-tested.
 
 use std::collections::HashSet;
 
@@ -26,15 +28,16 @@ const KNOWN_PREFIXES: &[&str] = &[
 /// How many trailing characters stay visible when a known prefix is recognized.
 const REVEALED_TAIL: usize = 4;
 
-/// Shortest secret we will scrub. Replacing a very short value (say `"1"`) would
-/// corrupt unrelated text, and real tokens are long, so we refuse anything shorter.
+/// Shortest secret we will scrub. Replacing a very short value (say `"1"`)
+/// would corrupt unrelated text, and real tokens are long, so we refuse
+/// anything shorter.
 const MIN_SCRUB_LEN: usize = 8;
 
 /// Masks a secret into an identifiable, length-preserving preview.
 ///
 /// A value beginning with a known prefix keeps that prefix and its last few
-/// characters, with the middle replaced by `*`; any other value is fully masked.
-/// An empty input returns an empty string.
+/// characters, with the middle replaced by `*`; any other value is fully
+/// masked. An empty input returns an empty string.
 ///
 /// # Examples
 /// ```
@@ -83,8 +86,9 @@ pub struct Scrubber {
 impl Scrubber {
     /// Builds a scrubber from raw secret values.
     ///
-    /// Empty, duplicate, and too-short values (see [`MIN_SCRUB_LEN`]) are ignored,
-    /// so an unset or trivial secret never corrupts unrelated text.
+    /// Empty, duplicate, and too-short values (see [`MIN_SCRUB_LEN`]) are
+    /// ignored, so an unset or trivial secret never corrupts unrelated
+    /// text.
     #[must_use]
     pub fn new<I: IntoIterator<Item = String>>(secrets: I) -> Self {
         let mut seen = HashSet::new();
@@ -121,8 +125,9 @@ impl Scrubber {
 
     /// Scrubs every string value inside a JSON value, in place.
     ///
-    /// Object keys are field names, not secrets, so they are left untouched; only
-    /// string values, including those nested in arrays and objects, are masked.
+    /// Object keys are field names, not secrets, so they are left untouched;
+    /// only string values, including those nested in arrays and objects,
+    /// are masked.
     pub fn scrub_value(&self, value: &mut Value) {
         match value {
             Value::String(text) => {
@@ -140,17 +145,17 @@ impl Scrubber {
         }
     }
 
-    /// Scrubs every string field of an event, in place, before it is persisted or
-    /// streamed: the message body and every per-kind text field.
+    /// Scrubs every string field of an event, in place, before it is persisted
+    /// or streamed: the message body and every per-kind text field.
     ///
     /// A no-op when the scrubber holds no secrets.
     ///
     /// # Panics
-    /// Panics only if an [`Event`] fails to round-trip through its own JSON, which
-    /// signals a bug in the event model: an `Event` always serializes, and masking
-    /// only rewrites string contents, so the scrubbed value always deserializes
-    /// back into an `Event`. Failing loud beats silently persisting an unscrubbed
-    /// secret.
+    /// Panics only if an [`Event`] fails to round-trip through its own JSON,
+    /// which signals a bug in the event model: an `Event` always
+    /// serializes, and masking only rewrites string contents, so the
+    /// scrubbed value always deserializes back into an `Event`. Failing
+    /// loud beats silently persisting an unscrubbed secret.
     pub fn scrub_event(&self, event: &mut Event) {
         if self.is_empty() {
             return;

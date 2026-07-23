@@ -1,23 +1,24 @@
 //! Binding the listener, serving the HTTP surface, and graceful shutdown.
 
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use eyre::{eyre, Result, WrapErr};
 use tokio::net::TcpListener;
 use tracing::{event, Level};
 
-use std::sync::Arc;
-
-use crate::api;
-use crate::config::{is_bind_allowed, Config};
-use crate::state::AppState;
-use crate::store::LogStore;
+use crate::{
+    api,
+    config::{is_bind_allowed, Config},
+    state::AppState,
+    store::LogStore,
+};
 
 /// Runs the broker until a shutdown signal (Ctrl-C or, on Unix, `SIGTERM`).
 ///
-/// This is [`run_until`] wired to the process signal handler; the `crewd` binary uses
-/// it. An embedder that owns its own shutdown (for example `crew up`, which stands the
-/// broker down alongside the crew) uses [`run_until`] directly.
+/// This is [`run_until`] wired to the process signal handler; the `crewd`
+/// binary uses it. An embedder that owns its own shutdown (for example `crew
+/// up`, which stands the broker down alongside the crew) uses [`run_until`]
+/// directly.
 ///
 /// # Errors
 /// See [`run_until`].
@@ -27,14 +28,16 @@ pub async fn run(config: Config) -> Result<()> {
 
 /// Runs the broker until `shutdown` resolves, then returns.
 ///
-/// Refuses a non-loopback bind unless [`Config::allow_non_local`] is set, ensures the
-/// state directory exists, opens the durable log, binds the configured address, and
-/// serves the HTTP surface, draining gracefully when `shutdown` resolves.
+/// Refuses a non-loopback bind unless [`Config::allow_non_local`] is set,
+/// ensures the state directory exists, opens the durable log, binds the
+/// configured address, and serves the HTTP surface, draining gracefully when
+/// `shutdown` resolves.
 ///
 /// # Errors
-/// Returns an error if the configured address is non-loopback and not opted in, if the
-/// state directory cannot be created, if the durable log cannot be opened, if the
-/// address cannot be bound, or if the server errors while running.
+/// Returns an error if the configured address is non-loopback and not opted in,
+/// if the state directory cannot be created, if the durable log cannot be
+/// opened, if the address cannot be bound, or if the server errors while
+/// running.
 pub async fn run_until(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
@@ -51,7 +54,8 @@ pub async fn run_until(
         .await
         .wrap_err_with(|| format!("could not create state dir {}", config.state_dir.display()))?;
 
-    // Open the durable log rooted at the state directory, replaying any prior events.
+    // Open the durable log rooted at the state directory, replaying any prior
+    // events.
     let storage = Arc::new(LogStore::open(&config.state_dir)?);
 
     let listener = TcpListener::bind(addr)
@@ -64,14 +68,14 @@ pub async fn run_until(
 
 /// Serves the broker's HTTP surface on `listener` until `shutdown` resolves.
 ///
-/// The building block behind [`run`]: an embedder (or an integration test) binds its
-/// own listener and supplies a custom [`AppState`], for example to serve on an
-/// ephemeral port or over a specific [`Storage`](crate::Storage) backend, and drives
-/// shutdown with its own future.
+/// The building block behind [`run`]: an embedder (or an integration test)
+/// binds its own listener and supplies a custom [`AppState`], for example to
+/// serve on an ephemeral port or over a specific [`Storage`](crate::Storage)
+/// backend, and drives shutdown with its own future.
 ///
 /// # Errors
-/// Returns an error if the listener has no local address or the server exits with an
-/// error.
+/// Returns an error if the listener has no local address or the server exits
+/// with an error.
 pub async fn serve(
     listener: TcpListener,
     state: AppState,
@@ -124,12 +128,13 @@ async fn shutdown_signal() {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
 
     use super::serve;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{config::Config, state::AppState};
 
     #[tokio::test]
     async fn serves_health_then_shuts_down_cleanly() {

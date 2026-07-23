@@ -1,21 +1,25 @@
 //! End-to-end test of the agent CLI shim (issue #28).
 //!
-//! It starts a real `crewd` in-process on an ephemeral loopback port, then drives the
-//! actual `crew` binary the way a Codex agent (a runtime without MCP) would: it boots
-//! from the role environment, registers on the roster, sends a message, and reads its
-//! inbox. The assertions prove the acceptance: a shim agent participates in a crew and
-//! appears on the roster and the stream, exactly as the MCP path does.
+//! It starts a real `crewd` in-process on an ephemeral loopback port, then
+//! drives the actual `crew` binary the way a Codex agent (a runtime without
+//! MCP) would: it boots from the role environment, registers on the roster,
+//! sends a message, and reads its inbox. The assertions prove the acceptance: a
+//! shim agent participates in a crew and appears on the roster and the stream,
+//! exactly as the MCP path does.
 
-use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener};
-use std::process::{Command, Output};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    io::Write,
+    net::{Ipv4Addr, TcpListener},
+    process::{Command, Output},
+    thread,
+    time::{Duration, Instant},
+};
 
 use crew_substrate::broker::{AppState, Config};
 use serde_json::Value;
 
-/// Starts a broker over a fresh in-memory store, returning the loopback port it serves.
+/// Starts a broker over a fresh in-memory store, returning the loopback port it
+/// serves.
 fn start_broker() -> u16 {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -49,7 +53,8 @@ fn base_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// Runs the `crew` binary as `role`, pointed at the broker on `port` via the env boot.
+/// Runs the `crew` binary as `role`, pointed at the broker on `port` via the
+/// env boot.
 fn crew(port: u16, role: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_crew"))
         .args(args)

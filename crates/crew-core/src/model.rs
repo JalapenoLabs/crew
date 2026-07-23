@@ -1,21 +1,25 @@
-//! Model tiers: how much model muscle each role gets, and the sensible default mapping.
+//! Model tiers: how much model muscle each role gets, and the sensible default
+//! mapping.
 //!
-//! A crew should spend its strong-model budget where reasoning pays off and run a cheap
-//! model for mechanical work (issue #53). Rather than pin every role to an exact build,
-//! a crew assigns a [`ModelTier`] per role, an intent (`strong`, `standard`, `cheap`),
-//! and maps each tier to a concrete model alias with [`ModelTiers`]. Retuning spend, say
-//! moving every cheap role from `haiku` to `sonnet`, is then a config change to the tier
-//! map, not a code change and not a per-role edit.
+//! A crew should spend its strong-model budget where reasoning pays off and run
+//! a cheap model for mechanical work (issue #53). Rather than pin every role to
+//! an exact build, a crew assigns a [`ModelTier`] per role, an intent
+//! (`strong`, `standard`, `cheap`), and maps each tier to a concrete model
+//! alias with [`ModelTiers`]. Retuning spend, say moving every cheap role from
+//! `haiku` to `sonnet`, is then a config change to the tier map, not a code
+//! change and not a per-role edit.
 //!
 //! Two things make the mapping sensible out of the box:
 //!
-//! - [`default_tier_for`] gives every role a default tier by name: the lead roles run
-//!   strong, the mechanical roles run cheap, and the builders run standard.
-//! - [`ModelTiers::default`] maps the tiers to the Claude Code aliases `opus` / `sonnet`
-//!   / `haiku`, which resolve to the current build of each.
+//! - [`default_tier_for`] gives every role a default tier by name: the lead
+//!   roles run strong, the mechanical roles run cheap, and the builders run
+//!   standard.
+//! - [`ModelTiers::default`] maps the tiers to the Claude Code aliases `opus` /
+//!   `sonnet` / `haiku`, which resolve to the current build of each.
 //!
-//! A crew config overrides both: a role's tier (or an exact model), and what each tier
-//! resolves to. See `docs/config.md` and [`CrewConfig`](crate::CrewConfig).
+//! A crew config overrides both: a role's tier (or an exact model), and what
+//! each tier resolves to. See `docs/config.md` and
+//! [`CrewConfig`](crate::CrewConfig).
 
 use std::fmt::{self, Display, Formatter};
 
@@ -30,11 +34,12 @@ const DEFAULT_STANDARD: &str = "sonnet";
 /// The cheap model's default alias: the mechanical roles run it.
 const DEFAULT_CHEAP: &str = "haiku";
 
-/// Roles that default to the [`Strong`](ModelTier::Strong) tier: the lead and architect.
+/// Roles that default to the [`Strong`](ModelTier::Strong) tier: the lead and
+/// architect.
 const STRONG_ROLES: &[&str] = &["commander", "architect"];
 
-/// Roles that default to the [`Cheap`](ModelTier::Cheap) tier: mechanical, low-reasoning
-/// work (docs, the pipeline, lint, and the test-writing roles).
+/// Roles that default to the [`Cheap`](ModelTier::Cheap) tier: mechanical,
+/// low-reasoning work (docs, the pipeline, lint, and the test-writing roles).
 const CHEAP_ROLES: &[&str] = &[
     "docs",
     "ci",
@@ -45,20 +50,24 @@ const CHEAP_ROLES: &[&str] = &[
     "sdet-e2e",
 ];
 
-/// A model tier: how much model muscle a role gets, independent of the exact build.
+/// A model tier: how much model muscle a role gets, independent of the exact
+/// build.
 ///
-/// A tier names the intent; the crew's [`ModelTiers`] map resolves it to a concrete model
-/// alias. Spending strong-model budget where it matters and a cheap model everywhere else
-/// is then a tier assignment per role, retunable without touching code (issue #53).
+/// A tier names the intent; the crew's [`ModelTiers`] map resolves it to a
+/// concrete model alias. Spending strong-model budget where it matters and a
+/// cheap model everywhere else is then a tier assignment per role, retunable
+/// without touching code (issue #53).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTier {
     /// The strong model: the lead and the architect, where reasoning pays off.
     Strong,
-    /// The standard model: the builders (backend, frontend, qa) doing the real work.
+    /// The standard model: the builders (backend, frontend, qa) doing the real
+    /// work.
     #[default]
     Standard,
-    /// The cheap model: mechanical roles (docs, ci, lint, test) where a small model does.
+    /// The cheap model: mechanical roles (docs, ci, lint, test) where a small
+    /// model does.
     Cheap,
 }
 
@@ -74,9 +83,10 @@ impl Display for ModelTier {
 
 /// The concrete model alias each [`ModelTier`] resolves to for a crew.
 ///
-/// Defaults to the Claude Code aliases (`opus` / `sonnet` / `haiku`), which resolve to the
-/// current build of each. A crew overrides any of them in its config `[models]` table, so
-/// changing what `cheap` means retunes spend across every cheap role at once.
+/// Defaults to the Claude Code aliases (`opus` / `sonnet` / `haiku`), which
+/// resolve to the current build of each. A crew overrides any of them in its
+/// config `[models]` table, so changing what `cheap` means retunes spend across
+/// every cheap role at once.
 ///
 /// # Examples
 /// ```
@@ -117,10 +127,12 @@ impl ModelTiers {
         }
     }
 
-    /// Builds the tier map from optional overrides, each falling back to its default alias.
+    /// Builds the tier map from optional overrides, each falling back to its
+    /// default alias.
     ///
-    /// A blank or whitespace-only override is treated as absent, so an empty `[models]`
-    /// entry keeps the default rather than pinning the empty string.
+    /// A blank or whitespace-only override is treated as absent, so an empty
+    /// `[models]` entry keeps the default rather than pinning the empty
+    /// string.
     pub(crate) fn from_overrides(
         strong: Option<String>,
         standard: Option<String>,
@@ -143,12 +155,15 @@ fn alias_or(r#override: Option<String>, fallback: String) -> String {
     }
 }
 
-/// The default [`ModelTier`] for a role by its name: the sensible mapping (issue #53).
+/// The default [`ModelTier`] for a role by its name: the sensible mapping
+/// (issue #53).
 ///
-/// The lead roles (`commander`, `architect`) default to [`Strong`](ModelTier::Strong), the
-/// mechanical roles (`docs`, `ci`, `release`, `lint`, `test`, and the `sdet` test split) to
-/// [`Cheap`](ModelTier::Cheap), and every other role, including any custom one, to
-/// [`Standard`](ModelTier::Standard). A crew overrides any of these per role in its config.
+/// The lead roles (`commander`, `architect`) default to
+/// [`Strong`](ModelTier::Strong), the mechanical roles (`docs`, `ci`,
+/// `release`, `lint`, `test`, and the `sdet` test split) to
+/// [`Cheap`](ModelTier::Cheap), and every other role, including any custom one,
+/// to [`Standard`](ModelTier::Standard). A crew overrides any of these per role
+/// in its config.
 #[must_use]
 pub fn default_tier_for(role: &RoleId) -> ModelTier {
     // Normalize so a capitalized or padded role name still maps predictably.

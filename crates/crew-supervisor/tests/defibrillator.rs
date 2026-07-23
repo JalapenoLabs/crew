@@ -1,10 +1,10 @@
 //! End-to-end test of the defibrillator (issue #23).
 //!
-//! It proves the acceptance: a stalled or crashed agent is detected, recorded, and
-//! revived, or handed to the operator once the recovery budget is spent, with the
-//! roster and the stream reflecting each transition. Detection is layered: the in-turn
-//! heartbeat catches a crash or a hang, and the background watchdog catches an agent
-//! whose driver failed to.
+//! It proves the acceptance: a stalled or crashed agent is detected, recorded,
+//! and revived, or handed to the operator once the recovery budget is spent,
+//! with the roster and the stream reflecting each transition. Detection is
+//! layered: the in-turn heartbeat catches a crash or a hang, and the background
+//! watchdog catches an agent whose driver failed to.
 
 mod common;
 
@@ -23,8 +23,8 @@ fn a_crashed_agent_is_recorded_revived_then_handed_off() {
     let roster = RosterClient::new(base.clone());
     let qa = RoleId::new("qa");
 
-    // Only the crash path matters here (an exited process is caught regardless of the
-    // silence timeouts); revive once, then hand off.
+    // Only the crash path matters here (an exited process is caught regardless of
+    // the silence timeouts); revive once, then hand off.
     let policy = LifecyclePolicy {
         idle_timeout: NEVER,
         heartbeat_timeout: NEVER,
@@ -37,9 +37,9 @@ fn a_crashed_agent_is_recorded_revived_then_handed_off() {
 
     fleet.start(&qa).unwrap();
 
-    // The stream converges on: each death emits `died`, each revival `recovered`, and
-    // the final handoff leaves it dead. Waiting on the whole sequence avoids racing a
-    // transient `dead` during the revival.
+    // The stream converges on: each death emits `died`, each revival `recovered`,
+    // and the final handoff leaves it dead. Waiting on the whole sequence
+    // avoids racing a transient `dead` during the revival.
     assert!(
         wait_until(|| lifecycle_events(&base) == ["started", "died", "recovered", "died"]),
         "the crash is recorded, revived, then handed off; got {:?}",
@@ -71,8 +71,8 @@ fn a_hung_agent_is_detected_by_the_heartbeat_and_recovered() {
     let roster = RosterClient::new(base.clone());
     let backend = RoleId::new("backend");
 
-    // The heartbeat is short and fires before idle-stop, so a silent-but-alive process
-    // is a hang, not idle. One recovery, then hand off.
+    // The heartbeat is short and fires before idle-stop, so a silent-but-alive
+    // process is a hang, not idle. One recovery, then hand off.
     let policy = LifecyclePolicy {
         idle_timeout: NEVER,
         heartbeat_timeout: Duration::from_millis(300),
@@ -113,9 +113,9 @@ fn the_watchdog_reaps_an_agent_the_in_turn_path_missed() {
     let roster = RosterClient::new(base.clone());
     let docs = RoleId::new("docs");
 
-    // Disable the in-turn heartbeat and idle-stop (huge timeouts), so the driver never
-    // acts on the silent agent; only the watchdog can catch it, standing in for a
-    // driver that has wedged.
+    // Disable the in-turn heartbeat and idle-stop (huge timeouts), so the driver
+    // never acts on the silent agent; only the watchdog can catch it, standing
+    // in for a driver that has wedged.
     let policy = LifecyclePolicy {
         idle_timeout: NEVER,
         heartbeat_timeout: NEVER,
@@ -127,7 +127,8 @@ fn the_watchdog_reaps_an_agent_the_in_turn_path_missed() {
 
     fleet.start(&docs).unwrap();
 
-    // The watchdog reaps the orphan and hands it straight to the operator: no revival.
+    // The watchdog reaps the orphan and hands it straight to the operator: no
+    // revival.
     assert!(
         wait_until(|| lifecycle_events(&base) == ["started", "died"]),
         "the watchdog reaps the agent its driver did not handle; got {:?}",

@@ -1,29 +1,34 @@
 //! Typed API errors that render as a JSON 4xx, never a panic.
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Serialize;
 
 /// An error returned to an API client.
 ///
-/// Renders as a JSON body `{ "error": "..." }` with a 4xx status, so a malformed
-/// request never panics the broker and the client always gets a typed reason.
+/// Renders as a JSON body `{ "error": "..." }` with a 4xx status, so a
+/// malformed request never panics the broker and the client always gets a typed
+/// reason.
 #[derive(Debug)]
 pub enum ApiError {
     /// The request was malformed or failed validation (HTTP 400).
     BadRequest(String),
     /// The requested resource does not exist (HTTP 404).
     NotFound(String),
-    /// The request conflicts with the current state: claiming work another role already
-    /// holds, or verifying one's own work or a task not awaiting a verdict (HTTP 409).
+    /// The request conflicts with the current state: claiming work another role
+    /// already holds, or verifying one's own work or a task not awaiting a
+    /// verdict (HTTP 409).
     Conflict(String),
     /// The request is valid but the feature is not built yet (HTTP 501).
     NotImplemented(String),
 }
 
 impl ApiError {
-    /// Builds a [`ApiError::BadRequest`] from anything that renders as a string.
+    /// Builds a [`ApiError::BadRequest`] from anything that renders as a
+    /// string.
     #[must_use]
     pub fn bad_request(message: impl std::fmt::Display) -> Self {
         Self::BadRequest(message.to_string())
@@ -41,7 +46,8 @@ impl ApiError {
         Self::Conflict(message.to_string())
     }
 
-    /// Builds a [`ApiError::NotImplemented`] from anything that renders as a string.
+    /// Builds a [`ApiError::NotImplemented`] from anything that renders as a
+    /// string.
     #[must_use]
     pub fn not_implemented(message: impl std::fmt::Display) -> Self {
         Self::NotImplemented(message.to_string())

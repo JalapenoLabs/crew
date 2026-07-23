@@ -14,10 +14,16 @@ concurrency:
 permissions:
   contents: read
 
-# Three independent jobs, so each reports its own status check and a failure in
-# one never short-circuits the others ("no fail-fast"). Each provisions the
-# toolchain pinned in rust-toolchain.toml (1.88 with rustfmt + clippy); `rustup
-# show` installs exactly that and fails early with a clear message if it cannot.
+# The nightly toolchain the `fmt-nightly` job runs, pinned to a date so it never
+# floats (issue #60). Bump this deliberately, the same way `rust-toolchain.toml`
+# pins the build toolchain.
+env:
+  NIGHTLY: nightly-2026-07-22
+
+# Independent jobs, so each reports its own status check and a failure in one never
+# short-circuits the others ("no fail-fast"). Each build job provisions the toolchain
+# pinned in rust-toolchain.toml (1.88 with rustfmt + clippy); `rustup show` installs
+# exactly that and fails early with a clear message if it cannot.
 jobs:
   fmt:
     name: Format
@@ -27,6 +33,19 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
       - run: cargo fmt --all --check
+
+  # The stable `fmt` job above ignores the nightly-only options in rustfmt.toml
+  # (import grouping, comment wrapping); this job enforces them on the pinned
+  # nightly, so the richer formatting is checked without unpinning the build
+  # toolchain (issue #60).
+  fmt-nightly:
+    name: Format (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned nightly rustfmt
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt
+      - run: cargo "+$NIGHTLY" fmt --all --check
 
   clippy:
     name: Clippy

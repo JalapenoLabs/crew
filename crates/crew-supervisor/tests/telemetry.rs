@@ -1,10 +1,11 @@
 //! Usage telemetry, end to end against a real broker (issue #55).
 //!
-//! Proves the second half of the acceptance: per-role and aggregate cost/tokens/time are
-//! queryable and shown live. (The first half, an idle role stops on schedule, is the
-//! lifecycle machine of issue #22, covered by `tests/lifecycle.rs`.) The token feed is
-//! driven directly here through [`Fleet::record_usage`]; in production the activity parser
-//! (issue #24) feeds it each turn's usage.
+//! Proves the second half of the acceptance: per-role and aggregate
+//! cost/tokens/time are queryable and shown live. (The first half, an idle role
+//! stops on schedule, is the lifecycle machine of issue #22, covered by
+//! `tests/lifecycle.rs`.) The token feed is driven directly here through
+//! [`Fleet::record_usage`]; in production the activity parser (issue #24) feeds
+//! it each turn's usage.
 
 mod common;
 
@@ -68,7 +69,8 @@ fn usage_rolls_up_per_role_and_in_aggregate_and_is_queryable() {
         "both roles come online"
     );
 
-    // No budget is set, yet usage is still recorded: telemetry is always-on (issue #55).
+    // No budget is set, yet usage is still recorded: telemetry is always-on (issue
+    // #55).
     fleet.record_usage(&backend, 1_000, 30_000).unwrap();
     fleet.record_usage(&backend, 500, 15_000).unwrap();
     fleet.record_usage(&frontend, 200, 4_000).unwrap();
@@ -83,7 +85,8 @@ fn usage_rolls_up_per_role_and_in_aggregate_and_is_queryable() {
     let backend_row = role_row(&stats, "backend");
     assert_eq!(backend_row["tokens"], 1_500, "backend's two turns sum");
     assert_eq!(backend_row["cost_micro_usd"], 45_000);
-    // A working role's time is present and folds its live interval (issue #22 + #55).
+    // A working role's time is present and folds its live interval (issue #22 +
+    // #55).
     assert!(
         backend_row["active_secs"].as_u64().is_some(),
         "working time is reported: {backend_row}"

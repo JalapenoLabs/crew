@@ -1,12 +1,13 @@
-//! The role card: the thin bootstrap that hands an agent its lane and the broker.
+//! The role card: the thin bootstrap that hands an agent its lane and the
+//! broker.
 //!
-//! A [`RoleCard`] is the shape a role boots from. It carries only what is specific
-//! to this agent, its name, the paths it owns, the acceptance bar it holds work to,
-//! and how to reach the unit, so the coordination rules live in crew itself and are
-//! not restated per agent. The supervisor writes a card per role it spawns; a
-//! standalone agent (the shape the `coworker` skill shrinks to) is handed one
-//! directly. Both parse it with [`RoleCard::from_toml`] and both render the agent's
-//! briefing with [`RoleCard::briefing`].
+//! A [`RoleCard`] is the shape a role boots from. It carries only what is
+//! specific to this agent, its name, the paths it owns, the acceptance bar it
+//! holds work to, and how to reach the unit, so the coordination rules live in
+//! crew itself and are not restated per agent. The supervisor writes a card per
+//! role it spawns; a standalone agent (the shape the `coworker` skill shrinks
+//! to) is handed one directly. Both parse it with [`RoleCard::from_toml`] and
+//! both render the agent's briefing with [`RoleCard::briefing`].
 //!
 //! The on-disk form is TOML, chosen so a human can read and author a card at a
 //! glance:
@@ -21,32 +22,34 @@
 //! port = 2739
 //! ```
 //!
-//! The card is sans-io: it parses from a string and serializes to a string, so the
-//! caller owns the file or transport. This keeps `crew-core` free of I/O and makes
-//! the format trivially testable (see [`M-IMPL-IO`] in the Rust guidelines).
+//! The card is sans-io: it parses from a string and serializes to a string, so
+//! the caller owns the file or transport. This keeps `crew-core` free of I/O
+//! and makes the format trivially testable (see [`M-IMPL-IO`] in the Rust
+//! guidelines).
 //!
 //! [`M-IMPL-IO`]: https://microsoft.github.io/rust-guidelines/
 
-use std::backtrace::Backtrace;
-use std::fmt::{self, Display, Formatter, Write as _};
+use std::{
+    backtrace::Backtrace,
+    fmt::{self, Display, Formatter, Write as _},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::LaneEnforcement;
-use crate::id::RoleId;
-use crate::lane::path_in_lane;
+use crate::{config::LaneEnforcement, id::RoleId, lane::path_in_lane};
 
 /// The environment variable naming the role card a spawned agent boots from.
 ///
-/// The supervisor writes a card and sets this to its path; the `crew-mcp` server
-/// reads it. Sharing the name here keeps the writer and the reader from drifting.
+/// The supervisor writes a card and sets this to its path; the `crew-mcp`
+/// server reads it. Sharing the name here keeps the writer and the reader from
+/// drifting.
 pub const ROLE_CARD_ENV: &str = "CREW_ROLE_CARD";
 
 /// A role's boot card: its lane, its acceptance bar, and how to reach the unit.
 ///
 /// This is the whole per-agent bootstrap. Everything else an agent needs, the
-/// channels, the message schema, the chain of command, is common to the crew and
-/// lives in crew, not in the card.
+/// channels, the message schema, the chain of command, is common to the crew
+/// and lives in crew, not in the card.
 ///
 /// # Examples
 /// ```
@@ -72,19 +75,22 @@ pub struct RoleCard {
     pub owned_paths: Vec<String>,
     /// The bar the role holds its work to before reporting it done.
     ///
-    /// Free-form prose. Empty means the role falls back to the crew's standard bar.
+    /// Free-form prose. Empty means the role falls back to the crew's standard
+    /// bar.
     #[serde(default)]
     pub acceptance: String,
-    /// The role that leads and routes the unit: the hub of the hub-and-spoke topology.
+    /// The role that leads and routes the unit: the hub of the hub-and-spoke
+    /// topology.
     ///
-    /// Every card names the commander so a role knows where an unaddressed message
-    /// goes (to the commander) and whether it is itself the commander (see
-    /// [`is_commander`](RoleCard::is_commander)). Defaults to `commander`, the
-    /// conventional name, when a hand-authored card omits it.
+    /// Every card names the commander so a role knows where an unaddressed
+    /// message goes (to the commander) and whether it is itself the
+    /// commander (see [`is_commander`](RoleCard::is_commander)). Defaults
+    /// to `commander`, the conventional name, when a hand-authored card
+    /// omits it.
     #[serde(default = "default_commander")]
     pub commander: RoleId,
-    /// How the crew enforces this role's lane: whether an out-of-lane edit warns,
-    /// blocks, or is unchecked (issue #46). Defaults to `warn`.
+    /// How the crew enforces this role's lane: whether an out-of-lane edit
+    /// warns, blocks, or is unchecked (issue #46). Defaults to `warn`.
     #[serde(default)]
     pub lane_enforcement: LaneEnforcement,
     /// How to reach the unit: the broker's address.
@@ -97,7 +103,8 @@ fn default_commander() -> RoleId {
 }
 
 impl RoleCard {
-    /// Builds a card for `role` with its owned paths, acceptance bar, and broker.
+    /// Builds a card for `role` with its owned paths, acceptance bar, and
+    /// broker.
     #[must_use]
     pub fn new(
         role: RoleId,
@@ -115,7 +122,8 @@ impl RoleCard {
         }
     }
 
-    /// Sets how the crew enforces this role's lane, returning the card so calls chain.
+    /// Sets how the crew enforces this role's lane, returning the card so calls
+    /// chain.
     #[must_use]
     pub fn with_lane_enforcement(mut self, enforcement: LaneEnforcement) -> Self {
         self.lane_enforcement = enforcement;
@@ -124,8 +132,8 @@ impl RoleCard {
 
     /// Whether `path` is within this role's owned lane (issue #46).
     ///
-    /// A path outside every owned boundary is out of lane; a role that owns no lane is
-    /// unrestricted. See [`path_in_lane`](crate::path_in_lane).
+    /// A path outside every owned boundary is out of lane; a role that owns no
+    /// lane is unrestricted. See [`path_in_lane`](crate::path_in_lane).
     #[must_use]
     pub fn owns(&self, path: &str) -> bool {
         path_in_lane(&self.owned_paths, path)
@@ -133,9 +141,10 @@ impl RoleCard {
 
     /// Sets the crew's commander, returning the card so calls can chain.
     ///
-    /// The supervisor builds cards from the crew config, which names the commander
-    /// (see [`CrewConfig`](crate::CrewConfig)); a bare [`new`](RoleCard::new) card
-    /// falls back to the conventional `commander`.
+    /// The supervisor builds cards from the crew config, which names the
+    /// commander (see [`CrewConfig`](crate::CrewConfig)); a bare
+    /// [`new`](RoleCard::new) card falls back to the conventional
+    /// `commander`.
     #[must_use]
     pub fn with_commander(mut self, commander: RoleId) -> Self {
         self.commander = commander;
@@ -159,18 +168,20 @@ impl RoleCard {
     /// Renders the card to its TOML form.
     ///
     /// # Errors
-    /// Returns a [`CardError`] if the card cannot be serialized, which in practice
-    /// only happens on an internal invariant violation.
+    /// Returns a [`CardError`] if the card cannot be serialized, which in
+    /// practice only happens on an internal invariant violation.
     pub fn to_toml(&self) -> Result<String, CardError> {
         toml::to_string(self)
             .map_err(|source| CardError::new(ErrorKind::Serialize(Box::new(source))))
     }
 
-    /// Renders the agent's briefing: the thin bootstrap prompt a role boots from.
+    /// Renders the agent's briefing: the thin bootstrap prompt a role boots
+    /// from.
     ///
-    /// This is the shape the `coworker` skill shrinks to once crew exists: it states
-    /// the role, its lane, its acceptance bar, and how to reach the unit, and stops
-    /// there. It deliberately restates none of the coordination rules.
+    /// This is the shape the `coworker` skill shrinks to once crew exists: it
+    /// states the role, its lane, its acceptance bar, and how to reach the
+    /// unit, and stops there. It deliberately restates none of the
+    /// coordination rules.
     ///
     /// # Examples
     /// ```
@@ -285,8 +296,8 @@ impl RoleCard {
         out
     }
 
-    /// The role's place in the hub-and-spoke topology: commander duties or how a
-    /// specialist reaches its commander (see `docs/communication.md`).
+    /// The role's place in the hub-and-spoke topology: commander duties or how
+    /// a specialist reaches its commander (see `docs/communication.md`).
     fn topology_briefing(&self) -> String {
         if self.is_commander() {
             return "You are the commander: the unit's lead and router. The General briefs you. \
@@ -339,9 +350,9 @@ impl BrokerEndpoint {
 
     /// The base URL a client uses to reach the broker, such as `http://127.0.0.1:2739`.
     ///
-    /// The scheme is always `http`: the broker listens on loopback, so no TLS is
-    /// involved. An IPv6 literal host is not bracketed, since a crew broker is
-    /// addressed by `127.0.0.1` or a hostname in practice.
+    /// The scheme is always `http`: the broker listens on loopback, so no TLS
+    /// is involved. An IPv6 literal host is not bracketed, since a crew
+    /// broker is addressed by `127.0.0.1` or a hostname in practice.
     #[must_use]
     pub fn base_url(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
@@ -350,8 +361,8 @@ impl BrokerEndpoint {
 
 /// The error returned when a [`RoleCard`] cannot be parsed or serialized.
 ///
-/// Inspect it with [`CardError::is_parse`] and [`CardError::is_serialize`] to tell a
-/// malformed card from an internal serialization fault.
+/// Inspect it with [`CardError::is_parse`] and [`CardError::is_serialize`] to
+/// tell a malformed card from an internal serialization fault.
 #[derive(Debug)]
 pub struct CardError {
     kind: ErrorKind,
@@ -359,7 +370,8 @@ pub struct CardError {
 }
 
 impl CardError {
-    /// Wraps a kind, capturing a backtrace (empty unless `RUST_BACKTRACE` is set).
+    /// Wraps a kind, capturing a backtrace (empty unless `RUST_BACKTRACE` is
+    /// set).
     fn new(kind: ErrorKind) -> Self {
         Self {
             kind,
@@ -404,11 +416,11 @@ impl std::error::Error for CardError {
     }
 }
 
-/// What went wrong loading a card. Kept private so new failure modes never break the
-/// public API (callers match on the `is_*` methods instead).
+/// What went wrong loading a card. Kept private so new failure modes never
+/// break the public API (callers match on the `is_*` methods instead).
 ///
-/// The `toml` errors are boxed: they are large, and an error is the cold path, so a
-/// pointer keeps the common `Ok` result small (clippy `result_large_err`).
+/// The `toml` errors are boxed: they are large, and an error is the cold path,
+/// so a pointer keeps the common `Ok` result small (clippy `result_large_err`).
 #[derive(Debug)]
 enum ErrorKind {
     Parse(Box<toml::de::Error>),

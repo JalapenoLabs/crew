@@ -1,19 +1,22 @@
-//! Owned-path lane boundaries: whether a path falls in a role's lane (issue #46).
+//! Owned-path lane boundaries: whether a path falls in a role's lane (issue
+//! #46).
 //!
-//! A role owns directory boundaries (its lane in the tree, see `docs/roles.md`). Lane
-//! enforcement keeps a role from wandering into another's lane: a path is **in lane**
-//! when it sits under one of the role's owned boundaries, and **out of lane** otherwise.
+//! A role owns directory boundaries (its lane in the tree, see
+//! `docs/roles.md`). Lane enforcement keeps a role from wandering into
+//! another's lane: a path is **in lane** when it sits under one of the role's
+//! owned boundaries, and **out of lane** otherwise.
 //!
-//! A role that owns no lane (the commander routes and owns nothing) is unrestricted:
-//! it has no boundary to cross, so every path is in lane for it.
+//! A role that owns no lane (the commander routes and owns nothing) is
+//! unrestricted: it has no boundary to cross, so every path is in lane for it.
 
 /// Whether `path` sits within one of the `owned_paths` boundaries.
 ///
-/// Each owned entry is a directory boundary (`api/`) or a specific file; `path` is in
-/// lane when it equals an owned file or sits under an owned directory. Trailing slashes
-/// and a leading `./` do not matter, and a boundary matches on a whole path segment, so
-/// `api/` owns `api/routes.rs` but not `apiv2/routes.rs`. A role with no owned paths is
-/// unrestricted (every path is in lane).
+/// Each owned entry is a directory boundary (`api/`) or a specific file; `path`
+/// is in lane when it equals an owned file or sits under an owned directory.
+/// Trailing slashes and a leading `./` do not matter, and a boundary matches on
+/// a whole path segment, so `api/` owns `api/routes.rs` but not
+/// `apiv2/routes.rs`. A role with no owned paths is unrestricted (every path is
+/// in lane).
 ///
 /// # Examples
 /// ```
@@ -23,7 +26,10 @@
 /// assert!(path_in_lane(&lane, "api/routes.rs"));
 /// assert!(path_in_lane(&lane, "db/migrations/001.sql"));
 /// assert!(!path_in_lane(&lane, "frontend/app.tsx"));
-/// assert!(!path_in_lane(&lane, "apiv2/routes.rs"), "a boundary matches a whole segment");
+/// assert!(
+///     !path_in_lane(&lane, "apiv2/routes.rs"),
+///     "a boundary matches a whole segment"
+/// );
 ///
 /// // A role with no lane is unrestricted.
 /// assert!(path_in_lane(&[], "anywhere/at/all"));
@@ -47,8 +53,8 @@ pub fn path_in_lane(owned_paths: &[String], path: &str) -> bool {
     !has_lane
 }
 
-/// Normalizes a path for boundary comparison: trims whitespace, a leading `./`, and any
-/// trailing slash, so `./api/` and `api` compare equal.
+/// Normalizes a path for boundary comparison: trims whitespace, a leading `./`,
+/// and any trailing slash, so `./api/` and `api` compare equal.
 fn normalize(path: &str) -> String {
     path.trim()
         .trim_start_matches("./")

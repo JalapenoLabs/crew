@@ -1,8 +1,10 @@
 //! The broker's runtime configuration.
 
-use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
 
 use eyre::{Result, WrapErr};
 
@@ -12,10 +14,12 @@ pub const DEFAULT_PORT: u16 = 2739;
 /// The default on-disk state directory, relative to the working directory.
 pub const DEFAULT_STATE_DIR: &str = ".crew";
 
-/// The default shared-subscription usage percent at which new work auto-pauses (issue #56).
+/// The default shared-subscription usage percent at which new work auto-pauses
+/// (issue #56).
 ///
-/// Ninety percent leaves headroom to finish an in-flight turn before the window is spent,
-/// mirroring Seraphim's usage auto-pause. A crew retunes it with `CREW_BROKER_USAGE_THRESHOLD`.
+/// Ninety percent leaves headroom to finish an in-flight turn before the window
+/// is spent, mirroring Seraphim's usage auto-pause. A crew retunes it with
+/// `CREW_BROKER_USAGE_THRESHOLD`.
 pub const DEFAULT_USAGE_THRESHOLD: u8 = 90;
 
 /// The broker's runtime configuration.
@@ -43,12 +47,13 @@ pub struct Config {
     /// Whether to allow binding a non-loopback (network-reachable) address.
     /// Defaults to `false`, so a non-local bind is refused unless opted in.
     pub allow_non_local: bool,
-    /// Secret values masked out of every message before it is stored or streamed.
-    /// Empty by default; a leaked token never reaches the log or a subscriber.
+    /// Secret values masked out of every message before it is stored or
+    /// streamed. Empty by default; a leaked token never reaches the log or
+    /// a subscriber.
     pub secrets: Vec<String>,
-    /// The shared-subscription usage percent at which new work auto-pauses (issue #56).
-    /// Defaults to [`DEFAULT_USAGE_THRESHOLD`]; a value at or above 100 disables the
-    /// auto-pause, since a reading never reaches it.
+    /// The shared-subscription usage percent at which new work auto-pauses
+    /// (issue #56). Defaults to [`DEFAULT_USAGE_THRESHOLD`]; a value at or
+    /// above 100 disables the auto-pause, since a reading never reaches it.
     pub usage_threshold: u8,
 }
 
@@ -70,13 +75,14 @@ impl Config {
     ///
     /// Reads `CREW_BROKER_HOST`, `CREW_BROKER_PORT`, `CREW_BROKER_STATE_DIR`,
     /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it),
-    /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to mask), and
-    /// `CREW_BROKER_USAGE_THRESHOLD` (the usage percent at which new work auto-pauses).
+    /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to
+    /// mask), and `CREW_BROKER_USAGE_THRESHOLD` (the usage percent at which
+    /// new work auto-pauses).
     ///
     /// # Errors
     /// Returns an error if `CREW_BROKER_HOST` is not a valid IP address,
-    /// `CREW_BROKER_PORT` is not a valid port number, or `CREW_BROKER_USAGE_THRESHOLD`
-    /// is not a percent.
+    /// `CREW_BROKER_PORT` is not a valid port number, or
+    /// `CREW_BROKER_USAGE_THRESHOLD` is not a percent.
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
         if let Ok(host) = env::var("CREW_BROKER_HOST") {
@@ -117,8 +123,9 @@ impl Config {
 
 /// Whether binding to `ip` is permitted given the non-local opt-in.
 ///
-/// A loopback address is always allowed; any network-reachable address is refused
-/// unless `allow_non_local` opts in, so the broker never exposes itself by accident.
+/// A loopback address is always allowed; any network-reachable address is
+/// refused unless `allow_non_local` opts in, so the broker never exposes itself
+/// by accident.
 #[must_use]
 pub(crate) fn is_bind_allowed(ip: IpAddr, allow_non_local: bool) -> bool {
     ip.is_loopback() || allow_non_local

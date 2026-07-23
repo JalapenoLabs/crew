@@ -1,47 +1,55 @@
 //! `crew up`: bring the whole unit online from the crew config (issue #26).
 //!
-//! The headline experience: one command reads the config, starts the broker if one is
-//! not already running, launches a lifecycle-managed fleet with every role assigned,
-//! surfaces the live roster and the commander entry point, and holds the unit online
-//! until interrupted. On Ctrl-C, `SIGTERM`, or `crew down`, it stands the crew down
-//! gracefully, so no agent process is left orphaned.
+//! The headline experience: one command reads the config, starts the broker if
+//! one is not already running, launches a lifecycle-managed fleet with every
+//! role assigned, surfaces the live roster and the commander entry point, and
+//! holds the unit online until interrupted. On Ctrl-C, `SIGTERM`, or `crew
+//! down`, it stands the crew down gracefully, so no agent process is left
+//! orphaned.
 //!
-//! `crew up` runs in the foreground and owns the crew: it holds the fleet (its driver
-//! threads) and, when it started one, the in-process broker. Standing down tears both
-//! down together, so what `crew up` brought online, standing down removes.
+//! `crew up` runs in the foreground and owns the crew: it holds the fleet (its
+//! driver threads) and, when it started one, the in-process broker. Standing
+//! down tears both down together, so what `crew up` brought online, standing
+//! down removes.
 
-use std::path::Path;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
-use crew_substrate::broker::Config as BrokerConfig;
-use crew_substrate::core::{BrokerEndpoint, CrewConfig};
-use crew_substrate::supervisor::{AgentState, Fleet, RosterClient, Supervisor};
+use crew_substrate::{
+    broker::Config as BrokerConfig,
+    core::{BrokerEndpoint, CrewConfig},
+    supervisor::{AgentState, Fleet, RosterClient, Supervisor},
+};
 use eyre::{eyre, Result, WrapErr};
 use tokio::sync::oneshot;
 use tracing::{event, Level};
 
 use crate::paths::pidfile;
 
-/// How long to wait for the broker to accept connections and for the roles to register.
+/// How long to wait for the broker to accept connections and for the roles to
+/// register.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Brings the crew online and holds it there until a shutdown signal.
 ///
 /// # Errors
-/// Returns an error if the config cannot be read or is invalid, the broker cannot be
-/// started, or the fleet cannot be launched (a missing MCP server or an unprovisionable
-/// role).
+/// Returns an error if the config cannot be read or is invalid, the broker
+/// cannot be started, or the fleet cannot be launched (a missing MCP server or
+/// an unprovisionable role).
 pub fn run(config_path: Option<&Path>) -> Result<()> {
     let crew_config = load_config(config_path)?;
 
-    // The broker: its runtime config (env-overridable) and the endpoint agents reach.
+    // The broker: its runtime config (env-overridable) and the endpoint agents
+    // reach.
     let broker_config = BrokerConfig::from_env()?;
     let endpoint = BrokerEndpoint::new(broker_config.host.to_string(), broker_config.port);
     let base_url = endpoint.base_url();
 
-    // Start the broker only if one is not already listening, so an operator can run a
-    // long-lived `crewd` and bring crews up against it.
+    // Start the broker only if one is not already listening, so an operator can run
+    // a long-lived `crewd` and bring crews up against it.
     let broker = if broker_healthy(&base_url) {
         event!(
             name: "cli.up.broker_present",
@@ -55,7 +63,8 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
     };
 
     // Bring the unit online: register the MCP server, launch the lifecycle-managed
-    // fleet from the config, and start every role so the unit is live and connected.
+    // fleet from the config, and start every role so the unit is live and
+    // connected.
     let root = broker_config.state_dir.join("agents");
     let supervisor = Supervisor::new(endpoint, root);
     let fleet = supervisor.launch(&crew_config)?;
@@ -83,7 +92,8 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Loads the crew config: the given path, else `./crew.toml`, else the default crew.
+/// Loads the crew config: the given path, else `./crew.toml`, else the default
+/// crew.
 fn load_config(path: Option<&Path>) -> Result<CrewConfig> {
     let default = Path::new("crew.toml");
     let chosen = match path {
@@ -115,7 +125,8 @@ fn load_config(path: Option<&Path>) -> Result<CrewConfig> {
     Ok(config)
 }
 
-/// A broker running in-process on its own thread, with a handle to stand it down.
+/// A broker running in-process on its own thread, with a handle to stand it
+/// down.
 struct BrokerHandle {
     shutdown: oneshot::Sender<()>,
     thread: JoinHandle<()>,
@@ -150,7 +161,8 @@ fn start_broker(config: BrokerConfig, base_url: &str) -> Result<BrokerHandle> {
     })
 }
 
-/// The broker thread body: build a runtime and serve until the shutdown signal fires.
+/// The broker thread body: build a runtime and serve until the shutdown signal
+/// fires.
 fn run_broker(config: BrokerConfig, shutdown_rx: oneshot::Receiver<()>) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -199,7 +211,8 @@ fn wait_for_health(base_url: &str) -> Result<()> {
     ))
 }
 
-/// Waits for the started roles to register, so the roster printed next is the live unit.
+/// Waits for the started roles to register, so the roster printed next is the
+/// live unit.
 fn await_roster(roster: &RosterClient, config: &CrewConfig) {
     let all_registered = || {
         roster.roles().is_ok_and(|registered| {
@@ -209,12 +222,14 @@ fn await_roster(roster: &RosterClient, config: &CrewConfig) {
                 .all(|spec| registered.contains(&spec.role))
         })
     };
-    // Best-effort: on timeout, fall through and print what came up. The per-role state
-    // still reports the truth, so a slow or failed role is visible rather than hidden.
+    // Best-effort: on timeout, fall through and print what came up. The per-role
+    // state still reports the truth, so a slow or failed role is visible rather
+    // than hidden.
     let _ = wait_until(READY_TIMEOUT, all_registered);
 }
 
-/// Polls `condition` until it holds or `timeout` passes, returning whether it held.
+/// Polls `condition` until it holds or `timeout` passes, returning whether it
+/// held.
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -270,8 +285,8 @@ fn write_pidfile(path: &Path) -> Result<()> {
 
 /// Blocks until the process receives Ctrl-C or (on Unix) `SIGTERM`.
 ///
-/// A small runtime just for the signal; the broker has its own on another thread, so a
-/// signal here does not race the broker's own graceful drain.
+/// A small runtime just for the signal; the broker has its own on another
+/// thread, so a signal here does not race the broker's own graceful drain.
 fn wait_for_signal() {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

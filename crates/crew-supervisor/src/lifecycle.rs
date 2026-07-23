@@ -1,101 +1,117 @@
 //! The agent lifecycle: lazy start, idle-stop, restart, and the defibrillator.
 //!
-//! An idle role should cost nothing, and an agent whose turn dies mid-flight should
-//! recover. Each agent runs a small state machine on its own driver thread, and a
-//! fleet-wide watchdog backs the drivers up.
+//! An idle role should cost nothing, and an agent whose turn dies mid-flight
+//! should recover. Each agent runs a small state machine on its own driver
+//! thread, and a fleet-wide watchdog backs the drivers up.
 //!
 //! Lifecycle (issue #22):
 //!
-//! - **Lazy start.** A [`Fleet`] launches with every agent [`Stopped`](AgentState::Stopped)
-//!   and no process; work triggers [`Fleet::start`], which spawns the process and
-//!   registers the role (a `started` event).
-//! - **Idle-stop.** After the quiet `idle_timeout` the driver stops the process but
-//!   keeps the roster entry (an `idle` event), so a restart is fast and keeps context.
-//! - **Restart on demand.** [`Fleet::start`] on a stopped or idle agent restarts it (a
-//!   `restarted` event).
+//! - **Lazy start.** A [`Fleet`] launches with every agent
+//!   [`Stopped`](AgentState::Stopped) and no process; work triggers
+//!   [`Fleet::start`], which spawns the process and registers the role (a
+//!   `started` event).
+//! - **Idle-stop.** After the quiet `idle_timeout` the driver stops the process
+//!   but keeps the roster entry (an `idle` event), so a restart is fast and
+//!   keeps context.
+//! - **Restart on demand.** [`Fleet::start`] on a stopped or idle agent
+//!   restarts it (a `restarted` event).
 //!
-//! Defibrillator (issue #23), mirroring Seraphim's: layered detection recovers an
-//! agent whose turn died, whether it **crashed** (its process exited) or **hung** (its
-//! process is alive but silent past the `heartbeat_timeout`).
+//! Defibrillator (issue #23), mirroring Seraphim's: layered detection recovers
+//! an agent whose turn died, whether it **crashed** (its process exited) or
+//! **hung** (its process is alive but silent past the `heartbeat_timeout`).
 //!
-//! - **In-turn heartbeat.** Each driver polls its agent for a crash or a hang. On a
-//!   death it reaps the orphaned process, records an [`Incident`] with the diagnostic
-//!   detail, marks the role dead (a `died` event), and revives it (a `recovered`
-//!   event) while it has recovery budget; once the budget is spent it stays dead and
-//!   is handed to the operator.
-//! - **Background watchdog.** A single fleet-wide thread catches a working agent that
-//!   went silent past the longer `watchdog_timeout`, which the in-turn heartbeat
-//!   should have caught first; only a driver that has itself wedged lets it through,
-//!   so the watchdog reaps the orphan and hands the role to the operator.
+//! - **In-turn heartbeat.** Each driver polls its agent for a crash or a hang.
+//!   On a death it reaps the orphaned process, records an [`Incident`] with the
+//!   diagnostic detail, marks the role dead (a `died` event), and revives it (a
+//!   `recovered` event) while it has recovery budget; once the budget is spent
+//!   it stays dead and is handed to the operator.
+//! - **Background watchdog.** A single fleet-wide thread catches a working
+//!   agent that went silent past the longer `watchdog_timeout`, which the
+//!   in-turn heartbeat should have caught first; only a driver that has itself
+//!   wedged lets it through, so the watchdog reaps the orphan and hands the
+//!   role to the operator.
 //!
-//! Every transition marks the broker roster, so the roster and the stream reflect it
-//! (see `docs/observability.md`). The mechanics build on the [`spawn`](crate::spawn)
-//! primitives, so a real `claude` process and a test stub run identical code.
+//! Every transition marks the broker roster, so the roster and the stream
+//! reflect it (see `docs/observability.md`). The mechanics build on the
+//! [`spawn`](crate::spawn) primitives, so a real `claude` process and a test
+//! stub run identical code.
 
-use std::io::{BufRead, BufReader, Read};
-use std::process::Child;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::{
+    io::{BufRead, BufReader, Read},
+    process::Child,
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc, Mutex, PoisonError,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
 use crew_core::{Budget, BudgetEvent, BudgetScope, RoleId, TelemetryEvent};
 use eyre::{eyre, Result};
 use tracing::{event, Level};
 
-use crate::roster::{Liveness, RosterClient};
-use crate::spawn::{spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent};
-use crate::stall::{Stall, StallMonitor};
-use crate::worktree::Worktree;
+use crate::{
+    roster::{Liveness, RosterClient},
+    spawn::{spawn_process, AgentCommand, Captured, OutputStream, PreparedAgent},
+    stall::{Stall, StallMonitor},
+    worktree::Worktree,
+};
 
 /// How often a driver polls its agent, and the watchdog scans the fleet.
 ///
-/// Small enough that a crash recovers and a hang is caught promptly, large enough
-/// that an idle fleet costs no meaningful CPU. It bounds detection latency, so every
-/// timeout below should be at least this long.
+/// Small enough that a crash recovers and a hang is caught promptly, large
+/// enough that an idle fleet costs no meaningful CPU. It bounds detection
+/// latency, so every timeout below should be at least this long.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The lifecycle and defibrillator policy: the timeouts and the recovery budget.
+/// The lifecycle and defibrillator policy: the timeouts and the recovery
+/// budget.
 ///
-/// The three silence timeouts share one clock (the agent's last output). Which fires
-/// first is set by their relative order: with the defaults `idle_timeout` is shortest,
-/// so a quiet agent parks (idle-stop) rather than being force-recovered, and the
-/// `heartbeat_timeout` catches a hang only where idle-stop is lengthened or disabled.
-/// A crash (an exited process) is recovered regardless of the timeouts.
+/// The three silence timeouts share one clock (the agent's last output). Which
+/// fires first is set by their relative order: with the defaults `idle_timeout`
+/// is shortest, so a quiet agent parks (idle-stop) rather than being
+/// force-recovered, and the `heartbeat_timeout` catches a hang only where
+/// idle-stop is lengthened or disabled. A crash (an exited process) is
+/// recovered regardless of the timeouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecyclePolicy {
     /// How long an agent may be quiet before it is idle-stopped.
     pub idle_timeout: Duration,
-    /// How long a working agent may be silent before it is presumed hung and the
-    /// defibrillator reaps it. Precise hang-versus-idle discrimination needs the
-    /// activity parser's turn boundaries (issue #24); until then this is a coarse
-    /// output-silence heartbeat.
+    /// How long a working agent may be silent before it is presumed hung and
+    /// the defibrillator reaps it. Precise hang-versus-idle discrimination
+    /// needs the activity parser's turn boundaries (issue #24); until then
+    /// this is a coarse output-silence heartbeat.
     pub heartbeat_timeout: Duration,
-    /// How long a working agent may be silent before the fleet watchdog reaps it as a
-    /// backstop. Strictly greater than [`heartbeat_timeout`](Self::heartbeat_timeout)
-    /// in production, so a live driver always defibrillates a hang first.
+    /// How long a working agent may be silent before the fleet watchdog reaps
+    /// it as a backstop. Strictly greater than
+    /// [`heartbeat_timeout`](Self::heartbeat_timeout) in production, so a
+    /// live driver always defibrillates a hang first.
     pub watchdog_timeout: Duration,
-    /// How many times a dead agent may be revived before it is left for the operator,
-    /// so a crash or hang loop cannot recover forever.
+    /// How many times a dead agent may be revived before it is left for the
+    /// operator, so a crash or hang loop cannot recover forever.
     pub max_recoveries: u32,
-    /// How long a coordination wait may persist before it is escalated as a stall
-    /// (issue #48): an unanswered question, a mutual wait, or a held ledger task with no
-    /// forward motion. This is about the crew waiting on itself, not a silent process,
-    /// so it is shorter than the process `heartbeat_timeout`.
+    /// How long a coordination wait may persist before it is escalated as a
+    /// stall (issue #48): an unanswered question, a mutual wait, or a held
+    /// ledger task with no forward motion. This is about the crew waiting
+    /// on itself, not a silent process, so it is shorter than the process
+    /// `heartbeat_timeout`.
     pub stall_timeout: Duration,
-    /// How often the coordination-stall monitor scans the stream. Coarse: a stall
-    /// evolves over minutes, so a frequent scan would only re-read the same history.
+    /// How often the coordination-stall monitor scans the stream. Coarse: a
+    /// stall evolves over minutes, so a frequent scan would only re-read
+    /// the same history.
     pub stall_scan_interval: Duration,
 }
 
 impl Default for LifecyclePolicy {
-    /// Idle-stop after five quiet minutes, presume a hang at twenty, back that with a
-    /// twenty-five-minute watchdog, and revive at most three times.
+    /// Idle-stop after five quiet minutes, presume a hang at twenty, back that
+    /// with a twenty-five-minute watchdog, and revive at most three times.
     ///
-    /// The heartbeat and watchdog match Seraphim's defibrillator: twenty minutes is
-    /// well above the longest realistic silent step (a slow build), and the watchdog
-    /// sits above it so a live driver acts first. Three recoveries clears a transient
-    /// death without masking a persistent one.
+    /// The heartbeat and watchdog match Seraphim's defibrillator: twenty
+    /// minutes is well above the longest realistic silent step (a slow
+    /// build), and the watchdog sits above it so a live driver acts first.
+    /// Three recoveries clears a transient death without masking a
+    /// persistent one.
     fn default() -> Self {
         Self {
             idle_timeout: Duration::from_secs(5 * 60),
@@ -114,15 +130,15 @@ impl Default for LifecyclePolicy {
 /// An agent's supervised lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
-    /// No process: never started (lazy), or cleanly stood down. Its roster entry is
-    /// kept once known, so a restart is fast.
+    /// No process: never started (lazy), or cleanly stood down. Its roster
+    /// entry is kept once known, so a restart is fast.
     Stopped,
     /// Its process is running and under supervision.
     Working,
     /// Idle-stopped: no process, but parked and ready to resume on demand.
     Idle,
-    /// Died: it crashed or hung. Revived while it had recovery budget; once spent, it
-    /// stays dead and is handed to the operator.
+    /// Died: it crashed or hung. Revived while it had recovery budget; once
+    /// spent, it stays dead and is handed to the operator.
     Dead,
 }
 
@@ -133,7 +149,8 @@ pub enum DeathCause {
     Crashed,
     /// The process was alive but produced no output past the heartbeat timeout.
     Hung,
-    /// The driver itself stalled, so the fleet watchdog reaped the orphaned process.
+    /// The driver itself stalled, so the fleet watchdog reaped the orphaned
+    /// process.
     Wedged,
 }
 
@@ -142,14 +159,16 @@ pub enum DeathCause {
 pub enum Recovery {
     /// Revived within the recovery budget (a `recovered` event followed).
     Revived,
-    /// The budget was spent (or the driver was untrusted): left dead for the operator.
+    /// The budget was spent (or the driver was untrusted): left dead for the
+    /// operator.
     HandedOff,
 }
 
-/// A recorded defibrillator incident: one agent death and what was done about it.
+/// A recorded defibrillator incident: one agent death and what was done about
+/// it.
 ///
-/// The fleet keeps these so the operator can see what died, why, and whether it came
-/// back (read them with [`Fleet::incidents`]).
+/// The fleet keeps these so the operator can see what died, why, and whether it
+/// came back (read them with [`Fleet::incidents`]).
 #[derive(Debug, Clone)]
 pub struct Incident {
     /// The role whose turn died.
@@ -164,12 +183,12 @@ pub struct Incident {
 
 /// A running fleet: one lifecycle-managed agent per role, backed by a watchdog.
 ///
-/// Launch it with the roles resolved into [`PreparedAgent`]s; every agent starts
-/// [`Stopped`](AgentState::Stopped), so an unused role costs nothing. Drive an agent
-/// with [`start`](Fleet::start) and [`stop`](Fleet::stop); read captured output with
-/// [`outputs`](Fleet::outputs) and recorded deaths with [`incidents`](Fleet::incidents).
-/// Dropping the fleet, like [`shutdown`](Fleet::shutdown), stops every agent and
-/// deregisters its role.
+/// Launch it with the roles resolved into [`PreparedAgent`]s; every agent
+/// starts [`Stopped`](AgentState::Stopped), so an unused role costs nothing.
+/// Drive an agent with [`start`](Fleet::start) and [`stop`](Fleet::stop); read
+/// captured output with [`outputs`](Fleet::outputs) and recorded deaths with
+/// [`incidents`](Fleet::incidents). Dropping the fleet, like
+/// [`shutdown`](Fleet::shutdown), stops every agent and deregisters its role.
 #[derive(Debug)]
 pub struct Fleet {
     drivers: Vec<AgentDriver>,
@@ -177,27 +196,30 @@ pub struct Fleet {
     incidents: Arc<Mutex<Vec<Incident>>>,
     watchdog_stop: Sender<()>,
     watchdog: Option<JoinHandle<()>>,
-    /// The coordination stalls the monitor has detected (issue #48), shared with its
-    /// thread and read by [`stalls`](Fleet::stalls).
+    /// The coordination stalls the monitor has detected (issue #48), shared
+    /// with its thread and read by [`stalls`](Fleet::stalls).
     stalls: Arc<Mutex<Vec<Stall>>>,
     stall_stop: Sender<()>,
     stall_monitor: Option<JoinHandle<()>>,
-    /// The per-role git worktrees to clean up on stand-down (issue #43); empty unless
-    /// the crew opted into worktree isolation.
+    /// The per-role git worktrees to clean up on stand-down (issue #43); empty
+    /// unless the crew opted into worktree isolation.
     worktrees: Vec<Worktree>,
-    /// The crew's token budget (issue #54): the accountant [`record_spend`](Fleet::record_spend)
-    /// charges spend against, idle-stopping a role or the crew at a cap. Unbounded by
-    /// default; the crew opts in through the config.
+    /// The crew's token budget (issue #54): the accountant
+    /// [`record_spend`](Fleet::record_spend) charges spend against,
+    /// idle-stopping a role or the crew at a cap. Unbounded by default; the
+    /// crew opts in through the config.
     budget: Arc<Mutex<Budget>>,
-    /// A client for surfacing budget reports on the stream, shared with the fleet threads.
+    /// A client for surfacing budget reports on the stream, shared with the
+    /// fleet threads.
     roster: RosterClient,
 }
 
 impl Fleet {
-    /// Launches a lifecycle driver per agent (each stopped) and the fleet watchdog.
+    /// Launches a lifecycle driver per agent (each stopped) and the fleet
+    /// watchdog.
     ///
-    /// No process is spawned and no role is registered until [`start`](Fleet::start),
-    /// so launching an idle fleet is free.
+    /// No process is spawned and no role is registered until
+    /// [`start`](Fleet::start), so launching an idle fleet is free.
     #[must_use]
     pub fn launch(
         roster: &RosterClient,
@@ -263,10 +285,12 @@ impl Fleet {
         }
     }
 
-    /// Hands the fleet the per-role worktrees to clean up on stand-down (issue #43).
+    /// Hands the fleet the per-role worktrees to clean up on stand-down (issue
+    /// #43).
     ///
-    /// The supervisor creates them before launch; the fleet owns them so it can remove
-    /// each unchanged one once its agent has stopped (see [`shutdown`](Fleet::shutdown)).
+    /// The supervisor creates them before launch; the fleet owns them so it can
+    /// remove each unchanged one once its agent has stopped (see
+    /// [`shutdown`](Fleet::shutdown)).
     #[must_use]
     pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
         self.worktrees = worktrees;
@@ -275,26 +299,31 @@ impl Fleet {
 
     /// Sets the crew token budget the fleet enforces (issue #54).
     ///
-    /// Build it from the crew config with [`CrewConfig::budget`](crew_core::CrewConfig::budget).
-    /// An unbounded budget (no crew-wide budget and no per-role cap) leaves
-    /// [`record_spend`](Fleet::record_spend) a no-op, so a crew that opts out pays nothing.
+    /// Build it from the crew config with
+    /// [`CrewConfig::budget`](crew_core::CrewConfig::budget). An unbounded
+    /// budget (no crew-wide budget and no per-role cap) leaves
+    /// [`record_spend`](Fleet::record_spend) a no-op, so a crew that opts out
+    /// pays nothing.
     #[must_use]
     pub fn with_budget(self, budget: Budget) -> Self {
         *self.budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;
         self
     }
 
-    /// Records a turn's `tokens` and `cost_micro_usd` for `role`: telemetry then budget.
+    /// Records a turn's `tokens` and `cost_micro_usd` for `role`: telemetry
+    /// then budget.
     ///
-    /// This is the full turn-usage seam the activity parser (issue #24) drives with each
-    /// turn's usage once it lands. It surfaces a `telemetry` event so per-role and aggregate
-    /// spend is legible off the stream regardless of any budget (issue #55, feeding
-    /// `GET /stats`), then charges the tokens against the crew budget, idle-stopping a role
-    /// or the crew at a cap (issue #54). Reporting the telemetry is best-effort (a failure
-    /// is logged, not fatal); the budget enforcement still runs.
+    /// This is the full turn-usage seam the activity parser (issue #24) drives
+    /// with each turn's usage once it lands. It surfaces a `telemetry`
+    /// event so per-role and aggregate spend is legible off the stream
+    /// regardless of any budget (issue #55, feeding `GET /stats`), then
+    /// charges the tokens against the crew budget, idle-stopping a role
+    /// or the crew at a cap (issue #54). Reporting the telemetry is best-effort
+    /// (a failure is logged, not fatal); the budget enforcement still runs.
     ///
     /// # Errors
-    /// Returns an error if idle-stopping a role on a budget breach fails (its driver is gone).
+    /// Returns an error if idle-stopping a role on a budget breach fails (its
+    /// driver is gone).
     pub fn record_usage(&self, role: &RoleId, tokens: u64, cost_micro_usd: u64) -> Result<()> {
         // Always surface the usage, so an unbounded crew is still legible (issue #55).
         let telemetry = TelemetryEvent {
@@ -314,14 +343,17 @@ impl Fleet {
         self.record_spend(role, tokens)
     }
 
-    /// Charges `tokens` of spend to `role` against the crew budget, enforcing the caps.
+    /// Charges `tokens` of spend to `role` against the crew budget, enforcing
+    /// the caps.
     ///
-    /// Surfaces a `budget` event so spend against budget is visible on the stream, and when
-    /// the spend reaches a ceiling idle-stops the role (its own cap) or the whole crew (the
-    /// crew-wide budget) rather than overrun (issue #54). An unbounded crew is a no-op.
+    /// Surfaces a `budget` event so spend against budget is visible on the
+    /// stream, and when the spend reaches a ceiling idle-stops the role
+    /// (its own cap) or the whole crew (the crew-wide budget) rather than
+    /// overrun (issue #54). An unbounded crew is a no-op.
     ///
-    /// Prefer [`record_usage`](Fleet::record_usage), which also emits the per-turn telemetry
-    /// the `GET /stats` rollup folds; this is the budget-only path.
+    /// Prefer [`record_usage`](Fleet::record_usage), which also emits the
+    /// per-turn telemetry the `GET /stats` rollup folds; this is the
+    /// budget-only path.
     ///
     /// # Errors
     /// Returns an error if idle-stopping a role fails (its driver is gone).
@@ -345,8 +377,8 @@ impl Fleet {
             );
         }
 
-        // Enforce: idle-stop rather than overrun. A crew breach stands the whole crew down;
-        // a role breach stops just that role.
+        // Enforce: idle-stop rather than overrun. A crew breach stands the whole crew
+        // down; a role breach stops just that role.
         match breach {
             Some(BudgetScope::Crew) => {
                 event!(
@@ -369,7 +401,8 @@ impl Fleet {
         }
     }
 
-    /// Idle-stops every agent in the fleet, keeping each roster entry (a crew budget hit).
+    /// Idle-stops every agent in the fleet, keeping each roster entry (a crew
+    /// budget hit).
     fn stop_all(&self) -> Result<()> {
         for driver in &self.drivers {
             self.command(&driver.shared.role, Command::Stop)?;
@@ -377,27 +410,32 @@ impl Fleet {
         Ok(())
     }
 
-    /// Starts (or restarts) `role`'s agent: lazy start on first work, restart on demand.
+    /// Starts (or restarts) `role`'s agent: lazy start on first work, restart
+    /// on demand.
     ///
-    /// A no-op if the agent is already running. This is asynchronous: the driver
-    /// applies it, so observe the change through the roster or [`state`](Fleet::state).
+    /// A no-op if the agent is already running. This is asynchronous: the
+    /// driver applies it, so observe the change through the roster or
+    /// [`state`](Fleet::state).
     ///
     /// # Errors
-    /// Returns an error if `role` is not in the fleet, or its driver has stopped.
+    /// Returns an error if `role` is not in the fleet, or its driver has
+    /// stopped.
     pub fn start(&self, role: &RoleId) -> Result<()> {
         self.command(role, Command::Start)
     }
 
     /// Starts every agent in the fleet, bringing the whole unit online.
     ///
-    /// This is what `crew up` calls after [`launch`](crate::Supervisor::launch): each
-    /// role's process spawns and registers on the roster, so the unit is live and
-    /// connected. Idle roles then park themselves on the idle-stop timeout, keeping
-    /// their roster entry, so the unit stays visible while costing nothing when quiet.
+    /// This is what `crew up` calls after
+    /// [`launch`](crate::Supervisor::launch): each role's process spawns
+    /// and registers on the roster, so the unit is live and connected. Idle
+    /// roles then park themselves on the idle-stop timeout, keeping
+    /// their roster entry, so the unit stays visible while costing nothing when
+    /// quiet.
     ///
     /// # Errors
-    /// Returns the first error if any driver has stopped; the remaining agents are left
-    /// untouched.
+    /// Returns the first error if any driver has stopped; the remaining agents
+    /// are left untouched.
     pub fn start_all(&self) -> Result<()> {
         for driver in &self.drivers {
             self.command(&driver.shared.role, Command::Start)?;
@@ -408,7 +446,8 @@ impl Fleet {
     /// Stands `role`'s agent down: stops its process, keeping its roster entry.
     ///
     /// # Errors
-    /// Returns an error if `role` is not in the fleet, or its driver has stopped.
+    /// Returns an error if `role` is not in the fleet, or its driver has
+    /// stopped.
     pub fn stop(&self, role: &RoleId) -> Result<()> {
         self.command(role, Command::Stop)
     }
@@ -439,11 +478,13 @@ impl Fleet {
             .clone()
     }
 
-    /// A snapshot of the coordination stalls the monitor currently sees (issue #48).
+    /// A snapshot of the coordination stalls the monitor currently sees (issue
+    /// #48).
     ///
-    /// Each is a crew stuck waiting on itself: a deadlock, an unanswered question, or a
-    /// ledger with no forward motion. The monitor refreshes this every scan, so a stall
-    /// that clears leaves the list; the operator also sees each new one as a warning.
+    /// Each is a crew stuck waiting on itself: a deadlock, an unanswered
+    /// question, or a ledger with no forward motion. The monitor refreshes
+    /// this every scan, so a stall that clears leaves the list; the
+    /// operator also sees each new one as a warning.
     #[must_use]
     pub fn stalls(&self) -> Vec<Stall> {
         self.stalls
@@ -455,9 +496,10 @@ impl Fleet {
     /// Stops the fleet: stands every agent down, deregisters its role, ends the
     /// watchdog, and cleans up each role's worktree.
     ///
-    /// Worktrees are removed only after every agent process has stopped (the driver
-    /// joins below), so no cleanup races a running agent. An unchanged worktree is
-    /// removed; one with uncommitted changes is kept for integration (issue #43).
+    /// Worktrees are removed only after every agent process has stopped (the
+    /// driver joins below), so no cleanup races a running agent. An
+    /// unchanged worktree is removed; one with uncommitted changes is kept
+    /// for integration (issue #43).
     pub fn shutdown(mut self) {
         for driver in &self.drivers {
             let _ = driver.commands.send(Command::Shutdown);
@@ -550,13 +592,15 @@ impl AgentDriver {
 
 /// The state one agent's driver and the fleet watchdog both touch.
 ///
-/// Each field is its own mutex, so the watchdog can read a state or reap a process
-/// without contending on the driver's other work; every lock is held only briefly.
+/// Each field is its own mutex, so the watchdog can read a state or reap a
+/// process without contending on the driver's other work; every lock is held
+/// only briefly.
 #[derive(Debug)]
 struct AgentShared {
     role: RoleId,
     state: Mutex<AgentState>,
-    /// When the agent last produced output, the clock the heartbeat and watchdog read.
+    /// When the agent last produced output, the clock the heartbeat and
+    /// watchdog read.
     last_activity: Mutex<Instant>,
     /// The current process, when running.
     child: Mutex<Option<Child>>,
@@ -612,7 +656,8 @@ impl AgentShared {
         }
     }
 
-    /// Kills the process if one is running, reaping it to avoid a zombie. Idempotent.
+    /// Kills the process if one is running, reaping it to avoid a zombie.
+    /// Idempotent.
     fn reap(&self) {
         if let Some(mut child) = self
             .child
@@ -636,7 +681,8 @@ enum Command {
     Shutdown,
 }
 
-/// The driver loop: apply commands, and on each idle tick poll for crash, hang, or idle.
+/// The driver loop: apply commands, and on each idle tick poll for crash, hang,
+/// or idle.
 fn drive(mut agent: AgentLifecycle, inbox: &Receiver<Command>) {
     loop {
         match inbox.recv_timeout(POLL_INTERVAL) {
@@ -662,15 +708,17 @@ fn drive(mut agent: AgentLifecycle, inbox: &Receiver<Command>) {
     }
 }
 
-/// The fleet watchdog: reap any working agent whose driver failed to handle its death.
+/// The fleet watchdog: reap any working agent whose driver failed to handle its
+/// death.
 ///
-/// It scans every agent's output-silence clock. Because `watchdog_timeout` is longer
-/// than the in-turn `heartbeat_timeout`, a live driver always defibrillates a hang
-/// first (which resets the clock) or parks the agent (which leaves `Working`); only a
-/// driver that has itself wedged lets an agent stay working and silent this long. So
-/// the watchdog reaps the orphan and hands the role to the operator rather than trying
-/// to revive it through a driver it cannot trust. Its actions are idempotent, so the
-/// rare overlap with a live driver is harmless.
+/// It scans every agent's output-silence clock. Because `watchdog_timeout` is
+/// longer than the in-turn `heartbeat_timeout`, a live driver always
+/// defibrillates a hang first (which resets the clock) or parks the agent
+/// (which leaves `Working`); only a driver that has itself wedged lets an agent
+/// stay working and silent this long. So the watchdog reaps the orphan and
+/// hands the role to the operator rather than trying to revive it through a
+/// driver it cannot trust. Its actions are idempotent, so the rare overlap with
+/// a live driver is harmless.
 fn run_watchdog(
     agents: &[Arc<AgentShared>],
     roster: &RosterClient,
@@ -678,7 +726,8 @@ fn run_watchdog(
     watchdog_timeout: Duration,
     stop: &Receiver<()>,
 ) {
-    // Scan on every tick; a stop signal (or the dropped fleet disconnecting) ends it.
+    // Scan on every tick; a stop signal (or the dropped fleet disconnecting) ends
+    // it.
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(POLL_INTERVAL) {
         let now = Instant::now();
         for shared in agents {
@@ -765,8 +814,8 @@ impl AgentLifecycle {
 
     /// Spawns the process and registers the role working.
     ///
-    /// The register publishes the lifecycle event: `started` for the first working,
-    /// `recovered` coming back from dead, `restarted` otherwise.
+    /// The register publishes the lifecycle event: `started` for the first
+    /// working, `recovered` coming back from dead, `restarted` otherwise.
     fn spawn(&mut self) -> Result<()> {
         let mut child = spawn_process(&self.command)?;
         if let Some(stdout) = child.stdout.take() {
@@ -796,7 +845,8 @@ impl AgentLifecycle {
         Ok(())
     }
 
-    /// Recovers the agent from a death: reap, record, mark dead, then revive or hand off.
+    /// Recovers the agent from a death: reap, record, mark dead, then revive or
+    /// hand off.
     fn defibrillate(&mut self, cause: DeathCause) {
         // Shock: reap the orphan (a hang is still alive; a crash already exited).
         self.shared.reap();
@@ -832,7 +882,8 @@ impl AgentLifecycle {
         }
     }
 
-    /// Records a death, so the operator can see what happened even if the revive fails.
+    /// Records a death, so the operator can see what happened even if the
+    /// revive fails.
     fn record_incident(&self, cause: DeathCause, recovery: Recovery) {
         let detail = match cause {
             DeathCause::Crashed => "the agent process exited unexpectedly".to_owned(),
@@ -861,7 +912,8 @@ impl AgentLifecycle {
             });
     }
 
-    /// Idle-stops the agent: stop its process, park it (an `idle`), keep its entry.
+    /// Idle-stops the agent: stop its process, park it (an `idle`), keep its
+    /// entry.
     fn idle_stop(&mut self) {
         self.shared.reap();
         self.shared.set_state(AgentState::Idle);
@@ -876,7 +928,8 @@ impl AgentLifecycle {
         );
     }
 
-    /// Stands the agent down: stop its process and mark it stopped, keeping its entry.
+    /// Stands the agent down: stop its process and mark it stopped, keeping its
+    /// entry.
     fn stop(&mut self) {
         if self.shared.state() == AgentState::Stopped {
             return;
@@ -929,11 +982,12 @@ impl AgentLifecycle {
     }
 }
 
-/// Reads `pipe` line by line on a detached thread, sending each line to `sink` and
-/// stamping the shared activity clock so output defers the idle-stop and the heartbeat.
+/// Reads `pipe` line by line on a detached thread, sending each line to `sink`
+/// and stamping the shared activity clock so output defers the idle-stop and
+/// the heartbeat.
 ///
-/// Ends at EOF (the process closed the stream, i.e. exited) or once the receiver is
-/// gone, so it never outlives its process.
+/// Ends at EOF (the process closed the stream, i.e. exited) or once the
+/// receiver is gone, so it never outlives its process.
 fn capture(
     stream: OutputStream,
     pipe: impl Read + Send + 'static,
@@ -967,7 +1021,8 @@ mod tests {
         assert_eq!(policy.heartbeat_timeout.as_secs(), 20 * 60);
         assert_eq!(policy.watchdog_timeout.as_secs(), 25 * 60);
         assert_eq!(policy.max_recoveries, 3);
-        // The watchdog must sit above the in-turn heartbeat, so a live driver acts first.
+        // The watchdog must sit above the in-turn heartbeat, so a live driver acts
+        // first.
         assert!(policy.watchdog_timeout > policy.heartbeat_timeout);
         // A coordination stall is escalated well before a hung process is reaped.
         assert_eq!(policy.stall_timeout.as_secs(), 10 * 60);

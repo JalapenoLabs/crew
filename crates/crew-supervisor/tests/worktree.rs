@@ -1,22 +1,19 @@
 //! Fleet-level worktree isolation and cleanup on stand-down (issue #43).
 //!
-//! Proves the acceptance against a real git repo and a real in-process broker, with
-//! stub agents standing in for `claude`: two roles get isolated worktrees, and standing
-//! the fleet down cleans up an unchanged worktree while preserving a changed one for
-//! integration.
+//! Proves the acceptance against a real git repo and a real in-process broker,
+//! with stub agents standing in for `claude`: two roles get isolated worktrees,
+//! and standing the fleet down cleans up an unchanged worktree while preserving
+//! a changed one for integration.
 
 mod common;
 
-use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
+use std::{path::Path, process::Command, time::Duration};
 
+use common::{liveness, start_broker, wait_until};
 use crew_core::RoleId;
 use crew_supervisor::{
     AgentCommand, Fleet, LifecyclePolicy, PreparedAgent, RosterClient, Worktree,
 };
-
-use common::{liveness, start_broker, wait_until};
 
 /// Runs a git command in `dir`, asserting it succeeds.
 fn git(dir: &Path, args: &[&str]) {
@@ -63,7 +60,8 @@ fn stub_in(role: &str, cwd: &Path) -> PreparedAgent {
     }
 }
 
-/// The fleet policy the tests use: never idle-stop, so roles stay working throughout.
+/// The fleet policy the tests use: never idle-stop, so roles stay working
+/// throughout.
 fn policy() -> LifecyclePolicy {
     LifecyclePolicy {
         idle_timeout: Duration::from_secs(3600),
@@ -100,7 +98,8 @@ fn parallel_worktrees_are_isolated_and_cleaned_up_on_stand_down() {
         || liveness(&base, "frontend").as_deref() == Some("working")
     ));
 
-    // Each role edits the same file in its own worktree; neither leaks into the other.
+    // Each role edits the same file in its own worktree; neither leaks into the
+    // other.
     std::fs::write(backend_path.join("file.txt"), "backend\n").unwrap();
     std::fs::write(frontend_path.join("file.txt"), "frontend\n").unwrap();
     assert_eq!(
@@ -112,7 +111,8 @@ fn parallel_worktrees_are_isolated_and_cleaned_up_on_stand_down() {
         "frontend\n"
     );
 
-    // Commit each role's work, so its worktree is clean and removing it keeps the branch.
+    // Commit each role's work, so its worktree is clean and removing it keeps the
+    // branch.
     for tree in [&backend_path, &frontend_path] {
         git(tree, &["commit", "-q", "-am", "role work"]);
     }

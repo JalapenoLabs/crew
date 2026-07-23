@@ -1,35 +1,31 @@
 //! The work ledger: who holds which piece of work (issue #45).
 //!
-//! Two roles must never grab the same work. The ledger records each claimed task, its
-//! owner, and its state; a role claims before it starts and moves the claim to `done`
-//! when it finishes. `POST /ledger` sets a task's state, refusing a claim on work
-//! another role already holds (409), so a conflict is surfaced rather than raced.
-//! `GET /ledger` reads the live ownership.
+//! Two roles must never grab the same work. The ledger records each claimed
+//! task, its owner, and its state; a role claims before it starts and moves the
+//! claim to `done` when it finishes. `POST /ledger` sets a task's state,
+//! refusing a claim on work another role already holds (409), so a conflict is
+//! surfaced rather than raced. `GET /ledger` reads the live ownership.
 //!
-//! Every change also rides the event stream as a `ledger` event (from the owner, to
-//! `all-units`), so the ledger is a projection of it: an observer reconstructs the same
-//! ownership from the log. The live ledger lives in the broker ([`AppState`]), the
-//! authority that serializes claims; rebuilding it from the durable log on a broker
-//! restart is a later refinement.
+//! Every change also rides the event stream as a `ledger` event (from the
+//! owner, to `all-units`), so the ledger is a projection of it: an observer
+//! reconstructs the same ownership from the log. The live ledger lives in the
+//! broker ([`AppState`]), the authority that serializes claims; rebuilding it
+//! from the durable log on a broker restart is a later refinement.
 
 use std::collections::BTreeMap;
 
-use axum::extract::State;
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{extract::State, routing::get, Json, Router};
 use crew_core::{
     ChannelId, Event, EventKind, LedgerEvent, RoleId, Sender, TaskState, Timestamp, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::AppState;
+use crate::{error::ApiError, events::JsonBody, state::AppState};
 
 /// The shared work ledger: each claimed task, its owner, and its state.
 ///
-/// The invariant, enforced by [`set`](Ledger::set): at most one role **holds** a task
-/// (a task in any state but [`Done`](TaskState::Done)).
+/// The invariant, enforced by [`set`](Ledger::set): at most one role **holds**
+/// a task (a task in any state but [`Done`](TaskState::Done)).
 #[derive(Debug, Default)]
 pub(crate) struct Ledger {
     tasks: BTreeMap<String, LedgerEntry>,
@@ -52,11 +48,13 @@ pub(crate) struct Conflict {
 }
 
 impl Ledger {
-    /// Sets `task` to `state`, owned by `owner`, enforcing one owner per held task.
+    /// Sets `task` to `state`, owned by `owner`, enforcing one owner per held
+    /// task.
     ///
-    /// A task another role currently holds is refused with the holder ([`Conflict`]);
-    /// an unheld task (new, or `done`) is taken. A role setting the state of its own
-    /// task always succeeds. An empty `title` keeps the task's current title.
+    /// A task another role currently holds is refused with the holder
+    /// ([`Conflict`]); an unheld task (new, or `done`) is taken. A role
+    /// setting the state of its own task always succeeds. An empty `title`
+    /// keeps the task's current title.
     ///
     /// # Errors
     /// Returns a [`Conflict`] if another role holds the task.
@@ -159,12 +157,12 @@ async fn list(State(state): State<AppState>) -> Json<LedgerView> {
 
 /// `POST /ledger`: claim a task or move it to a new state, as `owner`.
 ///
-/// Refuses a claim on a task another role holds, so a conflict surfaces rather than
-/// silently racing; publishes a `ledger` event on success.
+/// Refuses a claim on a task another role holds, so a conflict surfaces rather
+/// than silently racing; publishes a `ledger` event on success.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] on an empty task or owner, or a 409 if another role holds
-/// the task.
+/// Returns a 400 [`ApiError`] on an empty task or owner, or a 409 if another
+/// role holds the task.
 async fn claim(
     State(state): State<AppState>,
     JsonBody(request): JsonBody<ClaimRequest>,
@@ -180,8 +178,9 @@ async fn claim(
     let owner = RoleId::new(owner);
     let title = request.title.trim();
 
-    // Hold the ledger lock across the set and the publish, so the stream order matches
-    // the order claims are applied: a reader reconstructs the same ownership.
+    // Hold the ledger lock across the set and the publish, so the stream order
+    // matches the order claims are applied: a reader reconstructs the same
+    // ownership.
     let mut ledger = state.ledger();
     ledger
         .set(task, &owner, request.state, title)
@@ -198,7 +197,8 @@ async fn claim(
     Ok(Json(view))
 }
 
-/// A ledger change as a first-class stream event, from the owner to `all-units`.
+/// A ledger change as a first-class stream event, from the owner to
+/// `all-units`.
 fn ledger_event(task: &str, owner: &RoleId, state: TaskState, title: &str) -> Event {
     Event {
         ts: Timestamp::now(),
@@ -216,15 +216,15 @@ fn ledger_event(task: &str, owner: &RoleId, state: TaskState, title: &str) -> Ev
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{EventKind, TaskState};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn request(state: &AppState, method: &str, body: Value) -> (StatusCode, Value) {
         let builder = Request::builder().method(method).uri("/ledger");

@@ -1,32 +1,38 @@
-//! The General's command-and-control directives: `crew redirect`, `crew belay`, and
-//! `crew command`.
+//! The General's command-and-control directives: `crew redirect`, `crew belay`,
+//! and `crew command`.
 //!
-//! These let the General steer a running agent without tearing the crew down (issue
-//! #38). Each posts a high-priority message to a role's direct channel, from the
-//! General; the broker delivers it on the role's self-filtered inbox stream (issue
-//! #10), and the role honors it at its next tool boundary (its briefing tells it so).
-//! A `redirect` steers a role without stopping it; a `belay` halts its current work and
-//! re-tasks it. Delivery is the same whether the role is mid-turn or idle: the message
-//! lands on the inbox, never by killing the process.
+//! These let the General steer a running agent without tearing the crew down
+//! (issue #38). Each posts a high-priority message to a role's direct channel,
+//! from the General; the broker delivers it on the role's self-filtered inbox
+//! stream (issue #10), and the role honors it at its next tool boundary (its
+//! briefing tells it so). A `redirect` steers a role without stopping it; a
+//! `belay` halts its current work and re-tasks it. Delivery is the same whether
+//! the role is mid-turn or idle: the message lands on the inbox, never by
+//! killing the process.
 //!
-//! `crew command` is the **direct override** (issue #42): the General orders a specialist
-//! itself, bypassing the commander's fan-out, and the commander is informed rather than
-//! bypassed silently, so the chain of command stays intact. The default (brief the
-//! commander) is unchanged; the override is explicit.
+//! `crew command` is the **direct override** (issue #42): the General orders a
+//! specialist itself, bypassing the commander's fan-out, and the commander is
+//! informed rather than bypassed silently, so the chain of command stays
+//! intact. The default (brief the commander) is unchanged; the override is
+//! explicit.
 //!
-//! All post as the General, so unlike the agent shim (`src/shim.rs`) they need no role
-//! card: the broker address comes from `--broker`, else the `CREW_BROKER_*` environment.
+//! All post as the General, so unlike the agent shim (`src/shim.rs`) they need
+//! no role card: the broker address comes from `--broker`, else the
+//! `CREW_BROKER_*` environment.
 
-use crew_substrate::broker::Config as BrokerConfig;
-use crew_substrate::core::{BrokerEndpoint, Channel};
+use crew_substrate::{
+    broker::Config as BrokerConfig,
+    core::{BrokerEndpoint, Channel},
+};
 use eyre::{eyre, Result, WrapErr};
 use serde_json::json;
 
 /// Steers `role` mid-task without stopping it: post the General's `redirect`.
 ///
 /// # Errors
-/// Returns an error if `role` is not a plain role name, the broker configuration is
-/// invalid, or the broker cannot be reached or rejects the message.
+/// Returns an error if `role` is not a plain role name, the broker
+/// configuration is invalid, or the broker cannot be reached or rejects the
+/// message.
 pub fn redirect(broker: Option<&str>, role: &str, message: &str) -> Result<()> {
     direct(broker, role, "redirect", message)
 }
@@ -34,25 +40,28 @@ pub fn redirect(broker: Option<&str>, role: &str, message: &str) -> Result<()> {
 /// Halts `role`'s current work and re-tasks it: post the General's `belay`.
 ///
 /// # Errors
-/// Returns an error if `role` is not a plain role name, the broker configuration is
-/// invalid, or the broker cannot be reached or rejects the message.
+/// Returns an error if `role` is not a plain role name, the broker
+/// configuration is invalid, or the broker cannot be reached or rejects the
+/// message.
 pub fn belay(broker: Option<&str>, role: &str, order: &str) -> Result<()> {
     direct(broker, role, "belay", order)
 }
 
-/// Commands `role` directly, bypassing the commander's fan-out, and informs the commander
-/// so the override is visible rather than silent (issue #42).
+/// Commands `role` directly, bypassing the commander's fan-out, and informs the
+/// commander so the override is visible rather than silent (issue #42).
 ///
-/// The General overrides the commander to order a specialist itself: it posts an `order`
-/// from the General to the role's `@role` channel (`title`, plus `scope` and `acceptance`
-/// when given), and then a note to the commander's feed announcing the direct order, so a
-/// reassignment or a direct task is never bypassing the commander behind its back. Ordering
-/// the commander itself carries no notice (it is the addressee). The default, briefing the
+/// The General overrides the commander to order a specialist itself: it posts
+/// an `order` from the General to the role's `@role` channel (`title`, plus
+/// `scope` and `acceptance` when given), and then a note to the commander's
+/// feed announcing the direct order, so a reassignment or a direct task is
+/// never bypassing the commander behind its back. Ordering the commander itself
+/// carries no notice (it is the addressee). The default, briefing the
 /// commander, is unchanged; this is the deliberate override.
 ///
 /// # Errors
-/// Returns an error if `role` (or the commander) is not a plain role name, the broker
-/// configuration is invalid, or the broker cannot be reached or rejects a message.
+/// Returns an error if `role` (or the commander) is not a plain role name, the
+/// broker configuration is invalid, or the broker cannot be reached or rejects
+/// a message.
 pub fn command(
     broker: Option<&str>,
     role: &str,
@@ -69,7 +78,8 @@ pub fn command(
         .map_or_else(|| "commander".to_owned(), plain_role);
     let base = resolve_base(broker)?;
 
-    // The direct order to the specialist: the General taking the commander's ordering role.
+    // The direct order to the specialist: the General taking the commander's
+    // ordering role.
     let order_payload = json!({
         "from": { "kind": "general" },
         "kind": "order",
@@ -101,8 +111,8 @@ pub fn command(
     Ok(())
 }
 
-/// Posts a General directive (`kind`, a `redirect` or `belay`) to `role`'s direct
-/// channel with `body`, printing a short confirmation.
+/// Posts a General directive (`kind`, a `redirect` or `belay`) to `role`'s
+/// direct channel with `body`, printing a short confirmation.
 fn direct(broker: Option<&str>, role: &str, kind: &str, body: &str) -> Result<()> {
     let role = plain_role(role);
     let target = role_channel(&role, "steer")?;
@@ -118,14 +128,16 @@ fn plain_role(role: &str) -> String {
     role.trim().trim_start_matches('@').to_owned()
 }
 
-/// The direct `@role` channel for `role`, or an error naming what the caller wanted to do.
+/// The direct `@role` channel for `role`, or an error naming what the caller
+/// wanted to do.
 fn role_channel(role: &str, verb: &str) -> Result<Channel> {
     Channel::parse(&format!("@{role}"))
         .filter(|channel| matches!(channel, Channel::Direct(_)))
         .ok_or_else(|| eyre!("`{role}` is not a role to {verb}; name a single specialist"))
 }
 
-/// The note that informs the commander of a direct order, so the override is not silent.
+/// The note that informs the commander of a direct order, so the override is
+/// not silent.
 fn commander_notice(role: &str, order: &str) -> String {
     format!(
         "Direct order from the General to {role}: {order}. You are informed, not bypassed: \
@@ -133,7 +145,8 @@ fn commander_notice(role: &str, order: &str) -> String {
     )
 }
 
-/// Posts `payload` to `channel`'s message endpoint, surfacing a broker refusal as `what`.
+/// Posts `payload` to `channel`'s message endpoint, surfacing a broker refusal
+/// as `what`.
 fn post_message(base: &str, channel: &str, payload: &serde_json::Value, what: &str) -> Result<()> {
     let url = format!("{base}/channels/{channel}/messages");
     match ureq::post(&url)
@@ -152,10 +165,12 @@ fn post_message(base: &str, channel: &str, payload: &serde_json::Value, what: &s
     }
 }
 
-/// The broker base URL: the `--broker` value if given, else the broker's environment.
+/// The broker base URL: the `--broker` value if given, else the broker's
+/// environment.
 ///
 /// # Errors
-/// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but invalid.
+/// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but
+/// invalid.
 fn resolve_base(flag: Option<&str>) -> Result<String> {
     if let Some(url) = flag {
         return Ok(normalize_base(url));
@@ -164,7 +179,8 @@ fn resolve_base(flag: Option<&str>) -> Result<String> {
     Ok(BrokerEndpoint::new(config.host.to_string(), config.port).base_url())
 }
 
-/// Normalizes a `--broker` value: default the scheme to `http`, drop a trailing slash.
+/// Normalizes a `--broker` value: default the scheme to `http`, drop a trailing
+/// slash.
 fn normalize_base(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     if url.starts_with("http://") || url.starts_with("https://") {

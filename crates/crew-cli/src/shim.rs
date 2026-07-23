@@ -1,31 +1,34 @@
 //! The agent CLI shim: crew coordination for a runtime without MCP (issue #28).
 //!
-//! A Claude Code agent gets the crew tools over MCP (`crew_send`, `crew_inbox`, ...).
-//! A runtime without MCP, such as Codex, reaches the same broker through these `crew`
-//! subcommands instead. Each maps one-to-one onto an MCP tool and, crucially, uses the
-//! very same [`crew_substrate::mcp::Broker`] client the MCP server uses, so a shim agent's
-//! I/O lands on the broker identically to the MCP path (see `docs/codex.md`).
+//! A Claude Code agent gets the crew tools over MCP (`crew_send`, `crew_inbox`,
+//! ...). A runtime without MCP, such as Codex, reaches the same broker through
+//! these `crew` subcommands instead. Each maps one-to-one onto an MCP tool and,
+//! crucially, uses the very same [`crew_substrate::mcp::Broker`] client the MCP
+//! server uses, so a shim agent's I/O lands on the broker identically to the
+//! MCP path (see `docs/codex.md`).
 //!
-//! Every command boots from the same role context the `crew-mcp` binary does: the role
-//! card at `CREW_ROLE_CARD`, or `CREW_ROLE` plus the broker's own `CREW_BROKER_*`
-//! environment. So the supervisor spawns a Codex agent with the same environment it
-//! hands a Claude agent, and the agent shells out to `crew` instead of calling a tool.
+//! Every command boots from the same role context the `crew-mcp` binary does:
+//! the role card at `CREW_ROLE_CARD`, or `CREW_ROLE` plus the broker's own
+//! `CREW_BROKER_*` environment. So the supervisor spawns a Codex agent with the
+//! same environment it hands a Claude agent, and the agent shells out to `crew`
+//! instead of calling a tool.
 //!
-//! Each invocation is its own short-lived process, so unlike the long-lived MCP server
-//! the shim keeps no per-session state: `crew inbox` reports every message currently
-//! addressed to the role, not only those since a previous call. `docs/codex.md` records
-//! this and the other parity gaps.
+//! Each invocation is its own short-lived process, so unlike the long-lived MCP
+//! server the shim keeps no per-session state: `crew inbox` reports every
+//! message currently addressed to the role, not only those since a previous
+//! call. `docs/codex.md` records this and the other parity gaps.
 
 use std::path::PathBuf;
 
-use crew_substrate::broker::Config as BrokerConfig;
-use crew_substrate::core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV};
-use crew_substrate::mcp::{
-    BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing,
+use crew_substrate::{
+    broker::Config as BrokerConfig,
+    core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV},
+    mcp::{BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing},
 };
 use eyre::{eyre, Result, WrapErr};
 
-/// The resolved agent context a shim command acts as: its broker, role, and lane.
+/// The resolved agent context a shim command acts as: its broker, role, and
+/// lane.
 struct Agent {
     /// The broker base URL, such as `http://127.0.0.1:2739`.
     base: String,
@@ -46,11 +49,12 @@ impl Agent {
     }
 }
 
-/// Registers this agent's role on the roster, so the unit sees it (mirrors the MCP
-/// server's boot registration).
+/// Registers this agent's role on the roster, so the unit sees it (mirrors the
+/// MCP server's boot registration).
 ///
 /// # Errors
-/// Returns an error if no role context is set, or the broker rejects the registration.
+/// Returns an error if no role context is set, or the broker rejects the
+/// registration.
 pub fn register() -> Result<()> {
     let agent = load_agent()?;
     agent
@@ -61,14 +65,16 @@ pub fn register() -> Result<()> {
     Ok(())
 }
 
-/// Sends a message as this agent's role to a teammate, a channel, or the commander.
-///
-/// Mirrors `crew_send`: `to` direct-messages a role, `channel` posts to a named
-/// channel (`all-units` or a pair like `frontend+backend`), and neither reaches the
+/// Sends a message as this agent's role to a teammate, a channel, or the
 /// commander.
 ///
+/// Mirrors `crew_send`: `to` direct-messages a role, `channel` posts to a named
+/// channel (`all-units` or a pair like `frontend+backend`), and neither reaches
+/// the commander.
+///
 /// # Errors
-/// Returns an error if no role context is set, or the broker rejects the message.
+/// Returns an error if no role context is set, or the broker rejects the
+/// message.
 pub fn send(to: Option<&str>, channel: Option<&str>, body: &str) -> Result<()> {
     let agent = load_agent()?;
     let confirmation = agent
@@ -81,8 +87,9 @@ pub fn send(to: Option<&str>, channel: Option<&str>, body: &str) -> Result<()> {
 
 /// Prints the messages addressed to this agent's role.
 ///
-/// Mirrors `crew_inbox`, but statelessly: a short-lived shim keeps no per-session
-/// cursor, so it reports every message currently addressed to the role.
+/// Mirrors `crew_inbox`, but statelessly: a short-lived shim keeps no
+/// per-session cursor, so it reports every message currently addressed to the
+/// role.
 ///
 /// # Errors
 /// Returns an error if no role context is set, or the broker cannot be reached.
@@ -107,14 +114,15 @@ pub fn roster() -> Result<()> {
     Ok(())
 }
 
-/// Claims a task, or moves this role's claim to `state`, on the work ledger (issue #45).
+/// Claims a task, or moves this role's claim to `state`, on the work ledger
+/// (issue #45).
 ///
-/// Mirrors `crew_claim`: the broker refuses a claim on work another role holds, and the
-/// error names the holder.
+/// Mirrors `crew_claim`: the broker refuses a claim on work another role holds,
+/// and the error names the holder.
 ///
 /// # Errors
-/// Returns an error if no role context is set, another role holds the task, or the
-/// broker cannot be reached.
+/// Returns an error if no role context is set, another role holds the task, or
+/// the broker cannot be reached.
 pub fn claim(task: &str, state: &str, title: &str) -> Result<()> {
     let agent = load_agent()?;
     let confirmation = agent
@@ -139,16 +147,16 @@ pub fn ledger() -> Result<()> {
     Ok(())
 }
 
-/// Checks whether `path` is in this role's lane, warning or blocking per policy (issue
-/// #46).
+/// Checks whether `path` is in this role's lane, warning or blocking per policy
+/// (issue #46).
 ///
-/// Mirrors `crew_lane`: an in-lane path proceeds; an out-of-lane path is reported on the
-/// stream, and under a blocking policy the check fails so the role routes the change
-/// through the commander instead of editing silently.
+/// Mirrors `crew_lane`: an in-lane path proceeds; an out-of-lane path is
+/// reported on the stream, and under a blocking policy the check fails so the
+/// role routes the change through the commander instead of editing silently.
 ///
 /// # Errors
-/// Returns an error if no role context is set, the path is out of lane and enforcement
-/// is `block`, or the broker cannot be reached.
+/// Returns an error if no role context is set, the path is out of lane and
+/// enforcement is `block`, or the broker cannot be reached.
 pub fn lane(path: &str) -> Result<()> {
     let agent = load_agent()?;
     let verdict = agent
@@ -161,11 +169,12 @@ pub fn lane(path: &str) -> Result<()> {
 
 /// Submits this agent's finished work for adversarial verification (issue #47).
 ///
-/// Mirrors `crew_submit`: the work is not done until an independent role tries to break
-/// it and passes it. `to` optionally names a reviewer role to notify.
+/// Mirrors `crew_submit`: the work is not done until an independent role tries
+/// to break it and passes it. `to` optionally names a reviewer role to notify.
 ///
 /// # Errors
-/// Returns an error if no role context is set, or the broker rejects the submission.
+/// Returns an error if no role context is set, or the broker rejects the
+/// submission.
 pub fn submit(task: &str, acceptance: Option<&str>, to: Option<&str>) -> Result<()> {
     let agent = load_agent()?;
     let confirmation = agent
@@ -178,12 +187,12 @@ pub fn submit(task: &str, acceptance: Option<&str>, to: Option<&str>) -> Result<
 
 /// Records this agent's verdict on a task another role submitted (issue #47).
 ///
-/// Mirrors `crew_verdict`: a `pass` marks the task done; otherwise the work returns to
-/// its owner with the `failure`. A role cannot verify its own work.
+/// Mirrors `crew_verdict`: a `pass` marks the task done; otherwise the work
+/// returns to its owner with the `failure`. A role cannot verify its own work.
 ///
 /// # Errors
-/// Returns an error if no role context is set, the verdict is refused, or a failing
-/// verdict carries no failure.
+/// Returns an error if no role context is set, the verdict is refused, or a
+/// failing verdict carries no failure.
 pub fn verdict(task: &str, pass: bool, failure: Option<&str>) -> Result<()> {
     let agent = load_agent()?;
     let confirmation = agent
@@ -194,7 +203,8 @@ pub fn verdict(task: &str, pass: bool, failure: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Prints the done-gate: every task under verification and its standing (issue #47).
+/// Prints the done-gate: every task under verification and its standing (issue
+/// #47).
 ///
 /// # Errors
 /// Returns an error if no role context is set, or the broker cannot be reached.
@@ -207,12 +217,13 @@ pub fn gate() -> Result<()> {
 
 /// Records or retracts a shared situation board entry (issue #49).
 ///
-/// Mirrors `crew_record`: records a `decision`, `interface`, or `gotcha` under `key`, or,
-/// with `retract`, removes the entry. The commander curates the board.
+/// Mirrors `crew_record`: records a `decision`, `interface`, or `gotcha` under
+/// `key`, or, with `retract`, removes the entry. The commander curates the
+/// board.
 ///
 /// # Errors
-/// Returns an error if no role context is set, a required field is missing, a retraction
-/// names a missing entry, or the broker cannot be reached.
+/// Returns an error if no role context is set, a required field is missing, a
+/// retraction names a missing entry, or the broker cannot be reached.
 pub fn record(key: &str, section: Option<&str>, body: Option<&str>, retract: bool) -> Result<()> {
     let agent = load_agent()?;
     let broker = agent.broker();
@@ -245,8 +256,9 @@ pub fn board(section: Option<&str>) -> Result<()> {
 
 /// Prints this role's bounded new-role briefing packet (issue #50).
 ///
-/// Mirrors `crew_briefing`: the decision board and a rolling summary scoped to the role's
-/// lane, capped to a byte budget, so a fresh role catches up without reading the whole log.
+/// Mirrors `crew_briefing`: the decision board and a rolling summary scoped to
+/// the role's lane, capped to a byte budget, so a fresh role catches up without
+/// reading the whole log.
 ///
 /// # Errors
 /// Returns an error if no role context is set, or the broker cannot be reached.
@@ -265,11 +277,13 @@ pub fn briefing(task: Option<&str>, budget: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-/// Resolves the agent context from the environment, the way the `crew-mcp` binary does.
+/// Resolves the agent context from the environment, the way the `crew-mcp`
+/// binary does.
 ///
-/// Prefers the role card at [`ROLE_CARD_ENV`], which carries the role, its lane, and
-/// the broker address. Failing that, `CREW_ROLE` names the role and the broker's own
-/// `CREW_BROKER_*` config gives the address, for a bare manual boot with an empty lane.
+/// Prefers the role card at [`ROLE_CARD_ENV`], which carries the role, its
+/// lane, and the broker address. Failing that, `CREW_ROLE` names the role and
+/// the broker's own `CREW_BROKER_*` config gives the address, for a bare manual
+/// boot with an empty lane.
 fn load_agent() -> Result<Agent> {
     if let Some(path) = std::env::var_os(ROLE_CARD_ENV) {
         let path = PathBuf::from(path);
@@ -330,7 +344,8 @@ fn print_inbox(items: &[InboxItem]) {
     }
 }
 
-/// Prints the roster: the crew standing, then each role, its lane, and its liveness.
+/// Prints the roster: the crew standing, then each role, its lane, and its
+/// liveness.
 fn print_roster(snapshot: &RosterSnapshot) {
     if snapshot.roles.is_empty() {
         println!("The roster is empty.");
@@ -376,7 +391,8 @@ fn print_ledger(items: &[LedgerItem]) {
     }
 }
 
-/// Prints the done-gate: each task under verification, its owner, verifier, and standing.
+/// Prints the done-gate: each task under verification, its owner, verifier, and
+/// standing.
 fn print_gate(snapshot: &GateSnapshot) {
     if snapshot.tasks.is_empty() {
         println!("The done-gate is empty; no task is under verification.");

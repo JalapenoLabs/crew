@@ -1,22 +1,26 @@
 //! End-to-end test of spawning a crew and wiring it to the broker (issue #21).
 //!
-//! It starts a real `crewd` in-process on an ephemeral loopback port, then spawns a
-//! crew of stub agent processes (a shell that prints a line and idles, standing in for
-//! a real `claude` turn, which needs no external services or an API key in CI). The
-//! assertions prove the acceptance: given N roles, N agents start, register with the
-//! broker, can message each other, and deregister on exit. Output capture is proven
-//! too, since the activity parser (issue #24) reads that stream.
+//! It starts a real `crewd` in-process on an ephemeral loopback port, then
+//! spawns a crew of stub agent processes (a shell that prints a line and idles,
+//! standing in for a real `claude` turn, which needs no external services or an
+//! API key in CI). The assertions prove the acceptance: given N roles, N agents
+//! start, register with the broker, can message each other, and deregister on
+//! exit. Output capture is proven too, since the activity parser (issue #24)
+//! reads that stream.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::sync::mpsc::Receiver;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    net::{Ipv4Addr, SocketAddr, TcpListener},
+    sync::mpsc::Receiver,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crew_broker::{AppState, Config};
 use crew_core::RoleId;
 use crew_supervisor::{AgentCommand, Captured, Crew, OutputStream, PreparedAgent, RosterClient};
 
-/// Starts a broker over a fresh in-memory store, returning the address it serves on.
+/// Starts a broker over a fresh in-memory store, returning the address it
+/// serves on.
 fn start_broker() -> SocketAddr {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -35,8 +39,9 @@ fn start_broker() -> SocketAddr {
     addr
 }
 
-/// A stub agent process: print a line to stdout, then idle until the supervisor kills
-/// it. It stands in for a real `claude -p` turn so the lifecycle runs without claude.
+/// A stub agent process: print a line to stdout, then idle until the supervisor
+/// kills it. It stands in for a real `claude -p` turn so the lifecycle runs
+/// without claude.
 fn stub_command() -> AgentCommand {
     AgentCommand {
         program: "bash".to_owned(),
@@ -122,8 +127,8 @@ fn a_crew_starts_registers_messages_and_deregisters() {
         "every role registers on start",
     );
 
-    // The agents can message each other: a note to @backend is routed and stored, so
-    // any teammate's inbox would receive it.
+    // The agents can message each other: a note to @backend is routed and stored,
+    // so any teammate's inbox would receive it.
     post_note(&base, "@backend", "frontend", "the API is ready");
     assert!(
         history_bodies(&base)

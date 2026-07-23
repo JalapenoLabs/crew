@@ -1,21 +1,18 @@
 //! The boundary endpoint: report a role reaching outside its lane (issue #46).
 //!
-//! Lane enforcement decides in-lane vs out-of-lane against the role's owned paths (its
-//! authoritative role card, checked at the agent's `crew_lane` tool). This endpoint is
-//! the surface: `POST /boundary` records a crossing as a `boundary` event on the stream
-//! (from the role, to `all-units`), so the operator sees who reached where and whether
-//! the crew's policy warned or blocked. A genuine cross-lane need should go through the
-//! commander instead of a silent edit.
+//! Lane enforcement decides in-lane vs out-of-lane against the role's owned
+//! paths (its authoritative role card, checked at the agent's `crew_lane`
+//! tool). This endpoint is the surface: `POST /boundary` records a crossing as
+//! a `boundary` event on the stream (from the role, to `all-units`), so the
+//! operator sees who reached where and whether the crew's policy warned or
+//! blocked. A genuine cross-lane need should go through the commander instead
+//! of a silent edit.
 
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::{extract::State, routing::post, Json, Router};
 use crew_core::{BoundaryEvent, ChannelId, Event, EventKind, RoleId, Sender, Timestamp, ALL_UNITS};
 use serde::Deserialize;
 
-use crate::error::ApiError;
-use crate::events::JsonBody;
-use crate::state::AppState;
+use crate::{error::ApiError, events::JsonBody, state::AppState};
 
 /// The boundary route: report a lane crossing.
 pub(crate) fn routes() -> Router<AppState> {
@@ -29,7 +26,8 @@ struct BoundaryReport {
     role: String,
     /// The out-of-lane path it reached for.
     path: String,
-    /// Whether the crew's policy blocked the edit; `false` (a warning) by default.
+    /// Whether the crew's policy blocked the edit; `false` (a warning) by
+    /// default.
     #[serde(default)]
     blocked: bool,
 }
@@ -68,15 +66,15 @@ async fn report(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use crew_core::{BoundaryEvent, EventKind};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::api;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::{api, config::Config, state::AppState};
 
     async fn post(state: &AppState, body: Value) -> (StatusCode, Value) {
         let request = Request::builder()

@@ -1,6 +1,15 @@
-# Project formatting settings (issue #2), applied by `cargo fmt` on the pinned
-# toolchain (see rust-toolchain.toml). Stable-channel options only, so every
-# setting takes effect with no "unstable option" warnings.
+# Project formatting settings (issues #2, #60), applied by `cargo fmt`.
+#
+# The stable options below take effect on the pinned toolchain (rust-toolchain.toml,
+# 1.88) that builds and gates the workspace: the stable `Format` CI job runs
+# `cargo fmt --all --check` there and ignores the nightly-only options below.
+#
+# The import-grouping and comment options are nightly-only (issue #60). A dedicated
+# `Format (nightly)` CI job runs `cargo +<nightly> fmt --all --check` on a nightly
+# toolchain pinned to a date in `.github/workflows/ci.yml` (the `NIGHTLY` env), so the
+# richer grouping and comment wrapping are enforced without unpinning the build
+# toolchain. Nightly is pinned to a date, never a floating channel, per the repo's
+# version-pinning rule.
 #
 # The values are set explicitly rather than left to rustfmt's defaults, so
 # formatting stays reproducible across local, CI, and any future container even if
@@ -11,3 +20,9 @@ max_width = 100
 tab_spaces = 4
 hard_tabs = false
 newline_style = "Unix"
+
+# Nightly-only (issue #60), enforced by the `Format (nightly)` CI job:
+group_imports = "StdExternalCrate"   # order imports in std / external / crate blocks
+imports_granularity = "Crate"        # one `use` block per crate, not one per module
+wrap_comments = true                 # wrap long comments to `max_width`
+format_code_in_doc_comments = true   # format the Rust in `///` code fences

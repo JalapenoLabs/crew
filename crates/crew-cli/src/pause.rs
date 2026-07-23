@@ -1,24 +1,23 @@
-//! `crew pause`, `crew resume`, and `crew standdown`: the General's brake and kill
-//! switch (issue #41).
+//! `crew pause`, `crew resume`, and `crew standdown`: the General's brake and
+//! kill switch (issue #41).
 //!
-//! Each posts to the broker's control endpoints as the operator, so the pause state is
-//! recorded on the roster and the stream and every role honors it: a paused role, or a
-//! stood-down crew, pulls no new work (its role card says so). `pause` / `resume` take
-//! an optional role: with one they gate that role, without one the whole crew.
-//! `standdown` halts every role at once and preserves the durable state, so the crew is
-//! recoverable. The broker address comes from `--broker`, else the `CREW_BROKER_*`
-//! environment.
+//! Each posts to the broker's control endpoints as the operator, so the pause
+//! state is recorded on the roster and the stream and every role honors it: a
+//! paused role, or a stood-down crew, pulls no new work (its role card says
+//! so). `pause` / `resume` take an optional role: with one they gate that role,
+//! without one the whole crew. `standdown` halts every role at once and
+//! preserves the durable state, so the crew is recoverable. The broker address
+//! comes from `--broker`, else the `CREW_BROKER_*` environment.
 
-use crew_substrate::broker::Config as BrokerConfig;
-use crew_substrate::core::BrokerEndpoint;
+use crew_substrate::{broker::Config as BrokerConfig, core::BrokerEndpoint};
 use eyre::{eyre, Result, WrapErr};
 use serde_json::json;
 
 /// Pauses one role, or the whole crew when `role` is `None`.
 ///
 /// # Errors
-/// Returns an error if the broker cannot be reached, or rejects the request (for
-/// example a named role that is not registered).
+/// Returns an error if the broker cannot be reached, or rejects the request
+/// (for example a named role that is not registered).
 pub fn pause(broker: Option<&str>, role: Option<&str>) -> Result<()> {
     post(broker, "/pause", role)?;
     println!("{}", outcome("Paused", role));
@@ -56,7 +55,8 @@ fn outcome(verb: &str, role: Option<&str>) -> String {
     }
 }
 
-/// Posts a control action to the broker, with an optional target role in the body.
+/// Posts a control action to the broker, with an optional target role in the
+/// body.
 fn post(broker: Option<&str>, path: &str, role: Option<&str>) -> Result<()> {
     let base = resolve_base(broker)?;
     let url = format!("{base}{path}");
@@ -80,10 +80,12 @@ fn post(broker: Option<&str>, path: &str, role: Option<&str>) -> Result<()> {
     }
 }
 
-/// The broker base URL: the `--broker` value if given, else the broker's environment.
+/// The broker base URL: the `--broker` value if given, else the broker's
+/// environment.
 ///
 /// # Errors
-/// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but invalid.
+/// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but
+/// invalid.
 fn resolve_base(flag: Option<&str>) -> Result<String> {
     if let Some(url) = flag {
         return Ok(normalize_base(url));
@@ -92,7 +94,8 @@ fn resolve_base(flag: Option<&str>) -> Result<String> {
     Ok(BrokerEndpoint::new(config.host.to_string(), config.port).base_url())
 }
 
-/// Normalizes a `--broker` value: default the scheme to `http`, drop a trailing slash.
+/// Normalizes a `--broker` value: default the scheme to `http`, drop a trailing
+/// slash.
 fn normalize_base(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     if url.starts_with("http://") || url.starts_with("https://") {
