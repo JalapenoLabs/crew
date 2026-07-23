@@ -158,7 +158,8 @@ The full design is in `docs/architecture.md`. In short:
   coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
-  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live,
+  runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
+  (auto-reconnecting like `tail -F`, resuming from `Last-Event-ID` without loss, issue #117),
   `crew notify` to push a native notification on each actionable moment (a question, a
   death, a stand-down) over that same stream, and `crew usage` to read the shared-subscription
   usage gauge (issue #56).
@@ -628,7 +629,8 @@ reassign against. See `docs/communication.md` (direct override) and `docs/roles.
 
 `crew notify` lets the General walk away and be pulled back only when it matters (issue
 #52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,
-sharing the `broker::tail_events` read half, so there is no separate signal path) and
+sharing the `broker::tail_events` read half, so there is no separate signal path, and it
+auto-reconnects on a dropped connection along with `crew watch`, issue #117) and
 pushes a native notification on each **actionable moment**: a question asked
 (`message`/`question`), a role dead (`lifecycle`/`died`), or the crew stood down
 (`lifecycle`/`stood_down`). Routine chatter (status, notes, orders, answers, artifacts,
