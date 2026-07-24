@@ -1,13 +1,16 @@
-//! The budget endpoint: report a role's token spend against the crew budget
-//! (issue #54).
+//! The budget endpoints: report a role's token spend, and read the snapshot
+//! (issues #54, #176).
 //!
 //! The supervisor holds the crew's token [`Budget`](crew_core::Budget) and
-//! records each turn's spend against it. This endpoint is the surface: `POST
-//! /budget` records a spend report as a `budget` event on the stream (from the
-//! role, to `all-units`), so a UI reads spend against budget off the stream and
-//! a cap hit is never silent. When the report carries a `breach`, it marks the
-//! moment the supervisor idle-stops the role or the crew rather than overrun
-//! (see `docs/observability.md`).
+//! records each turn's spend against it. `POST /budget` records a spend report
+//! as a `budget` event on the stream (from the role, to `all-units`), so a UI
+//! reads spend against budget off the stream and a cap hit is never silent.
+//! When the report carries a `breach`, it marks the moment the supervisor
+//! idle-stops the role or the crew rather than overrun (see
+//! `docs/observability.md`). `GET /budget` reads the snapshot the broker folds
+//! from those `budget` events, rebuilt from the durable log on a restart like
+//! the situation board, so the cockpit (issue #51) reads current spend against
+//! budget per role and crew-wide rather than replaying events (issue #176).
 
 use axum::{extract::State, routing::post, Json, Router};
 use crew_core::{
@@ -15,11 +18,15 @@ use crew_core::{
 };
 use serde::Deserialize;
 
-use crate::{error::ApiError, events::JsonBody, state::AppState};
+use crate::{
+    error::ApiError,
+    events::JsonBody,
+    state::{AppState, BudgetView},
+};
 
-/// The budget route: report a role's spend against the crew budget.
+/// The budget routes: report a role's spend, and read the snapshot.
 pub(crate) fn routes() -> Router<AppState> {
-    Router::new().route("/budget", post(report))
+    Router::new().route("/budget", post(report).get(read))
 }
 
 /// The `POST /budget` body: a role's token spend against the crew budget.
@@ -77,8 +84,20 @@ async fn report(
     Ok(Json(state.publish(event).event))
 }
 
+/// `GET /budget`: the spend-against-budget snapshot, per role and crew-wide
+/// (issue #176).
+///
+/// Reads the projection the broker folds from the `budget` events, rebuilt from
+/// the durable log on a restart, so the cockpit (issue #51) reads current spend
+/// against budget rather than replaying the stream.
+async fn read(State(state): State<AppState>) -> Json<BudgetView> {
+    Json(state.budget_snapshot())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -87,7 +106,7 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::{api, config::Config, state::AppState};
+    use crate::{api, config::Config, state::AppState, store::LogStore};
 
     async fn post(state: &AppState, body: Value) -> (StatusCode, Value) {
         let request = Request::builder()
@@ -103,6 +122,27 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    /// The `GET /budget` snapshot as JSON.
+    async fn get(state: &AppState) -> Value {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/budget")
+            .body(Body::empty())
+            .unwrap();
+        let response = api::build(state.clone()).oneshot(request).await.unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    /// The role's line in a `/budget` snapshot, if present.
+    fn role<'a>(view: &'a Value, name: &str) -> Option<&'a Value> {
+        view["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["role"] == name)
     }
 
     #[tokio::test]
@@ -165,5 +205,108 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_reports_latest_spend_per_role_and_crew_wide() {
+        let state = AppState::new(Config::default());
+        // Each report carries running totals, so the projection keeps the latest, not a
+        // sum: backend reports twice, and its second report supersedes the first.
+        post(
+            &state,
+            json!({ "role": "backend", "role_spent": 600, "role_cap": 2_000,
+                    "crew_spent": 600, "crew_budget": 5_000 }),
+        )
+        .await;
+        post(
+            &state,
+            json!({ "role": "frontend", "role_spent": 400,
+                    "crew_spent": 1_000, "crew_budget": 5_000 }),
+        )
+        .await;
+        post(
+            &state,
+            json!({ "role": "backend", "role_spent": 1_500, "role_cap": 2_000,
+                    "crew_spent": 1_900, "crew_budget": 5_000 }),
+        )
+        .await;
+
+        let view = get(&state).await;
+
+        let backend = role(&view, "backend").expect("backend reported spend");
+        assert_eq!(
+            backend["spent"], 1_500,
+            "the latest running total, not a sum"
+        );
+        assert_eq!(backend["cap"], 2_000);
+
+        let frontend = role(&view, "frontend").expect("frontend reported spend");
+        assert_eq!(frontend["spent"], 400);
+        assert!(
+            frontend.get("cap").is_none(),
+            "an uncapped role omits its cap: {frontend}"
+        );
+
+        // Crew-wide: the latest crew total and the configured budget.
+        assert_eq!(view["crew"]["spent"], 1_900);
+        assert_eq!(view["crew"]["budget"], 5_000);
+    }
+
+    #[tokio::test]
+    async fn an_empty_budget_snapshot_reports_no_spend() {
+        let state = AppState::new(Config::default());
+        let view = get(&state).await;
+        assert!(
+            view["roles"].as_array().unwrap().is_empty(),
+            "no roles before any report: {view}"
+        );
+        assert_eq!(view["crew"]["spent"], 0);
+        assert!(
+            view["crew"].get("budget").is_none(),
+            "no crew budget is known before any report: {}",
+            view["crew"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_survives_a_restart() {
+        let dir = TempDir::new();
+
+        // First run: report spend against a durable store, then drop the broker.
+        let store = Arc::new(LogStore::open(&dir.0).unwrap());
+        let state = AppState::with_storage(Config::default(), store);
+        post(
+            &state,
+            json!({ "role": "backend", "role_spent": 1_200, "role_cap": 2_000,
+                    "crew_spent": 1_200, "crew_budget": 5_000 }),
+        )
+        .await;
+        drop(state);
+
+        // Second run: a fresh broker over the same dir rebuilds the projection from the
+        // log, like the situation board (issue #49), so the cockpit reads a snapshot.
+        let reopened = Arc::new(LogStore::open(&dir.0).unwrap());
+        let restarted = AppState::with_storage(Config::default(), reopened);
+        let view = get(&restarted).await;
+        let backend = role(&view, "backend").expect("the role's spend survived the restart");
+        assert_eq!(backend["spent"], 1_200);
+        assert_eq!(view["crew"]["spent"], 1_200);
+        assert_eq!(view["crew"]["budget"], 5_000);
+    }
+
+    /// A unique temp dir for the durability test, removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!("crew-budget-test-{}-{n}", std::process::id())))
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
