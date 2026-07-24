@@ -1,13 +1,14 @@
-//! The message endpoints: posting to a channel, reading the log, and
-//! subscribing.
+//! The message endpoints: posting to a channel and subscribing.
 //!
 //! A `POST /channels/{channel}/messages` stamps the event server-side, masks
 //! any configured secret out of it, persists it, and fans it to every
-//! subscriber. A `GET /events` reads the stored log, and `GET /stream`
-//! subscribes to the live aggregate feed over Server-Sent Events, optionally
-//! narrowed by the shared [`FilterQuery`](crate::filter::FilterQuery) so the
-//! live view matches the filtered `GET /history` (issue #31). The per-role,
-//! self-filtered stream is `GET /inbox`.
+//! subscriber. `GET /stream` subscribes to the live aggregate feed over
+//! Server-Sent Events, optionally narrowed by the shared
+//! [`FilterQuery`](crate::filter::FilterQuery) so the live view matches the
+//! filtered `GET /history` (issue #31). The per-role, self-filtered stream is
+//! `GET /inbox`. Reading the stored log is `GET /history` alone: it filters,
+//! orders, and paginates with a ceiling, so there is one bounded read path
+//! rather than an unpaginated full-log dump (issue #209).
 
 use std::convert::Infallible;
 
@@ -22,19 +23,21 @@ use axum::{
 use crew_core::{
     ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender, TaskId,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use tokio_stream::Stream;
 use tracing::{event, Level};
 
 use crate::{error::ApiError, filter::FilterQuery, state::AppState};
 
-/// The message routes: post to a channel, read the log, and subscribe to the
-/// feed.
+/// The message routes: post to a channel and subscribe to the feed.
+///
+/// Reading the stored log is `GET /history` (see [`history`](crate::history)):
+/// it filters, orders, and paginates with a ceiling, so the broker has one
+/// bounded read path and no unpaginated full-log dump (issue #209).
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/channels/{channel}/messages", post(post_message))
-        .route("/events", get(list_events))
         .route("/stream", get(stream))
 }
 
@@ -209,19 +212,6 @@ fn ensure_order_authorized(request: &PostMessage, commander: &RoleId) -> Result<
     Ok(())
 }
 
-/// The body of `GET /events`: the stored event log, oldest first.
-#[derive(Debug, Serialize)]
-struct EventLog {
-    events: Vec<Event>,
-}
-
-/// `GET /events`: read the whole event log (oldest first), already scrubbed.
-async fn list_events(State(state): State<AppState>) -> Json<EventLog> {
-    Json(EventLog {
-        events: state.storage.events(),
-    })
-}
-
 /// `GET /stream`: subscribe to the live event feed as Server-Sent Events.
 ///
 /// This is the aggregate activity log's live view (issue #31): the whole unit's
@@ -315,10 +305,11 @@ mod tests {
         post_raw(state, channel, serde_json::to_vec(&message).unwrap()).await
     }
 
-    /// Reads the stored event log back through `GET /events`.
+    /// Reads the stored event log back through `GET /history` (one page at the
+    /// max limit, which holds every event these small test logs produce).
     async fn stored_events(state: &AppState) -> Vec<Event> {
         let request = Request::builder()
-            .uri("/events")
+            .uri("/history?limit=1000")
             .body(Body::empty())
             .unwrap();
         let response = api::build(state.clone()).oneshot(request).await.unwrap();

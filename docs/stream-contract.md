@@ -352,8 +352,10 @@ stable cursor:
   with no prior cursor) and for a large gap you would rather page; use the stream's own
   `Last-Event-ID` resume for an ordinary reconnect.
 
-`GET /events` returns the entire stored log as `{ "events": [ … ] }` in one response,
-for a simple full read of a short-lived unit.
+`GET /history` is the one read path for the stored log: it filters, orders, and
+paginates with a ceiling (`limit` default 100, max 1000), so a read is always bounded
+even as the log grows. An unpaginated full-log dump is intentionally not offered (issue
+#209): page with `after=<cursor>`, or use `summary=true` (below) for bounded catch-up.
 
 ### Bounded catch-up: `GET /history?summary=true`
 

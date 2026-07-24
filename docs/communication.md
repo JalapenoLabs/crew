@@ -78,7 +78,8 @@ removed at delivery, not in the routing itself.
 Messages are typed so a front-end can render them and the broker can route them.
 This schema is modeled in `crew-core` and wired through the broker's message
 endpoints (`MessageKind`, issues #6, #8 and #9): a `POST /channels/{channel}/messages`
-posts to the channel named in the path, and `GET /events` reads the log.
+posts to the channel named in the path, and `GET /history` reads the log (filtered,
+ordered, and paginated with a ceiling, issue #209).
 
 - `id`, `from` (role or `general`), `channel`, `ts`. The broker owns `id`, `ts`,
   and the path `channel`: it stamps the id and timestamp on receipt and rejects a
