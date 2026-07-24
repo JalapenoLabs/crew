@@ -326,7 +326,10 @@ parsed from stream-json. See `observability.md`.
 
 - **Language:** Rust. Follows `~/.claude/docs/rust.md`.
 - **Runtime/web:** tokio + axum, SSE for delivery.
-- **Errors:** eyre at the application level (`M-APP-ERROR`).
+- **Errors:** eyre at the application level (`M-APP-ERROR`); the substrate library
+  crates' public entry points return canonical per-crate error structs
+  (`crew_broker::ServeError`, `crew_client::Error`, `crew_supervisor::Error`) with
+  `is_*()` accessors, not eyre (`M-ERRORS-CANONICAL-STRUCTS`, issue #193).
 - **Allocator:** mimalloc as the global allocator (`M-MIMALLOC-APPS`).
 - **Toolchain:** pinned via `rust-toolchain.toml`; always `cargo +<pinned>`.
 - **Lints:** the clippy set from `~/.claude/docs/rust.md`; structured logging

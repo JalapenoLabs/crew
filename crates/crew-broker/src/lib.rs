@@ -41,6 +41,7 @@ mod roster;
 mod router;
 mod secrets;
 mod serve;
+mod serve_error;
 mod sse;
 mod stall;
 mod state;
@@ -56,6 +57,7 @@ pub use error::ApiError;
 pub use router::ChannelRouter;
 pub use secrets::{mask, Scrubber};
 pub use serve::{run, run_until, serve};
+pub use serve_error::ServeError;
 pub use state::{AppState, Sequenced};
 pub use store::{
     EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, Liveness, LogStore,

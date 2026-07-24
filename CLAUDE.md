@@ -911,6 +911,16 @@ already-running `crewd` or starts its own.
   `<component>.<operation>.<state>` and `{{property}}` message templates
   (M-LOG-STRUCTURED). Binaries call `crew_telemetry::init()` once at startup, and
   any secret in a field goes through `crew_telemetry::redact::secret` first.
+- **Library errors are canonical structs** (issue #193, M-ERRORS-CANONICAL-STRUCTS):
+  the substrate's public entry points return per-crate error structs, not eyre, so
+  they read as a publishable library. `crew_broker::ServeError` (from `run` /
+  `run_until` / `serve`, distinct from the per-request `ApiError`), `crew_client::Error`
+  (every `Broker` method), and `crew_supervisor::Error` (`provision`,
+  `Supervisor::launch`, and the `RosterClient` methods) each wrap a private
+  `ErrorKind` behind `is_*()` accessors and a captured `Backtrace`, preserve the human
+  message in `Display`, and implement `std::error::Error`. Internally the crates still
+  compose failures with eyre; the public boundary wraps them. The binaries (apps) still
+  use eyre and absorb these via `?`, since a canonical error implements `Error`.
 - **Lints** (compiler + clippy, with selected `restriction` lints) live in
   `[workspace.lints]` and every crate inherits them. Override a lint locally with
   `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).

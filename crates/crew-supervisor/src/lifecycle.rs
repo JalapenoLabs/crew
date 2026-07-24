@@ -1177,8 +1177,10 @@ impl AgentLifecycle {
         }
     }
 
-    /// Logs a best-effort roster call that failed; a stale entry is not fatal.
-    fn warn_roster(&self, action: &str, err: &eyre::Report) {
+    /// Logs a best-effort roster (or revive) action that failed; a stale entry
+    /// is not fatal. Takes any [`Display`](std::fmt::Display) so it logs both a
+    /// canonical roster [`Error`](crate::Error) and an `eyre` spawn failure.
+    fn warn_roster(&self, action: &str, err: &dyn std::fmt::Display) {
         event!(
             name: "supervisor.agent.roster.failed",
             Level::WARN,

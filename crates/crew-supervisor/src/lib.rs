@@ -32,6 +32,7 @@
 //!   [`Stall`] so silence never reads as progress.
 
 mod activity;
+mod error;
 mod integrate;
 mod lifecycle;
 mod mcp;
@@ -47,7 +48,8 @@ use std::{
 
 pub use crew_core::StallKind;
 use crew_core::{RoleCard, Runtime, ROLE_CARD_ENV};
-use eyre::{Result, WrapErr};
+pub use error::Error;
+use eyre::WrapErr;
 pub use integrate::{
     CheckOutcome, Conflict, IntegrationReport, Integrator, Standing, DEFAULT_INTEGRATION_BRANCH,
 };
@@ -109,7 +111,13 @@ pub struct Launch {
 /// assert_eq!(launch.env[0].0, "CREW_ROLE_CARD");
 /// # Ok::<(), eyre::Report>(())
 /// ```
-pub fn provision(card: &RoleCard, agent_dir: &Path) -> Result<Launch> {
+pub fn provision(card: &RoleCard, agent_dir: &Path) -> Result<Launch, Error> {
+    provision_card(card, agent_dir).map_err(Error::provision)
+}
+
+/// Provisions the card, composing failures with `eyre`; [`provision`] wraps the
+/// result into the canonical [`Error`] at the boundary (issue #193).
+fn provision_card(card: &RoleCard, agent_dir: &Path) -> eyre::Result<Launch> {
     let toml = card
         .to_toml()
         .wrap_err("could not serialize the role card")?;

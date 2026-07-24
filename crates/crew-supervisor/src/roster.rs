@@ -11,9 +11,13 @@
 use std::{collections::HashSet, time::Duration};
 
 use crew_core::{Activity, BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
-use eyre::{eyre, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+use crate::error::{roster_error, Error};
+
+/// The roster client's result: a canonical [`Error`] on failure (issue #193).
+type Result<T> = std::result::Result<T, Error>;
 
 /// A role's liveness, as the broker roster labels it.
 ///
@@ -109,7 +113,7 @@ impl RosterClient {
             .set("content-type", "application/json")
             .send_string(&body.to_string())
             .map(|_response| ())
-            .map_err(|err| eyre!("could not register role `{role}` with the broker: {err}"))
+            .map_err(|err| roster_error!("could not register role `{role}` with the broker: {err}"))
     }
 
     /// Marks `role` with a new liveness, keeping its owned paths (`POST
@@ -131,7 +135,9 @@ impl RosterClient {
             .set("content-type", "application/json")
             .send_string(&body.to_string())
             .map(|_response| ())
-            .map_err(|err| eyre!("could not mark role `{role}` as {}: {err}", liveness.wire()))
+            .map_err(|err| {
+                roster_error!("could not mark role `{role}` as {}: {err}", liveness.wire())
+            })
     }
 
     /// Reports a role's token spend against the crew budget (`POST /budget`,
@@ -147,13 +153,15 @@ impl RosterClient {
     pub fn report_budget(&self, event: &BudgetEvent) -> Result<()> {
         let url = format!("{}/budget", self.base);
         let body = serde_json::to_string(event)
-            .map_err(|err| eyre!("could not encode the budget report: {err}"))?;
+            .map_err(|err| roster_error!("could not encode the budget report: {err}"))?;
         self.agent
             .post(&url)
             .set("content-type", "application/json")
             .send_string(&body)
             .map(|_response| ())
-            .map_err(|err| eyre!("could not report budget for role `{}`: {err}", event.role))
+            .map_err(|err| {
+                roster_error!("could not report budget for role `{}`: {err}", event.role)
+            })
     }
 
     /// Reports a role's per-turn token-and-cost usage (`POST /telemetry`, issue
@@ -168,14 +176,14 @@ impl RosterClient {
     pub fn report_telemetry(&self, event: &TelemetryEvent) -> Result<()> {
         let url = format!("{}/telemetry", self.base);
         let body = serde_json::to_string(event)
-            .map_err(|err| eyre!("could not encode the telemetry report: {err}"))?;
+            .map_err(|err| roster_error!("could not encode the telemetry report: {err}"))?;
         self.agent
             .post(&url)
             .set("content-type", "application/json")
             .send_string(&body)
             .map(|_response| ())
             .map_err(|err| {
-                eyre!(
+                roster_error!(
                     "could not report telemetry for role `{}`: {err}",
                     event.role
                 )
@@ -204,7 +212,7 @@ impl RosterClient {
             .set("content-type", "application/json")
             .send_string(&body.to_string())
             .map(|_response| ())
-            .map_err(|err| eyre!("could not report activity for role `{role}`: {err}"))
+            .map_err(|err| roster_error!("could not report activity for role `{role}`: {err}"))
     }
 
     /// Reports a shared-subscription usage reading (`POST /usage`, issue #56).
@@ -225,7 +233,7 @@ impl RosterClient {
             .set("content-type", "application/json")
             .send_string(&body.to_string())
             .map(|_response| ())
-            .map_err(|err| eyre!("could not report subscription usage: {err}"))
+            .map_err(|err| roster_error!("could not report subscription usage: {err}"))
     }
 
     /// Surfaces a coordination stall on the stream (`POST /stall`, issue #120).
@@ -240,13 +248,15 @@ impl RosterClient {
     pub fn report_stall(&self, event: &StallEvent) -> Result<()> {
         let url = format!("{}/stall", self.base);
         let body = serde_json::to_string(event)
-            .map_err(|err| eyre!("could not encode the stall report: {err}"))?;
+            .map_err(|err| roster_error!("could not encode the stall report: {err}"))?;
         self.agent
             .post(&url)
             .set("content-type", "application/json")
             .send_string(&body)
             .map(|_response| ())
-            .map_err(|err| eyre!("could not report the {} stall: {err}", event.kind.label()))
+            .map_err(|err| {
+                roster_error!("could not report the {} stall: {err}", event.kind.label())
+            })
     }
 
     /// Adds the task id to a roster request body when a task context is set.
@@ -270,7 +280,7 @@ impl RosterClient {
             Ok(_response) => Ok(()),
             // Already gone: deregistering is idempotent, so this is not a failure.
             Err(ureq::Error::Status(404, _)) => Ok(()),
-            Err(err) => Err(eyre!(
+            Err(err) => Err(roster_error!(
                 "could not deregister role `{role}` from the broker: {err}"
             )),
         }
@@ -287,11 +297,11 @@ impl RosterClient {
             .agent
             .get(&url)
             .call()
-            .map_err(|err| eyre!("could not read the broker roster: {err}"))?
+            .map_err(|err| roster_error!("could not read the broker roster: {err}"))?
             .into_string()
-            .map_err(|err| eyre!("could not read the roster response: {err}"))?;
+            .map_err(|err| roster_error!("could not read the roster response: {err}"))?;
         let view: RosterView = serde_json::from_str(&text)
-            .map_err(|err| eyre!("could not parse the roster response: {err}"))?;
+            .map_err(|err| roster_error!("could not parse the roster response: {err}"))?;
         Ok(view.roles.into_iter().map(|entry| entry.role).collect())
     }
 
@@ -314,11 +324,11 @@ impl RosterClient {
             .agent
             .get(&url)
             .call()
-            .map_err(|err| eyre!("could not read the broker roster: {err}"))?
+            .map_err(|err| roster_error!("could not read the broker roster: {err}"))?
             .into_string()
-            .map_err(|err| eyre!("could not read the roster response: {err}"))?;
+            .map_err(|err| roster_error!("could not read the roster response: {err}"))?;
         let view: RosterView = serde_json::from_str(&text)
-            .map_err(|err| eyre!("could not parse the roster response: {err}"))?;
+            .map_err(|err| roster_error!("could not parse the roster response: {err}"))?;
         Ok(PauseSnapshot::from_view(view))
     }
 
@@ -342,11 +352,11 @@ impl RosterClient {
             .get(&url)
             .query("role", role.as_str())
             .call()
-            .map_err(|err| eyre!("could not fetch the briefing for role `{role}`: {err}"))?
+            .map_err(|err| roster_error!("could not fetch the briefing for role `{role}`: {err}"))?
             .into_string()
-            .map_err(|err| eyre!("could not read the briefing response: {err}"))?;
+            .map_err(|err| roster_error!("could not read the briefing response: {err}"))?;
         let packet: BriefingResponse = serde_json::from_str(&text)
-            .map_err(|err| eyre!("could not parse the briefing response: {err}"))?;
+            .map_err(|err| roster_error!("could not parse the briefing response: {err}"))?;
         Ok(packet.text)
     }
 
@@ -382,11 +392,11 @@ impl RosterClient {
             }
             let text = request
                 .call()
-                .map_err(|err| eyre!("could not read the broker history: {err}"))?
+                .map_err(|err| roster_error!("could not read the broker history: {err}"))?
                 .into_string()
-                .map_err(|err| eyre!("could not read the history response: {err}"))?;
+                .map_err(|err| roster_error!("could not read the history response: {err}"))?;
             let page: HistoryPage = serde_json::from_str(&text)
-                .map_err(|err| eyre!("could not parse the history response: {err}"))?;
+                .map_err(|err| roster_error!("could not parse the history response: {err}"))?;
             events.extend(page.events);
             match page.next_cursor {
                 Some(cursor) => after = Some(cursor),
@@ -487,13 +497,29 @@ impl PauseSnapshot {
 mod tests {
     use crew_core::RoleId;
 
-    use super::{PauseSnapshot, RosterView};
+    use super::{PauseSnapshot, RosterClient, RosterView};
 
     /// Derives a pause snapshot from a `/roster`-shaped JSON body.
     fn snapshot(json: &str) -> PauseSnapshot {
         PauseSnapshot::from_view(
             serde_json::from_str::<RosterView>(json).expect("the roster parses"),
         )
+    }
+
+    #[test]
+    fn a_dead_broker_registration_is_a_typed_roster_error() {
+        // A register against a port with no broker fails as a canonical roster
+        // error rather than a bare eyre report (issue #193).
+        let client = RosterClient::new("http://127.0.0.1:1");
+        let error = client
+            .register(&RoleId::new("backend"), &["api/".to_owned()])
+            .expect_err("no broker is listening on port 1");
+        assert!(error.is_roster(), "a failed roster call is a roster error");
+        assert!(!error.is_launch(), "it is not a launch error");
+        assert!(
+            error.to_string().contains("could not register"),
+            "the message names the failed action: {error}",
+        );
     }
 
     #[test]
