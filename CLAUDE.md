@@ -79,7 +79,9 @@ not a reimplementation of the agent.
   history the way it renders `ci` / `lifecycle` / `screenshot` events today, and
   the live count can drive a Runewood visualization. See `docs/observability.md`.
 - **Command and control (the general's console).** The General can interject and
-  redirect a role mid-task (`crew redirect` / `crew belay`), gate risky actions
+  redirect a role mid-task (`crew redirect` / `crew belay`; the commander steers
+  in-band too, through the `crew_redirect` / `crew_belay` MCP tools, issue #190),
+  gate risky actions
   (push, merge, delete, spend, external post) behind rules-of-engagement
   approval, pause and resume per role and crew-wide plus an emergency stand-down
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
@@ -348,11 +350,15 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and dispatches each tool to a `crew_client::Broker`, the shared
 thin synchronous client (`ureq`) over the broker's HTTP API (issue #129); it never
-touches the store. It exposes eighteen
+touches the store. It exposes twenty
 tools with self-documenting schemas: `crew_send` (post a note as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
-fan-out handle, issue #27), the typed-message pair `crew_ask` / `crew_answer` (post a
+fan-out handle, issue #27), the steering pair `crew_redirect` / `crew_belay` (steer a
+specialist mid-task as the role, a typed `redirect` that nudges without stopping or a
+`belay` that halts and re-tasks, so the commander interjects in-band through its own
+tools, not only the General over the CLI; the specialist honors it at its next tool
+boundary, issue #190), the typed-message pair `crew_ask` / `crew_answer` (post a
 `question` or an `answer` rather than a plain note, so an unanswered question surfaces a
 coordination stall instead of stalling silently; `crew_answer` names the question by the
 `in_reply_to` id the inbox shows, issue #123), the typed-message pair `crew_status` /

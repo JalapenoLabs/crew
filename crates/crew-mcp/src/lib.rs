@@ -6,6 +6,11 @@
 //! and calls:
 //!
 //! - `crew_send` (send a note to a channel or role),
+//! - `crew_order` (assign a scoped task to one specialist; the commander's
+//!   fan-out handle),
+//! - `crew_redirect` / `crew_belay` (steer a specialist mid-task, so the
+//!   commander can nudge or halt a working role in-band, not only the General
+//!   over the CLI; issue #190),
 //! - `crew_ask` / `crew_answer` (post a typed question or answer, so an
 //!   unanswered question surfaces a coordination stall; issue #123),
 //! - `crew_status` / `crew_artifact` (post a typed progress `status` or a

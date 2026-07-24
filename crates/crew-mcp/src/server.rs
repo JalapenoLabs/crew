@@ -171,6 +171,20 @@ impl Server {
                     str_arg(arguments, "body").unwrap_or_default(),
                 )
             }
+            "crew_redirect" => {
+                let to = str_arg(arguments, "to")
+                    .ok_or("crew_redirect requires a `to` role to steer")?;
+                let body = str_arg(arguments, "body")
+                    .ok_or("crew_redirect requires a `body` (the new direction)")?;
+                self.broker.redirect(to, body)
+            }
+            "crew_belay" => {
+                let to =
+                    str_arg(arguments, "to").ok_or("crew_belay requires a `to` role to halt")?;
+                let body = str_arg(arguments, "body")
+                    .ok_or("crew_belay requires a `body` (the new order)")?;
+                self.broker.belay(to, body)
+            }
             "crew_ask" => {
                 let body =
                     str_arg(arguments, "body").ok_or("crew_ask requires a non-empty `body`")?;
@@ -395,6 +409,41 @@ fn messaging_tools() -> Vec<Value> {
                     "body": { "type": "string", "description": "Optional freeform detail (markdown)." }
                 },
                 "required": ["to", "title"]
+            }
+        }),
+        json!({
+            "name": "crew_redirect",
+            "description": "Steer a specialist mid-task without stopping it, as your role: a \
+                typed `redirect` the specialist honors at its next tool boundary, keeping its \
+                current task and adjusting course. Use this, not crew_send, to nudge a role \
+                already working: it is a first-class directive a front-end flags and the \
+                specialist acts on at once. It direct-messages one role, like crew_order; `to` \
+                is the specialist and `body` is the new direction. Use crew_belay instead to \
+                halt and re-task it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "The specialist role to steer (its @role channel)." },
+                    "body": { "type": "string", "description": "The new direction to fold into the current task (markdown)." }
+                },
+                "required": ["to", "body"]
+            }
+        }),
+        json!({
+            "name": "crew_belay",
+            "description": "Halt a specialist's current work and re-task it, as your role: a \
+                typed `belay` the specialist honors at its next tool boundary, stopping what it \
+                is doing and taking `body` as its new order. Use this, not crew_send, when a \
+                role must abandon its current task, not just adjust it. It direct-messages one \
+                role, like crew_order; `to` is the specialist and `body` is the new order. Use \
+                crew_redirect instead to steer without stopping.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "The specialist role to halt and re-task (its @role channel)." },
+                    "body": { "type": "string", "description": "The new order that replaces the current task (markdown)." }
+                },
+                "required": ["to", "body"]
             }
         }),
         json!({
@@ -1024,6 +1073,8 @@ mod tests {
             [
                 "crew_send",
                 "crew_order",
+                "crew_redirect",
+                "crew_belay",
                 "crew_ask",
                 "crew_answer",
                 "crew_status",
@@ -1055,6 +1106,11 @@ mod tests {
         assert_eq!(send["inputSchema"]["required"], json!(["body"]));
         let order = tools.iter().find(|t| t["name"] == "crew_order").unwrap();
         assert_eq!(order["inputSchema"]["required"], json!(["to", "title"]));
+        // crew_redirect and crew_belay each steer one specialist: a role and a body.
+        let redirect = tools.iter().find(|t| t["name"] == "crew_redirect").unwrap();
+        assert_eq!(redirect["inputSchema"]["required"], json!(["to", "body"]));
+        let belay = tools.iter().find(|t| t["name"] == "crew_belay").unwrap();
+        assert_eq!(belay["inputSchema"]["required"], json!(["to", "body"]));
     }
 
     #[test]
@@ -1105,6 +1161,39 @@ mod tests {
             &mut server(),
             &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
                     "params": { "name": "crew_order", "arguments": { "title": "do it" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("to"));
+    }
+
+    #[test]
+    fn crew_redirect_without_a_body_is_a_tool_error_not_a_broker_call() {
+        // A missing `body` fails before the broker is touched, so the bogus base is
+        // fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": { "name": "crew_redirect", "arguments": { "to": "backend" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("body"));
+    }
+
+    #[test]
+    fn crew_belay_without_a_target_is_a_tool_error_not_a_broker_call() {
+        // A missing `to` fails before the broker is touched, so the bogus base is fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": { "name": "crew_belay", "arguments": { "body": "stop that" } } }),
         )
         .unwrap();
         assert_eq!(response["result"]["isError"], true);
