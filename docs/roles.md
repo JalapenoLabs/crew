@@ -91,6 +91,16 @@ directory boundary, matched on whole path segments so `api/` never matches `apiv
 A genuine cross-lane need is a message to the commander or a pair channel, not a
 boundary crossing.
 
+Lanes are exclusive: two roles never own overlapping paths (issue #205). Two lanes
+overlap when one nests under (or equals) the other on whole segments, so `api/`
+collides with `api/routes/` and `api/config.toml` but not `apiv2/`. `lanes_overlap`
+decides this, and the same rule is checked in two places: `CrewConfig` rejects a
+config whose declared lanes collide at bring-up, and `POST /roster` refuses a
+register whose `owned_paths` overlap a lane a different live role (`working` or
+`idle`) already owns, with `409 CONFLICT` naming both roles and paths. A role never
+collides with itself, and a stopped or dead role's lane may be reclaimed, so a
+restart or a hand-off is never blocked by the leaving role.
+
 ### The done-gate
 
 Done means verified, not asserted (issue #47). A role does not report its own task done;

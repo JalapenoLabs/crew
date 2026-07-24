@@ -27,6 +27,7 @@ use crate::{
     budget::Budget,
     card::{BrokerEndpoint, RoleCard},
     id::RoleId,
+    lane::lanes_overlap,
     model::{default_tier_for, ModelTier, ModelTiers},
 };
 
@@ -359,15 +360,11 @@ impl CrewConfig {
     /// do not.
     fn check_ownership_overlaps(&self) -> Result<(), ConfigError> {
         // Each owned lane, with the role and the path as written for the message.
-        let mut lanes: Vec<(&RoleId, &str, String)> = Vec::new();
+        let mut lanes: Vec<(&RoleId, &str)> = Vec::new();
         for spec in &self.roles {
             for path in &spec.owned_paths {
-                let boundary = directory_boundary(path);
-                if boundary.is_empty() {
-                    continue;
-                }
-                for (other_role, other_path, other_boundary) in &lanes {
-                    if *other_role != &spec.role && boundaries_overlap(&boundary, other_boundary) {
+                for (other_role, other_path) in &lanes {
+                    if *other_role != &spec.role && lanes_overlap(path, other_path) {
                         return Err(ConfigError::invalid(format!(
                             "roles `{}` and `{other_role}` own overlapping paths (`{}` and `{other_path}`)",
                             spec.role,
@@ -375,7 +372,7 @@ impl CrewConfig {
                         )));
                     }
                 }
-                lanes.push((&spec.role, path.trim(), boundary));
+                lanes.push((&spec.role, path.trim()));
             }
         }
         Ok(())
@@ -409,28 +406,6 @@ fn default_roles() -> Vec<RoleSpec> {
         role("frontend", &["frontend/"]),
         role("qa", &["tests/"]),
     ]
-}
-
-/// Normalizes a path to a directory boundary: trimmed, with exactly one
-/// trailing slash.
-///
-/// So `api`, `api/`, and `api//` all become `api/`, and a blank path becomes
-/// empty.
-fn directory_boundary(path: &str) -> String {
-    let trimmed = path.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    format!("{trimmed}/")
-}
-
-/// Whether two directory boundaries overlap: equal, or one nested under the
-/// other.
-///
-/// Both end with `/`, so a prefix test is exactly the nesting test: `api/` is a
-/// prefix of `api/routes/`, but not of `apiv2/`.
-fn boundaries_overlap(a: &str, b: &str) -> bool {
-    a.starts_with(b) || b.starts_with(a)
 }
 
 /// Parses a human duration: a plain number of seconds, or a number with an

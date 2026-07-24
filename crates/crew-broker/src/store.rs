@@ -110,6 +110,18 @@ pub enum Liveness {
     Dead,
 }
 
+impl Liveness {
+    /// Whether the role is present and up or resumable: `working` or `idle`.
+    ///
+    /// The same "live" a `stopped` or `dead` role is not, so the live count
+    /// (issue #32) and lane-ownership enforcement (issue #205) agree on which
+    /// roles hold the field.
+    #[must_use]
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Working | Self::Idle)
+    }
+}
+
 /// A role's roster entry: the paths it owns and its current liveness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleStatus {
