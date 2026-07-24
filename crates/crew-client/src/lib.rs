@@ -468,6 +468,39 @@ impl Broker {
     /// Returns a message if the broker's inbox stream cannot be opened, or the
     /// backlog read fails.
     pub fn subscribe(&mut self) -> Result<(), String> {
+        self.subscribe_with(Arc::new(|| {}))
+    }
+
+    /// Subscribes to the live inbox, calling `on_message` for each new buffered
+    /// message.
+    ///
+    /// Behaves like [`subscribe`](Broker::subscribe), and additionally invokes
+    /// `on_message` each time the background stream buffers a message addressed
+    /// to this role, so a caller can nudge its agent to read without polling
+    /// (issue #174). The backlog seeded at subscribe time does not fire it; only
+    /// messages the background thread buffers live do.
+    ///
+    /// The callback runs on the background inbox thread, after the message is in
+    /// the buffer a later [`inbox`](Broker::inbox) drains, so keep it quick and
+    /// non-blocking.
+    ///
+    /// # Errors
+    /// Returns a message if the broker's inbox stream cannot be opened, or the
+    /// backlog read fails.
+    pub fn subscribe_notifying(
+        &mut self,
+        on_message: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        self.subscribe_with(Arc::new(on_message))
+    }
+
+    /// Opens the live inbox stream, seeding the backlog and spawning the reader.
+    ///
+    /// The shared work behind [`subscribe`](Broker::subscribe) and
+    /// [`subscribe_notifying`](Broker::subscribe_notifying); `on_message` fires
+    /// for each message the background thread buffers live (a no-op for the
+    /// plain subscribe).
+    fn subscribe_with(&mut self, on_message: Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
         // Open the stream first, so its live-tail cursor is fixed before the backlog
         // read. Any event that lands in the overlap is deduplicated by message
         // id below.
@@ -496,15 +529,12 @@ impl Broker {
         let base = self.base.clone();
         let role = self.role.clone();
         thread::spawn(move || {
-            run_inbox_stream(
-                reader,
-                &agent,
-                &base,
-                &role,
-                &thread_buffer,
-                seen,
-                &thread_stop,
-            );
+            let sink = InboxSink {
+                role: &role,
+                buffer: &thread_buffer,
+                on_message: on_message.as_ref(),
+            };
+            run_inbox_stream(reader, &agent, &base, &sink, seen, &thread_stop);
         });
         self.inbox_stream = Some(InboxStream { buffer, stop });
         Ok(())
@@ -966,6 +996,22 @@ impl Drop for InboxStream {
     }
 }
 
+/// Where the inbox stream delivers each addressed message.
+///
+/// Groups the destination the background reader threads through every
+/// connection: the role it filters for, the buffer a later
+/// [`inbox`](Broker::inbox) drains, and the nudge fired per newly buffered
+/// message (issue #174).
+struct InboxSink<'a> {
+    /// The role whose addressed messages are kept; the rest are dropped.
+    role: &'a RoleId,
+    /// The buffer new messages are appended to, oldest first.
+    buffer: &'a Mutex<VecDeque<Event>>,
+    /// Fired once per message buffered live, nudging the agent to read without
+    /// polling (issue #174).
+    on_message: &'a (dyn Fn() + Send + Sync),
+}
+
 /// Runs the background inbox stream: buffer events, reconnecting with a
 /// `Last-Event-ID` cursor when the connection drops, until `stop` is set (issue
 /// #76).
@@ -973,15 +1019,14 @@ fn run_inbox_stream(
     reader: Box<dyn Read + Send + Sync>,
     agent: &ureq::Agent,
     base: &str,
-    role: &RoleId,
-    buffer: &Mutex<VecDeque<Event>>,
+    sink: &InboxSink<'_>,
     mut seen: HashSet<MessageId>,
     stop: &AtomicBool,
 ) {
     let mut reader = reader;
     let mut last_seq = None;
     loop {
-        last_seq = drain_connection(reader, role, buffer, &mut seen, last_seq, stop);
+        last_seq = drain_connection(reader, sink, &mut seen, last_seq, stop);
         if stop.load(Ordering::Relaxed) {
             return;
         }
@@ -993,7 +1038,7 @@ fn run_inbox_stream(
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            if let Ok(next) = open_inbox(agent, base, role, last_seq) {
+            if let Ok(next) = open_inbox(agent, base, sink.role, last_seq) {
                 break next;
             }
         };
@@ -1005,8 +1050,7 @@ fn run_inbox_stream(
 /// it.
 fn drain_connection(
     reader: Box<dyn Read + Send + Sync>,
-    role: &RoleId,
-    buffer: &Mutex<VecDeque<Event>>,
+    sink: &InboxSink<'_>,
     seen: &mut HashSet<MessageId>,
     mut last_seq: Option<u64>,
     stop: &AtomicBool,
@@ -1029,7 +1073,7 @@ fn drain_connection(
             let Ok(event) = serde_json::from_str::<Event>(data.trim_start()) else {
                 continue;
             };
-            let Some(id) = addressed_message_id(&event, role) else {
+            let Some(id) = addressed_message_id(&event, sink.role) else {
                 continue; // the inbox also carries non-message events; keep
                           // only messages
             };
@@ -1037,10 +1081,14 @@ fn drain_connection(
             if seen.contains(&id) {
                 continue;
             }
-            buffer
+            sink.buffer
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push_back(event);
+            // A new message is buffered: nudge the caller (issue #174). Fired after the
+            // buffer lock is released, so the callback never blocks the stream reader
+            // and cannot deadlock against a drain.
+            (sink.on_message)();
         }
     }
     last_seq
