@@ -188,10 +188,11 @@ pub fn order(
 /// Mirrors `crew_inbox`. The MCP server holds its inbox cursor and task context
 /// in memory; the shim is a process per call, so it persists both per role
 /// under the broker state dir (issues #130, #132): it seeds the client from the
-/// saved position, reads only what arrived since, writes the advanced position
+/// last message it read, reads only what arrived since, writes the new cursor
 /// back, and saves the task any new order assigned so a later `crew send`
-/// stamps it. A first call, or a role with no saved cursor, shows the whole
-/// inbox.
+/// stamps it. Keying the cursor on the message id, not a count, survives a
+/// broker log reset (issue #160). A first call, or a role with no saved cursor,
+/// shows the whole inbox.
 ///
 /// # Errors
 /// Returns an error if no role context is set, the broker configuration cannot
@@ -204,12 +205,16 @@ pub fn inbox() -> Result<()> {
     let cursor = InboxCursor::new(&state_dir, &agent.role);
     let task_context = TaskContext::new(&state_dir, &agent.role);
 
-    let mut broker = agent.broker().with_read_through(cursor.load());
+    let mut broker = agent.broker().with_cursor(cursor.load());
     let items = broker.inbox().map_err(|reason| eyre!("{reason}"))?;
     // Print first, then advance the cursor, so a message is marked seen only once
     // it has been shown: a failed write reprints next time rather than dropping it.
     print_inbox(&items);
-    cursor.save(broker.read_through())?;
+    // The cursor is `None` only when the log held nothing to read, so there is no
+    // position to persist; the next call reads from the start as before.
+    if let Some(seen) = broker.cursor() {
+        cursor.save(seen)?;
+    }
     // Persist the task the read adopted from an order, so the next command stamps
     // it (issue #132). A role still working its prior task keeps it, since the
     // broker was seeded with the saved one.

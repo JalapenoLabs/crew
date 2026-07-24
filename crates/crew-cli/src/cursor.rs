@@ -7,8 +7,9 @@
 //! role under the broker state dir, so a later invocation behaves like the
 //! long-lived path and the parity gaps in `docs/codex.md` close:
 //!
-//! - [`InboxCursor`] holds the count of inbox messages the role has seen, so
-//!   `crew inbox` shows only what arrived since the last call (issue #130).
+//! - [`InboxCursor`] holds the id of the last inbox message the role read, so
+//!   `crew inbox` shows only what arrived since the last call (issue #130) and
+//!   survives a broker log reset (issue #160).
 //! - [`TaskContext`] holds the task the role adopted from an order, so a later
 //!   `crew send` / `crew order` stamps it and its messages correlate to the
 //!   task, the way the MCP server's in-memory client does (issue #132).
@@ -18,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crew_substrate::core::{RoleId, TaskId};
+use crew_substrate::core::{MessageId, RoleId, TaskId};
 use eyre::{Result, WrapErr};
 
 /// The subdirectory under the broker state dir that holds the shim cursor
@@ -26,7 +27,12 @@ use eyre::{Result, WrapErr};
 /// log.
 const CURSOR_DIR: &str = "shim-cursors";
 
-/// A per-role inbox cursor file: the count of inbox messages the role has read.
+/// A per-role inbox cursor file: the id of the last inbox message the role
+/// read.
+///
+/// Keying on the message id, not a count, lets the cursor survive a broker log
+/// reset (issue #160): a stale id absent from a fresh, shorter log replays the
+/// log rather than skipping new messages until it grows past an old count.
 #[derive(Debug)]
 pub struct InboxCursor {
     /// The file holding this role's cursor, under the state dir's cursor
@@ -44,31 +50,30 @@ impl InboxCursor {
         }
     }
 
-    /// Loads the saved cursor, or `0` when there is none yet.
+    /// Loads the saved cursor, or `None` when there is none yet.
     ///
-    /// A missing, unreadable, or malformed file reads as `0`, so a first call,
-    /// or a corrupt cursor, safely shows the whole inbox rather than
+    /// A missing, unreadable, or malformed file reads as `None`, so a first
+    /// call, or a corrupt cursor, safely shows the whole inbox rather than
     /// failing the command.
     #[must_use]
-    pub fn load(&self) -> usize {
-        fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|text| text.trim().parse().ok())
-            .unwrap_or(0)
+    pub fn load(&self) -> Option<MessageId> {
+        let text = fs::read_to_string(&self.path).ok()?;
+        serde_json::from_str(text.trim()).ok()
     }
 
-    /// Saves `read_through` as the new cursor, creating the cursor dir if
-    /// needed.
+    /// Saves `cursor` as the last message the role read, creating the cursor
+    /// dir if needed.
     ///
     /// # Errors
     /// Returns an error if the cursor directory cannot be created or the file
     /// cannot be written.
-    pub fn save(&self, read_through: usize) -> Result<()> {
+    pub fn save(&self, cursor: MessageId) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("could not create cursor dir {}", parent.display()))?;
         }
-        fs::write(&self.path, read_through.to_string())
+        let text = serde_json::to_string(&cursor).wrap_err("could not encode the inbox cursor")?;
+        fs::write(&self.path, text)
             .wrap_err_with(|| format!("could not write inbox cursor {}", self.path.display()))
     }
 }
@@ -140,17 +145,16 @@ fn sanitize(role: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crew_substrate::core::{RoleId, TaskId};
+    use crew_substrate::core::{MessageId, RoleId, TaskId};
 
     use super::{sanitize, InboxCursor, TaskContext};
 
     #[test]
-    fn an_unset_cursor_loads_as_zero() {
+    fn an_unset_cursor_loads_as_none() {
         let dir = tempdir();
         let cursor = InboxCursor::new(&dir, &RoleId::new("backend"));
-        assert_eq!(
-            cursor.load(),
-            0,
+        assert!(
+            cursor.load().is_none(),
             "no file yet means start from the beginning"
         );
     }
@@ -159,38 +163,51 @@ mod tests {
     fn a_saved_cursor_round_trips() {
         let dir = tempdir();
         let cursor = InboxCursor::new(&dir, &RoleId::new("backend"));
-        cursor.save(7).expect("the cursor saves");
+        let first = MessageId::new();
+        cursor.save(first).expect("the cursor saves");
         assert_eq!(
             cursor.load(),
-            7,
-            "a later read resumes from the saved count"
+            Some(first),
+            "a later read resumes from the saved message"
         );
 
         // Advancing overwrites, so the newest read position wins.
-        cursor.save(12).expect("the cursor advances");
-        assert_eq!(cursor.load(), 12);
+        let next = MessageId::new();
+        cursor.save(next).expect("the cursor advances");
+        assert_eq!(cursor.load(), Some(next));
     }
 
     #[test]
     fn each_role_keeps_its_own_cursor() {
         let dir = tempdir();
+        let backend = MessageId::new();
+        let frontend = MessageId::new();
         InboxCursor::new(&dir, &RoleId::new("backend"))
-            .save(3)
+            .save(backend)
             .unwrap();
         InboxCursor::new(&dir, &RoleId::new("frontend"))
-            .save(9)
+            .save(frontend)
             .unwrap();
-        assert_eq!(InboxCursor::new(&dir, &RoleId::new("backend")).load(), 3);
-        assert_eq!(InboxCursor::new(&dir, &RoleId::new("frontend")).load(), 9);
+        assert_eq!(
+            InboxCursor::new(&dir, &RoleId::new("backend")).load(),
+            Some(backend)
+        );
+        assert_eq!(
+            InboxCursor::new(&dir, &RoleId::new("frontend")).load(),
+            Some(frontend)
+        );
     }
 
     #[test]
-    fn a_malformed_cursor_file_loads_as_zero() {
+    fn a_malformed_cursor_file_loads_as_none() {
         let dir = tempdir();
         let cursor = InboxCursor::new(&dir, &RoleId::new("backend"));
-        cursor.save(4).unwrap();
-        std::fs::write(&cursor.path, "not a number").unwrap();
-        assert_eq!(cursor.load(), 0, "a corrupt cursor falls back to the start");
+        cursor.save(MessageId::new()).unwrap();
+        std::fs::write(&cursor.path, "not a message id").unwrap();
+        assert!(
+            cursor.load().is_none(),
+            "a corrupt cursor falls back to the start"
+        );
     }
 
     #[test]
