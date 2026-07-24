@@ -10,39 +10,11 @@
 //! test body stays synchronous and can call the blocking `ureq`-based client
 //! directly.
 
-use std::{
-    net::{Ipv4Addr, SocketAddr, TcpListener},
-    thread,
-};
+mod common;
 
-use crew_broker::{AppState, Config};
+use common::start_broker;
 use crew_client::Broker;
 use crew_core::RoleCard;
-
-/// Starts a broker over a fresh in-memory store, returning the address it
-/// serves on.
-///
-/// The serve thread is detached: it lives until the test process exits, which
-/// is all a request/response boot needs (it holds no long-lived stream open).
-fn start_broker() -> SocketAddr {
-    // Bind synchronously so the address is known before the runtime thread starts;
-    // hand the socket to tokio inside the thread.
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            let state = AppState::new(Config::default());
-            let _ = crew_broker::serve(listener, state, std::future::pending::<()>()).await;
-        });
-    });
-    addr
-}
 
 #[test]
 fn a_role_boots_from_its_card_and_reaches_the_broker() {
