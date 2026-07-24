@@ -774,9 +774,11 @@ shipped). A question is General-facing only when it
 is broadcast to `all-units` or addressed to a role that is not a live agent (issue #119); a
 directed question to a live teammate is peer coordination the crew resolves itself and stays
 quiet, mirroring the stall monitor's rule (issue #48). To scope it, the notifier tracks
-roster liveness by folding the `lifecycle` events on the same stream (a role is live while
-working or idle); the firehose is live-only, so an addressee not yet known to be live is
-treated as General-facing, and a real question is never dropped. Other routine chatter
+roster liveness: it seeds the roster once from `GET /roster` on connect (issue #32, #170), so
+a quiet, already-registered role is known live on attaching to a running crew, then keeps it
+current by folding the `lifecycle` events on the same stream (a role is live while working or
+idle); an addressee still not known to be live (absent from the seed and unseen on the
+stream) is treated as General-facing, and a real question is never dropped. Other routine chatter
 (status, notes, orders, answers, artifacts, ordinary lifecycle, activity, board, boundary,
 verification) stays quiet by default. The classifier, `notification_for` over the
 liveness-tracking `Roster`, decides per event, so the policy is fully unit-tested; `--mute
