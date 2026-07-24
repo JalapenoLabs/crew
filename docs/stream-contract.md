@@ -87,11 +87,11 @@ it is about, and `channel` is `all-units`.
 ```
 
 The transition is one of `started`, `idle`, `stopped`, `restarted`, `died`,
-`recovered`, `paused`, `resumed`, `stood_down`, or `mission_complete`. `started` and
-`recovered` bring a role up; `idle` parks it (still present); `stopped` and `died` take it
-down; `paused` / `resumed` gate and ungate a role (issue #41); `stood_down` is the crew's
-emergency halt (issue #41); and `mission_complete` is the crew's graceful finish (issue
-#121, the true completion the General is notified on, distinct from a stand-down).
+`recovered`, `paused`, `resumed`, or `stood_down`. `started` and `recovered` bring a role
+up; `idle` parks it (still present); `stopped` and `died` take it down; `paused` /
+`resumed` gate and ungate a role (issue #41); and `stood_down` is the crew's emergency
+halt (issue #41). The crew's graceful finish is its own `mission` kind, below, not a
+lifecycle transition.
 
 ### `activity` (an agent's own work)
 
@@ -129,6 +129,21 @@ not one role's action.
   clears, so a consumer lights a stall up and later takes it down off the same stream.
 - `roles` are the roles caught in the stall, sorted; `detail` names who is waiting on
   what.
+
+### `mission` (the crew's graceful finish)
+
+`kind.data` carries a `summary` of what shipped. The crew, typically through the
+commander, reports the mission gracefully complete (issues #121, #155); the envelope's
+`from` is the reporting role and `channel` is `all-units`. This is the true completion the
+General is notified on, distinct from a `stood_down` emergency halt. It announces the
+finish, it does not halt the crew.
+
+```json
+{ "kind": "mission", "data": { "summary": "shipped the auth gateway; all tasks verified" } }
+```
+
+- `summary` is a short account of what the mission shipped, rendered in the completion
+  notification. It is an empty string when the reporter gave none.
 
 Other supervisor and broker kinds ride the same envelope and are filterable by `kind`:
 `ledger` (issue #45), `boundary` (issue #46), `verification` (issue #47), `board` (issue

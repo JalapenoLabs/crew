@@ -305,12 +305,16 @@ impl RoleStats {
             | Lifecycle::Stopped
             | Lifecycle::Died
             | Lifecycle::Paused
-            | Lifecycle::StoodDown
-            | Lifecycle::MissionComplete => {
-                if let Some(since) = self.working_since.take() {
-                    self.active += span(since, at);
-                }
-            }
+            | Lifecycle::StoodDown => self.close_working(at),
+        }
+    }
+
+    /// Closes the role's open working interval at `at`, folding it into the
+    /// total. A no-op when the role was not working. Both a stopping lifecycle
+    /// transition and a `mission` completion (issue #155) end the interval.
+    fn close_working(&mut self, at: Timestamp) {
+        if let Some(since) = self.working_since.take() {
+            self.active += span(since, at);
         }
     }
 
@@ -389,6 +393,16 @@ impl Stats {
                         .entry(role.clone())
                         .or_default()
                         .apply_lifecycle(*state, event.ts);
+                }
+            }
+            // A mission completion (issue #155) closes the reporting role's open
+            // working interval, the same way a stopping lifecycle transition does.
+            EventKind::Mission(_) => {
+                if let Sender::Role(role) = &event.from {
+                    self.roles
+                        .entry(role.clone())
+                        .or_default()
+                        .close_working(event.ts);
                 }
             }
             _ => {}

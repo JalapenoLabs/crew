@@ -67,8 +67,8 @@ impl Status {
     /// liveness.
     ///
     /// `paused` / `resumed` toggle a flag rather than the status, and
-    /// `stood_down` / `mission_complete` are crew-wide signals, so they return
-    /// `None` (the caller handles them).
+    /// `stood_down` is a crew-wide signal (as is a `mission` completion,
+    /// handled separately), so they return `None` (the caller handles them).
     fn from_lifecycle(lifecycle: Lifecycle) -> Option<Self> {
         match lifecycle {
             Lifecycle::Started | Lifecycle::Restarted | Lifecycle::Recovered => {
@@ -77,10 +77,7 @@ impl Status {
             Lifecycle::Idle => Some(Status::Idle),
             Lifecycle::Stopped => Some(Status::Stopped),
             Lifecycle::Died => Some(Status::Dead),
-            Lifecycle::Paused
-            | Lifecycle::Resumed
-            | Lifecycle::StoodDown
-            | Lifecycle::MissionComplete => None,
+            Lifecycle::Paused | Lifecycle::Resumed | Lifecycle::StoodDown => None,
         }
     }
 
@@ -303,6 +300,9 @@ impl Cockpit {
                 row.cost_micro_usd = row.cost_micro_usd.saturating_add(telemetry.cost_micro_usd);
             }
             EventKind::Message(message) => self.push_feed(event, message),
+            // The mission completed (issue #155): mark the crew standing, the same
+            // crew-wide signal `stood_down` sets.
+            EventKind::Mission(_) => "mission complete".clone_into(&mut self.standing),
             _ => {}
         }
     }
@@ -321,10 +321,8 @@ impl Cockpit {
                 _ => {}
             }
         }
-        match lifecycle {
-            Lifecycle::StoodDown => "stood down".clone_into(&mut self.standing),
-            Lifecycle::MissionComplete => "mission complete".clone_into(&mut self.standing),
-            _ => {}
+        if lifecycle == Lifecycle::StoodDown {
+            "stood down".clone_into(&mut self.standing);
         }
     }
 

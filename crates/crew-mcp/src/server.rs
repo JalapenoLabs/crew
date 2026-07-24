@@ -203,7 +203,9 @@ impl Server {
                 )
             }
             "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
-            "crew_complete" => self.broker.complete(),
+            "crew_complete" => self
+                .broker
+                .complete(str_arg(arguments, "summary").unwrap_or_default()),
             "crew_board" => Ok(render_board(
                 &self.broker.board(str_arg(arguments, "section"))?,
             )),
@@ -476,9 +478,15 @@ fn done_gate_tools() -> Vec<Value> {
                 signing off. Call this, typically as the commander, only when the work is truly \
                 done (every task verified through the done-gate), so the General is pulled back \
                 on a real finish. This is a graceful completion, not the emergency stand-down, \
-                and it does not halt the crew; it announces the mission is done. Send a summary \
-                of what shipped with crew_send first if useful.",
-            "inputSchema": { "type": "object", "properties": {} }
+                and it does not halt the crew; it announces the mission is done. Pass a short \
+                `summary` of what shipped: it is rendered in the completion notification, so the \
+                General reads the outcome at a glance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "summary": { "type": "string", "description": "A short summary of what the mission shipped, shown in the completion notification." }
+                }
+            }
         }),
     ]
 }

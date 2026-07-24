@@ -21,9 +21,10 @@
 //! - **The crew is stalled** (a `stall` event, [`StallStatus::Detected`]): the
 //!   crew is stuck waiting on itself and needs the General (issue #48, #120). A
 //!   resolved stall is good news and stays quiet.
-//! - **The mission completes** ([`Lifecycle::MissionComplete`]): the crew
-//!   gracefully finished its work (issue #121). This is the true completion,
-//!   distinct from the stand-down that used to stand in for it.
+//! - **The mission completes** (an [`EventKind::Mission`]): the crew gracefully
+//!   finished its work (issue #121). This is the true completion, distinct from
+//!   the stand-down that used to stand in for it, and its push renders the
+//!   reporter's summary of what shipped when one was given (issue #155).
 //!
 //! ## Which questions reach the General
 //!
@@ -246,10 +247,7 @@ fn liveness_after(lifecycle: Lifecycle) -> Option<bool> {
         Lifecycle::Stopped | Lifecycle::Died => Some(false),
         // Control-plane and crew-wide transitions do not change a single role's
         // working/idle liveness.
-        Lifecycle::Paused
-        | Lifecycle::Resumed
-        | Lifecycle::StoodDown
-        | Lifecycle::MissionComplete => None,
+        Lifecycle::Paused | Lifecycle::Resumed | Lifecycle::StoodDown => None,
     }
 }
 
@@ -289,7 +287,7 @@ fn moment_of(event: &Event, roster: &Roster) -> Option<Moment> {
         },
         EventKind::Lifecycle(Lifecycle::Died) => Some(Moment::RoleDied),
         EventKind::Lifecycle(Lifecycle::StoodDown) => Some(Moment::CrewStoodDown),
-        EventKind::Lifecycle(Lifecycle::MissionComplete) => Some(Moment::MissionComplete),
+        EventKind::Mission(_) => Some(Moment::MissionComplete),
         // Only a newly detected stall pulls the General in; a resolved one is
         // good news that needs no push.
         EventKind::Stall(stall) if stall.status == StallStatus::Detected => {
@@ -329,10 +327,25 @@ fn render(event: &Event, moment: Moment) -> Notification {
                 body: format!("coordination stall: {detail}"),
             }
         }
-        Moment::MissionComplete => Notification {
-            title: "crew: mission complete".to_owned(),
-            body: format!("{who} reports the mission gracefully finished"),
-        },
+        Moment::MissionComplete => {
+            // Carry the summary of what shipped into the push, so the completion
+            // has context rather than a bare marker (issue #155); fall back to the
+            // plain finish line when none was given.
+            let summary = match &event.kind {
+                EventKind::Mission(mission) if !mission.summary.trim().is_empty() => {
+                    Some(elide(mission.summary.trim()))
+                }
+                _ => None,
+            };
+            let body = match summary {
+                Some(summary) => format!("{who} reports the mission complete: {summary}"),
+                None => format!("{who} reports the mission gracefully finished"),
+            };
+            Notification {
+                title: "crew: mission complete".to_owned(),
+                body,
+            }
+        }
     }
 }
 
@@ -431,8 +444,8 @@ fn deliver_native(_notification: &Notification) {}
 #[cfg(test)]
 mod tests {
     use crew_substrate::core::{
-        Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId,
-        Sender, StallEvent, StallKind, StallStatus, Timestamp,
+        Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind,
+        MissionEvent, RoleId, Sender, StallEvent, StallKind, StallStatus, Timestamp,
     };
 
     use super::{moment_of, notification_for, Moment, NotifyPolicy, Roster};
@@ -491,6 +504,16 @@ mod tests {
             Sender::Role(RoleId::new(role)),
             "all-units",
             EventKind::Lifecycle(lifecycle),
+        )
+    }
+
+    fn mission(role: &str, summary: &str) -> Event {
+        event(
+            Sender::Role(RoleId::new(role)),
+            "all-units",
+            EventKind::Mission(MissionEvent {
+                summary: summary.to_owned(),
+            }),
         )
     }
 
@@ -794,7 +817,7 @@ mod tests {
     fn a_mission_completion_is_an_actionable_moment_distinct_from_stand_down() {
         let roster = Roster::default();
         assert_eq!(
-            moment_of(&lifecycle("commander", Lifecycle::MissionComplete), &roster),
+            moment_of(&mission("commander", "shipped it"), &roster),
             Some(Moment::MissionComplete),
             "a graceful finish fires its own moment, not the stand-down one"
         );
@@ -808,12 +831,8 @@ mod tests {
     #[test]
     fn a_mission_completion_notification_names_the_reporter() {
         let policy = NotifyPolicy::new(vec![], true);
-        let notification = notification_for(
-            &lifecycle("commander", Lifecycle::MissionComplete),
-            &policy,
-            &Roster::default(),
-        )
-        .expect("a mission completion is an actionable moment");
+        let notification = notification_for(&mission("commander", ""), &policy, &Roster::default())
+            .expect("a mission completion is an actionable moment");
         assert!(
             notification.title.contains("complete"),
             "title: {}",
@@ -827,13 +846,39 @@ mod tests {
     }
 
     #[test]
+    fn a_mission_completion_renders_the_summary_when_given() {
+        // The point of issue #155: the push carries what shipped, not a bare marker.
+        let policy = NotifyPolicy::new(vec![], true);
+        let notification = notification_for(
+            &mission("commander", "shipped the auth gateway; all tasks verified"),
+            &policy,
+            &Roster::default(),
+        )
+        .expect("a mission completion is an actionable moment");
+        assert!(
+            notification.body.contains("shipped the auth gateway"),
+            "the body renders the mission summary: {}",
+            notification.body
+        );
+
+        // With no summary it falls back to the plain finish line.
+        let bare = notification_for(&mission("commander", "   "), &policy, &Roster::default())
+            .expect("a summary-less completion still notifies");
+        assert!(
+            bare.body.contains("gracefully finished"),
+            "no summary falls back to the plain line: {}",
+            bare.body
+        );
+    }
+
+    #[test]
     fn a_muted_completion_does_not_notify() {
         let policy = NotifyPolicy::new(vec![Moment::MissionComplete], true);
         assert!(
             notification_for(
-                &lifecycle("commander", Lifecycle::MissionComplete),
+                &mission("commander", "shipped it"),
                 &policy,
-                &Roster::default(),
+                &Roster::default()
             )
             .is_none(),
             "a muted completion does not notify"

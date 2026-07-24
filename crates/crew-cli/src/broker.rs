@@ -259,6 +259,14 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Telemetry(telemetry) => ("telemetry", telemetry_body(telemetry)),
         EventKind::Usage(usage) => ("usage", usage_body(usage)),
         EventKind::Stall(stall) => ("stall", stall_body(stall)),
+        EventKind::Mission(mission) => (
+            "mission",
+            if mission.summary.trim().is_empty() {
+                "complete".to_owned()
+            } else {
+                format!("complete: {}", mission.summary.trim())
+            },
+        ),
     }
 }
 

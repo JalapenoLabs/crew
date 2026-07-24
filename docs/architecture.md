@@ -212,10 +212,12 @@ the store. It exposes sixteen tools (issues #17,
   self-verdict, so a task is done only when a role other than the owner could not break
   it, and a failure hands the work back to the owner's inbox. See `docs/roles.md` (the
   done-gate).
-- `crew_complete` reports the mission gracefully finished (issue #121): the crew, typically
-  through the commander, declares the work done, so the broker records a `mission_complete`
-  lifecycle event and `crew notify` fires on a true completion rather than a stand-down. It
-  announces, it does not halt: unlike `crew standdown` it does not gate the crew.
+- `crew_complete` reports the mission gracefully finished (issues #121, #155): the crew,
+  typically through the commander, declares the work done, so the broker records a `mission`
+  event and `crew notify` fires on a true completion rather than a stand-down. The tool
+  takes a short `summary` of what shipped, carried on the event and rendered in the
+  completion push so the General reads the outcome at a glance. It announces, it does not
+  halt: unlike `crew standdown` it does not gate the crew.
 - `crew_board` and `crew_record` are the shared situation board (issue #49), the crew's
   durable memory. `crew_record` records or retracts an entry (a decision, an interface, or
   a gotcha, keyed by a stable topic); `crew_board` reads it. A role reads the board before
