@@ -32,8 +32,8 @@ const DEFAULT_FILTER: &str = "info";
 
 /// Initializes global structured logging for a crew binary.
 ///
-/// Reads the level filter from `RUST_LOG` (falling back to [`DEFAULT_FILTER`]),
-/// writes human-readable events with their named fields to stderr, and colors
+/// Reads the level filter from `RUST_LOG` (falling back to `info`), writes
+/// human-readable events with their named fields to stderr, and colors
 /// the output only when stderr is a terminal. Call it once, early in `main`,
 /// before any other work.
 ///

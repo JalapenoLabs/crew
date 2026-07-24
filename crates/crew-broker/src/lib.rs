@@ -49,7 +49,7 @@ mod store;
 mod summary;
 mod usage;
 
-pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR};
+pub use config::{Config, DEFAULT_PORT, DEFAULT_STATE_DIR, DEFAULT_USAGE_THRESHOLD};
 pub use error::ApiError;
 pub use router::ChannelRouter;
 pub use secrets::{mask, Scrubber};

@@ -52,8 +52,10 @@ pub struct Config {
     /// a subscriber.
     pub secrets: Vec<String>,
     /// The shared-subscription usage percent at which new work auto-pauses
-    /// (issue #56). Defaults to [`DEFAULT_USAGE_THRESHOLD`]; a value at or
-    /// above 100 disables the auto-pause, since a reading never reaches it.
+    /// (issue #56). Defaults to
+    /// [`DEFAULT_USAGE_THRESHOLD`](crate::DEFAULT_USAGE_THRESHOLD); a value
+    /// at or above 100 disables the auto-pause, since a reading never
+    /// reaches it.
     pub usage_threshold: u8,
 }
 

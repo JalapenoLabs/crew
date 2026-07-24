@@ -825,12 +825,15 @@ already-running `crewd` or starts its own.
   `[workspace.lints]` and every crate inherits them. Override a lint locally with
   `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
 - **CI gate** (`.github/workflows/ci.yml`): every pull request and every push to
-  `main` and `develop` runs four independent jobs, so each reports its own status
-  and one failure never blocks the rest. Three run on the pinned build toolchain:
-  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
-  The fourth, `Format (nightly)`, runs `cargo +<nightly> fmt --all --check` on the
-  date-pinned nightly (the `NIGHTLY` env) to enforce the nightly-only formatting
-  options (issue #60). Keep the tree clippy-clean and formatted at that level.
+  `main` and `develop` runs five independent jobs, so each reports its own status
+  and one failure never blocks the rest. Four run on the pinned build toolchain:
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
+  and `Doc` (`cargo doc --no-deps --workspace` under `RUSTDOCFLAGS="-D warnings"`,
+  so a broken intra-doc link fails the gate rather than shipping broken rustdoc,
+  issue #161). The fifth, `Format (nightly)`, runs `cargo +<nightly> fmt --all
+  --check` on the date-pinned nightly (the `NIGHTLY` env) to enforce the
+  nightly-only formatting options (issue #60). Keep the tree clippy-clean,
+  formatted at that level, and free of broken doc links.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
 - **Git:** commit and push only when asked. Never add a co-author trailer. Never
   self-assign PR credit.

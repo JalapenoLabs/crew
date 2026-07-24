@@ -188,7 +188,7 @@ pub struct Incident {
 /// Drive an agent with [`start`](Fleet::start) and [`stop`](Fleet::stop), and
 /// read recorded deaths with [`incidents`](Fleet::incidents). Each agent's
 /// captured stream-json is parsed into activity events on the broker (issue
-/// #24; see [`crate::activity`]). Dropping the fleet, like
+/// #24; see the `activity` module). Dropping the fleet, like
 /// [`shutdown`](Fleet::shutdown), stops every agent and deregisters its role.
 #[derive(Debug)]
 pub struct Fleet {
