@@ -258,7 +258,11 @@ yet stuck waiting on itself: two roles each holding for the other to answer, or 
 that no one moves. Silence then reads as progress when it is really a deadlock. The
 supervisor's defibrillator extends to this (issue #48): a fleet-wide **stall monitor**
 reads a recent window of the event stream (`GET /history?since=`) on a timer and finds
-the three shapes of a coordination stall.
+the three shapes of a coordination stall. The read is incremental (issue #165): the
+monitor keeps a rolling buffer of the lookback window and each tick fetches only the
+events since its last scan (`since` = the newest buffered event), splicing them on and
+dropping the aged-out front, so a chatty crew's scan costs O(new) rather than re-reading
+the whole window every tick.
 
 - **A deadlock**: a cycle of unanswered questions on the stream (`backend` asked
   `frontend` and is waiting, `frontend` asked `backend` and is waiting), so neither can
