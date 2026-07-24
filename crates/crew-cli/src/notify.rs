@@ -25,6 +25,10 @@
 //!   finished its work (issue #121). This is the true completion, distinct from
 //!   the stand-down that used to stand in for it, and its push renders the
 //!   reporter's summary of what shipped when one was given (issue #155).
+//! - **The budget is exhausted** (a `budget` event with a
+//!   [`breach`](crew_substrate::core::BudgetEvent::breach)): a role hit its cap
+//!   or the crew hit its budget, idle-stopping the role or the whole crew
+//!   (issue #54, #175). A within-budget spend report (no breach) stays quiet.
 //!
 //! ## Which questions reach the General
 //!
@@ -47,11 +51,11 @@
 //! never silently dropped.
 //!
 //! Everything else (status, notes, orders, answers, artifacts, ordinary
-//! lifecycle such as `started` or `idle`, activity, board, boundary, and
-//! verification events) is routine and stays quiet by default. One further
-//! moment in the issue's scope, an approval pending (issue #40), lights up here
-//! for free once its event reaches the stream: extend [`moment_of`] and
-//! [`Moment`] and the rest of the pipeline carries it.
+//! lifecycle such as `started` or `idle`, activity, board, boundary,
+//! verification, and a within-budget spend report) is routine and stays quiet
+//! by default. One further moment in the issue's scope, an approval pending
+//! (issue #40), lights up here for free once its event reaches the stream:
+//! extend [`moment_of`] and [`Moment`] and the rest of the pipeline carries it.
 //!
 //! ## Configurable, quiet by default
 //!
@@ -78,7 +82,8 @@
 use std::{collections::HashSet, io::Write, process::Command};
 
 use crew_substrate::core::{
-    Channel, Event, EventKind, Lifecycle, MessageKind, RoleId, Sender, StallStatus,
+    BudgetEvent, BudgetScope, Channel, Event, EventKind, Lifecycle, MessageKind, RoleId, Sender,
+    StallStatus,
 };
 use eyre::Result;
 use serde::Deserialize;
@@ -96,7 +101,7 @@ const MAX_DETAIL: usize = 160;
 /// next.
 ///
 /// The `clap` value names (`question`, `died`, `stood-down`, `stalled`,
-/// `complete`) are the tokens `--mute` accepts.
+/// `complete`, `budget`) are the tokens `--mute` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Moment {
     /// A role asked a question and is waiting on a decision.
@@ -116,6 +121,10 @@ pub(crate) enum Moment {
     /// #121), distinct from a stand-down.
     #[value(name = "complete")]
     MissionComplete,
+    /// The budget is exhausted: a role hit its cap or the crew hit its budget,
+    /// idle-stopping the role or the whole crew (issue #54, #175).
+    #[value(name = "budget")]
+    BudgetExhausted,
 }
 
 /// Which moments push a notification, and whether a push sounds the bell.
@@ -376,6 +385,10 @@ fn moment_of(event: &Event, roster: &Roster) -> Option<Moment> {
         EventKind::Stall(stall) if stall.status == StallStatus::Detected => {
             Some(Moment::RoleStalled)
         }
+        // A budget breach idle-stops a role or the whole crew (issue #54), a
+        // moment the General should hear about; a within-budget spend report
+        // (no breach) is routine and stays quiet.
+        EventKind::Budget(budget) if budget.breach.is_some() => Some(Moment::BudgetExhausted),
         _ => None,
     }
 }
@@ -429,6 +442,50 @@ fn render(event: &Event, moment: Moment) -> Notification {
                 body,
             }
         }
+        Moment::BudgetExhausted => {
+            let body = match &event.kind {
+                EventKind::Budget(budget) => budget_body(budget),
+                _ => "a budget ceiling was hit".to_owned(),
+            };
+            Notification {
+                title: "crew: budget exhausted".to_owned(),
+                body,
+            }
+        }
+    }
+}
+
+/// The push body for a budget breach: what idle-stopped, and the spend against
+/// the ceiling it crossed.
+///
+/// A [`Crew`] breach halts every role at the crew budget; a [`Role`] breach
+/// idle-stops just that role at its cap. A report with no breach never reaches
+/// here (it stays quiet), so the fallback is only defensive.
+///
+/// [`Role`]: BudgetScope::Role
+/// [`Crew`]: BudgetScope::Crew
+fn budget_body(budget: &BudgetEvent) -> String {
+    match budget.breach {
+        Some(BudgetScope::Crew) => {
+            let ceiling = budget
+                .crew_budget
+                .map_or_else(String::new, |budget| format!(" of {budget}"));
+            format!(
+                "the crew hit its token budget ({}{ceiling} tokens); every role idle-stops",
+                budget.crew_spent
+            )
+        }
+        Some(BudgetScope::Role) => {
+            let ceiling = budget
+                .role_cap
+                .map_or_else(String::new, |cap| format!(" of {cap}"));
+            format!(
+                "{} hit its token cap ({}{ceiling} tokens) and idle-stopped",
+                budget.role.as_str(),
+                budget.role_spent
+            )
+        }
+        None => "a budget report crossed no ceiling".to_owned(),
     }
 }
 
@@ -527,13 +584,31 @@ fn deliver_native(_notification: &Notification) {}
 #[cfg(test)]
 mod tests {
     use crew_substrate::core::{
-        Activity, ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind,
-        MissionEvent, RoleId, Sender, StallEvent, StallKind, StallStatus, Timestamp,
+        Activity, BudgetEvent, BudgetScope, ChannelId, Event, EventKind, Lifecycle, Message,
+        MessageId, MessageKind, MissionEvent, RoleId, Sender, StallEvent, StallKind, StallStatus,
+        Timestamp,
     };
 
     use super::{
         label_is_live, moment_of, notification_for, Moment, NotifyPolicy, Roster, RosterSnapshot,
     };
+
+    /// A `budget` event from `role` to `all-units` reporting its spend and any
+    /// `breach`, the way the supervisor publishes one (issue #54).
+    fn budget(role: &str, breach: Option<BudgetScope>) -> Event {
+        event(
+            Sender::Role(RoleId::new(role)),
+            "all-units",
+            EventKind::Budget(BudgetEvent {
+                role: RoleId::new(role),
+                role_spent: 1_200,
+                role_cap: Some(1_000),
+                crew_spent: 5_000,
+                crew_budget: Some(4_000),
+                breach,
+            }),
+        )
+    }
 
     /// A roster with `roles` folded in as live agents, via their `started`
     /// lifecycle events.
@@ -967,6 +1042,85 @@ mod tests {
             )
             .is_none(),
             "a muted completion does not notify"
+        );
+    }
+
+    #[test]
+    fn a_budget_breach_is_an_actionable_moment() {
+        let roster = Roster::default();
+        assert_eq!(
+            moment_of(&budget("backend", Some(BudgetScope::Crew)), &roster),
+            Some(Moment::BudgetExhausted),
+            "a crew budget breach idle-stops the whole crew and pulls the General in"
+        );
+        assert_eq!(
+            moment_of(&budget("backend", Some(BudgetScope::Role)), &roster),
+            Some(Moment::BudgetExhausted),
+            "a role cap breach idle-stops that role and pulls the General in"
+        );
+    }
+
+    #[test]
+    fn a_within_budget_report_stays_quiet() {
+        assert_eq!(
+            moment_of(&budget("backend", None), &Roster::default()),
+            None,
+            "a spend report that crossed no ceiling is routine"
+        );
+    }
+
+    #[test]
+    fn a_crew_budget_notification_names_the_crew_and_the_spend() {
+        let policy = NotifyPolicy::new(vec![], true);
+        let notification = notification_for(
+            &budget("backend", Some(BudgetScope::Crew)),
+            &policy,
+            &Roster::default(),
+        )
+        .expect("a crew budget breach is an actionable moment");
+        assert!(
+            notification.title.contains("budget"),
+            "title: {}",
+            notification.title
+        );
+        assert!(
+            notification.body.contains("crew")
+                && notification.body.contains("5000")
+                && notification.body.contains("4000"),
+            "the body names the crew and the spend against the budget: {}",
+            notification.body
+        );
+    }
+
+    #[test]
+    fn a_role_cap_notification_names_the_role_and_the_spend() {
+        let policy = NotifyPolicy::new(vec![], true);
+        let notification = notification_for(
+            &budget("backend", Some(BudgetScope::Role)),
+            &policy,
+            &Roster::default(),
+        )
+        .expect("a role cap breach is an actionable moment");
+        assert!(
+            notification.body.contains("backend")
+                && notification.body.contains("1200")
+                && notification.body.contains("1000"),
+            "the body names the role and the spend against its cap: {}",
+            notification.body
+        );
+    }
+
+    #[test]
+    fn a_muted_budget_breach_does_not_notify() {
+        let policy = NotifyPolicy::new(vec![Moment::BudgetExhausted], true);
+        assert!(
+            notification_for(
+                &budget("backend", Some(BudgetScope::Crew)),
+                &policy,
+                &Roster::default()
+            )
+            .is_none(),
+            "a muted budget breach does not notify"
         );
     }
 

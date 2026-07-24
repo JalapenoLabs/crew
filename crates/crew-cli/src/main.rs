@@ -191,10 +191,10 @@ enum Command {
         broker: Option<String>,
     },
     /// Push a native notification on each actionable moment: a question, a
-    /// death, a stand-down.
+    /// death, a stand-down, a stall, a completion, a budget breach.
     Notify {
         /// Mute one or more moments (comma-separated): `question`, `died`,
-        /// `stood-down`.
+        /// `stood-down`, `stalled`, `complete`, `budget`.
         #[arg(long, value_delimiter = ',', value_name = "MOMENT")]
         mute: Vec<notify::Moment>,
         /// Skip the terminal bell; still show the desktop notification and the
