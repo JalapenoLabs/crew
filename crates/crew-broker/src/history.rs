@@ -3,9 +3,10 @@
 //! `GET /history` lets a consumer or a late joiner read the stored log without
 //! holding a stream open. It filters by `channel`, `role` (sent by), `agent` (a
 //! role's full activity timeline: what it sent and received, issue #30),
-//! `kind`, `task`, and `since`, orders deterministically by `ts` then log
-//! position, and pages with a stable cursor so concurrent writes never shift a
-//! page already returned.
+//! `kind`, `task`, and `since`, orders deterministically by `ts` then a
+//! per-event sequence, and pages with an opaque, prune-stable cursor so neither
+//! a concurrent write nor a future log trim shifts a page already returned
+//! (issue #208).
 //!
 //! This module owns the HTTP surface only: it parses and validates the query
 //! string into a backend-neutral [`EventQuery`] and formats the [`EventPage`]
@@ -29,7 +30,7 @@ use crate::{
     error::ApiError,
     filter::{nonempty, FilterQuery},
     state::AppState,
-    store::{EventFilter, EventQuery},
+    store::{Cursor, EventFilter, EventQuery},
     summary::{summarize, HistorySummary},
 };
 
@@ -103,7 +104,7 @@ async fn history(
     let limit = parse_limit(options.limit.as_deref())?;
 
     if wants_summary(options.summary.as_deref()) {
-        return Ok(Json(summary_response(&state, filter, limit)?).into_response());
+        return Ok(Json(summary_response(&state, filter, limit)).into_response());
     }
 
     let request = EventQuery {
@@ -111,14 +112,11 @@ async fn history(
         after: parse_cursor(options.after.as_deref())?,
         limit,
     };
-    let page = state
-        .storage
-        .query(&request)
-        .map_err(|_error| ApiError::bad_request("invalid pagination cursor"))?;
+    let page = state.storage.query(&request);
 
     Ok(Json(HistoryPage {
         events: page.events,
-        next_cursor: page.next.map(|position| position.to_string()),
+        next_cursor: page.next.map(Cursor::to_token),
     })
     .into_response())
 }
@@ -128,28 +126,19 @@ async fn history(
 ///
 /// Reads the whole filtered, time-ordered history in one query, then splits off
 /// the most recent `tail` events and folds the rest into a [`HistorySummary`].
-fn summary_response(
-    state: &AppState,
-    filter: EventFilter,
-    tail: usize,
-) -> Result<SummaryResponse, ApiError> {
+fn summary_response(state: &AppState, filter: EventFilter, tail: usize) -> SummaryResponse {
     let request = EventQuery {
         filter,
         after: None,
         limit: usize::MAX,
     };
-    // `after` is None, so the query cannot return an invalid-cursor error here.
-    let mut events = state
-        .storage
-        .query(&request)
-        .map(|page| page.events)
-        .map_err(|_error| ApiError::bad_request("could not read history"))?;
+    let mut events = state.storage.query(&request).events;
     let split = events.len().saturating_sub(tail);
     let recent = events.split_off(split);
-    Ok(SummaryResponse {
+    SummaryResponse {
         summary: summarize(&events),
         tail: recent,
-    })
+    }
 }
 
 /// Whether the `summary` flag was set to a truthy value.
@@ -174,12 +163,12 @@ fn parse_limit(limit: Option<&str>) -> Result<usize, ApiError> {
     }
 }
 
-/// Parses the opaque `after` cursor into a log position, rejecting a bad value.
-fn parse_cursor(after: Option<&str>) -> Result<Option<u64>, ApiError> {
+/// Decodes the opaque `after` cursor, rejecting a malformed token.
+fn parse_cursor(after: Option<&str>) -> Result<Option<Cursor>, ApiError> {
     nonempty(after)
         .map(|raw| {
-            raw.parse::<u64>()
-                .map_err(|_error| ApiError::bad_request("invalid pagination cursor"))
+            Cursor::from_token(raw)
+                .ok_or_else(|| ApiError::bad_request("invalid pagination cursor"))
         })
         .transpose()
 }

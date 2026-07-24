@@ -113,13 +113,15 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     ///
     /// The default scans the in-memory index via [`events`](Storage::events). A
     /// backend with its own index should override this to push the filter and
-    /// paging down to the store.
+    /// paging down to the store. It treats the log as untrimmed (`base_seq` 0);
+    /// a backend that drops earlier events passes its own base.
     ///
-    /// # Errors
-    /// Returns [`InvalidCursor`] if the query's `after` cursor is not a stored
-    /// position.
-    fn query(&self, query: &EventQuery) -> Result<EventPage, InvalidCursor> {
-        query_events(&self.events(), query)
+    /// A malformed cursor cannot reach here: the opaque token is validated when
+    /// it is decoded ([`Cursor::from_token`]), and a well-formed cursor past
+    /// the end simply yields an empty page.
+    fn query(&self, query: &EventQuery) -> EventPage {
+        // base_seq 0: the in-memory log is never trimmed yet (issue #208).
+        query_events(&self.events(), 0, query)
     }
 }
 
@@ -373,70 +375,118 @@ impl EventFilter {
     }
 }
 
+/// An opaque, prune-stable pagination cursor: the `(ts, seq)` of the last event
+/// a page returned.
+///
+/// `seq` is an event's monotonic sequence number, assigned in append order and
+/// never reused. Unlike a raw log position it does not shift when compaction or
+/// pruning drops earlier events (issue #208), so a cursor keeps resolving to
+/// the right boundary after the log is trimmed. Ordering is by `ts` then `seq`,
+/// the same total order [`query`](Storage::query) pages by.
+///
+/// Treat the [`to_token`](Cursor::to_token) string as opaque: it round-trips
+/// through [`from_token`](Cursor::from_token) and a client must not construct
+/// or parse it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    /// The last returned event's timestamp: the primary sort key.
+    ts: Timestamp,
+    /// The last returned event's monotonic sequence number: the tiebreaker.
+    seq: u64,
+}
+
+impl Cursor {
+    /// The `(ts, seq)` sort key a resume starts strictly after.
+    fn key(self) -> (Timestamp, u64) {
+        (self.ts, self.seq)
+    }
+
+    /// Encodes the cursor as an opaque, URL-safe token.
+    ///
+    /// The format (the seq and the epoch `(secs, nanos)` of `ts`, dot-joined)
+    /// is an implementation detail; a client must treat the result as
+    /// opaque.
+    #[must_use]
+    pub fn to_token(self) -> String {
+        let (secs, nanos) = self.ts.to_unix();
+        format!("{}.{secs}.{nanos}", self.seq)
+    }
+
+    /// Parses a token from [`to_token`](Cursor::to_token), or `None` if it is
+    /// malformed.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        let mut parts = token.split('.');
+        let seq = parts.next()?.parse().ok()?;
+        let secs = parts.next()?.parse().ok()?;
+        let nanos = parts.next()?.parse().ok()?;
+        // Reject trailing junk so a token round-trips exactly or fails cleanly.
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            ts: Timestamp::from_unix(secs, nanos)?,
+            seq,
+        })
+    }
+}
+
 /// A page request: the filter, an optional resume cursor, and a size limit.
 #[derive(Debug, Clone)]
 pub struct EventQuery {
     /// Which events to keep.
     pub filter: EventFilter,
-    /// Resume after this log position (from a previous page's
+    /// Resume strictly after this cursor (from a previous page's
     /// [`EventPage::next`]).
-    pub after: Option<u64>,
+    pub after: Option<Cursor>,
     /// The maximum number of events to return.
     pub limit: usize,
 }
 
-/// One page of query results, ordered by `ts` then log position.
+/// One page of query results, ordered by `ts` then sequence number.
 #[derive(Debug)]
 pub struct EventPage {
     /// The matching events for this page, oldest first.
     pub events: Vec<Event>,
-    /// The cursor for the next page (a log position), absent on the last page.
-    pub next: Option<u64>,
+    /// The cursor to resume after for the next page, absent on the last page.
+    pub next: Option<Cursor>,
 }
-
-/// The query's `after` cursor did not point at a stored event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidCursor;
 
 /// Runs a query over an in-memory event slice, the scan both backends share.
 ///
-/// Orders matches by `(ts, position)`, a total order the cursor resumes from:
-/// since the log is append-only, a position never moves, so paging stays stable
-/// under concurrent writes. Returns the page and the position to resume after,
-/// if any.
-fn query_events(events: &[Event], query: &EventQuery) -> Result<EventPage, InvalidCursor> {
-    // Resolve the cursor to the `(ts, position)` boundary to resume strictly after.
-    let boundary = match query.after {
-        Some(position) => {
-            let event = events
-                .get(usize::try_from(position).unwrap_or(usize::MAX))
-                .ok_or(InvalidCursor)?;
-            Some((event.ts, position))
-        }
-        None => None,
-    };
+/// `base_seq` is the sequence number of `events[0]`: `0` while the log is
+/// untrimmed, and the count already dropped once compaction or pruning lands
+/// (issue #208), so an event's `seq` is `base_seq + its index` and stays stable
+/// across a trim. Orders matches by `(ts, seq)` and resumes strictly after
+/// `query.after`'s key, which the cursor carries directly, so paging never
+/// depends on an event still sitting at a given index.
+fn query_events(events: &[Event], base_seq: u64, query: &EventQuery) -> EventPage {
+    let boundary = query.after.map(Cursor::key);
 
     let mut matched: Vec<(u64, &Event)> = events
         .iter()
         .enumerate()
-        .map(|(position, event)| (position as u64, event))
+        .map(|(index, event)| (base_seq + index as u64, event))
         .filter(|(_, event)| query.filter.matches(event))
         .collect();
     matched.sort_by(|a, b| a.1.ts.cmp(&b.1.ts).then_with(|| a.0.cmp(&b.0)));
 
     let start = match boundary {
-        Some(key) => matched.partition_point(|(position, event)| (event.ts, *position) <= key),
+        Some(key) => matched.partition_point(|(seq, event)| (event.ts, *seq) <= key),
         None => 0,
     };
     let rest = &matched[start..];
     let take = rest.len().min(query.limit);
-    let page = rest[..take]
+    let events = rest[..take]
         .iter()
         .map(|(_, event)| (*event).clone())
         .collect();
-    let next = (rest.len() > take).then(|| rest[take - 1].0);
+    let next = (rest.len() > take).then(|| {
+        let (seq, event) = rest[take - 1];
+        Cursor { ts: event.ts, seq }
+    });
 
-    Ok(EventPage { events: page, next })
+    EventPage { events, next }
 }
 
 /// Whether `channel` matches the `filter`, treating a pair channel as
@@ -747,9 +797,10 @@ impl Storage for LogStore {
             .len() as u64
     }
 
-    fn query(&self, query: &EventQuery) -> Result<EventPage, InvalidCursor> {
+    fn query(&self, query: &EventQuery) -> EventPage {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        query_events(&log.events, query)
+        // base_seq 0: the on-disk log is never trimmed yet (issue #208).
+        query_events(&log.events, 0, query)
     }
 
     fn roster(&self) -> Roster {
@@ -951,8 +1002,8 @@ mod tests {
     };
 
     use super::{
-        query_events, write_request, DurabilityState, EventFilter, EventKindTag, EventQuery,
-        InvalidCursor, Liveness, LogStore, LogWrite, MemoryStore, RoleStatus, Storage,
+        query_events, write_request, Cursor, DurabilityState, EventFilter, EventKindTag,
+        EventQuery, Liveness, LogStore, LogWrite, MemoryStore, RoleStatus, Storage,
     };
 
     /// A unique temp directory that removes itself on drop.
@@ -997,13 +1048,16 @@ mod tests {
         }
     }
 
-    fn unfiltered(after: Option<u64>, limit: usize) -> EventQuery {
+    fn unfiltered(after: Option<Cursor>, limit: usize) -> EventQuery {
         EventQuery {
             filter: EventFilter::default(),
             after,
             limit,
         }
     }
+
+    /// The untrimmed base sequence the store uses today (issue #208).
+    const UNTRIMMED: u64 = 0;
 
     #[test]
     fn query_orders_by_timestamp_then_position() {
@@ -1012,7 +1066,7 @@ mod tests {
             message("backend", "all-units", ts(1)),
             message("backend", "all-units", ts(2)),
         ];
-        let page = query_events(&log, &unfiltered(None, 10)).unwrap();
+        let page = query_events(&log, UNTRIMMED, &unfiltered(None, 10));
         let times: Vec<_> = page.events.iter().map(|event| event.ts).collect();
         assert_eq!(times, vec![ts(1), ts(2), ts(3)]);
         assert!(page.next.is_none());
@@ -1024,15 +1078,15 @@ mod tests {
             .map(|i| message("backend", "all-units", ts(i)))
             .collect();
 
-        let page1 = query_events(&log, &unfiltered(None, 8)).unwrap();
+        let page1 = query_events(&log, UNTRIMMED, &unfiltered(None, 8));
         assert_eq!(page1.events.len(), 8);
 
         // A concurrent writer appends newer events after page 1 was read.
         log.push(message("frontend", "all-units", ts(40)));
         log.push(message("frontend", "all-units", ts(41)));
 
-        let page2 = query_events(&log, &unfiltered(page1.next, 8)).unwrap();
-        let page3 = query_events(&log, &unfiltered(page2.next, 8)).unwrap();
+        let page2 = query_events(&log, UNTRIMMED, &unfiltered(page1.next, 8));
+        let page3 = query_events(&log, UNTRIMMED, &unfiltered(page2.next, 8));
 
         let seen: Vec<Timestamp> = page1
             .events
@@ -1070,13 +1124,13 @@ mod tests {
         let filtered = |filter: EventFilter| {
             query_events(
                 &log,
+                UNTRIMMED,
                 &EventQuery {
                     filter,
                     after: None,
                     limit: 100,
                 },
             )
-            .unwrap()
             .events
         };
 
@@ -1121,6 +1175,7 @@ mod tests {
         let log = vec![message("backend", "frontend+backend", ts(1))];
         let page = query_events(
             &log,
+            UNTRIMMED,
             &EventQuery {
                 filter: EventFilter {
                     channel: Some(ChannelId::new("backend+frontend")),
@@ -1129,18 +1184,67 @@ mod tests {
                 after: None,
                 limit: 100,
             },
-        )
-        .unwrap();
+        );
         assert_eq!(page.events.len(), 1);
     }
 
     #[test]
-    fn query_rejects_a_cursor_past_the_end() {
+    fn a_cursor_past_the_end_returns_an_empty_final_page() {
+        // A well-formed cursor beyond every event is not an error: it just has
+        // nothing after it. This is what lets a cursor survive a future trim that
+        // drops the event it named (issue #208).
         let log = vec![message("backend", "all-units", ts(1))];
-        assert!(matches!(
-            query_events(&log, &unfiltered(Some(99), 10)),
-            Err(InvalidCursor)
-        ));
+        let beyond = Cursor { ts: ts(9), seq: 99 };
+        let page = query_events(&log, UNTRIMMED, &unfiltered(Some(beyond), 10));
+        assert!(page.events.is_empty(), "no event sorts after the cursor");
+        assert!(page.next.is_none(), "and so no next page");
+    }
+
+    #[test]
+    fn a_cursor_is_stable_when_earlier_events_are_trimmed() {
+        // The cursor carries `(ts, seq)`, and `seq` is `base_seq + index`, so a
+        // page fetched before a trim and resumed after one neither repeats nor
+        // skips an event even though every surviving index shifted (issue #208).
+        let log: Vec<Event> = (0..10)
+            .map(|i| message("backend", "all-units", ts(i)))
+            .collect();
+
+        // Page 1 over the full log: the first four events, cursor at the fourth.
+        let page1 = query_events(&log, UNTRIMMED, &unfiltered(None, 4));
+        let seen: Vec<Timestamp> = page1.events.iter().map(|event| event.ts).collect();
+        assert_eq!(seen, (0..4).map(ts).collect::<Vec<_>>());
+        let cursor = page1.next.expect("a fourth event remains");
+
+        // Now trim the first three events: the survivors keep their seqs because
+        // `base_seq` advances by the trimmed count.
+        let trimmed = &log[3..];
+        let base = 3;
+        let page2 = query_events(trimmed, base, &unfiltered(Some(cursor), 4));
+        let resumed: Vec<Timestamp> = page2.events.iter().map(|event| event.ts).collect();
+        assert_eq!(
+            resumed,
+            (4..8).map(ts).collect::<Vec<_>>(),
+            "resume yields event 4 onward: no repeat of 0-3, no skip",
+        );
+    }
+
+    #[test]
+    fn a_cursor_round_trips_through_its_opaque_token() {
+        let cursor = Cursor { ts: ts(7), seq: 42 };
+        assert_eq!(
+            Cursor::from_token(&cursor.to_token()),
+            Some(cursor),
+            "a token decodes back to the cursor it came from",
+        );
+        // Malformed tokens are rejected, not coerced: the old cursor was a bare
+        // integer, so that shape must no longer parse (issue #208).
+        for malformed in ["", "999999", "1.2", "1.2.3.4", "a.b.c"] {
+            assert_eq!(
+                Cursor::from_token(malformed),
+                None,
+                "`{malformed}` is not a valid cursor token",
+            );
+        }
     }
 
     #[test]

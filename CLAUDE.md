@@ -298,9 +298,11 @@ than silent; the client still recovers it from the cursor on reconnect (issue #1
 filtered by `channel`, `role` (sent by), `agent` (a role's activity timeline), `kind`
 (a comma-separated set keeps several kinds in one query, e.g.
 `kind=message,ledger,verification`, issue #125),
-`task`, and `since`, ordered by `ts` then log
-position, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
-under concurrent writes (issue #12); `summary=true` returns the rolling-summary
+`task`, and `since`, ordered by `ts` then a per-event
+sequence, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
+under concurrent writes and a future log trim: it carries a prune-stable `(ts, seq)`
+key, not a log index, so compaction or pruning never leaves a cursor pointing at the
+wrong event (issues #12, #208); `summary=true` returns the rolling-summary
 compaction instead (issue #19): the older events folded into bounded aggregates
 (counts by sender, message kind, and lifecycle state, plus a capped digest of recent
 orders and artifacts and a one-line headline) plus the recent raw `tail` sized by
