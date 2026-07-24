@@ -98,6 +98,42 @@ fn general_note_on(events: &[Value], channel: &str, body: &str) -> bool {
     })
 }
 
+/// Whether any `note` from the General reached `channel`.
+fn general_note_reached(events: &[Value], channel: &str) -> bool {
+    events.iter().any(|event| {
+        event["from"]["kind"] == "general"
+            && event["channel"] == channel
+            && event["kind"]["data"]["kind"] == "note"
+    })
+}
+
+/// Posts a claim to the ledger so a role holds a task, standing in for the
+/// agent that would claim it, to set up a reassignment.
+fn claim(port: u16, task: &str, owner: &str, state: &str) {
+    ureq::post(&format!("{}/ledger", base_url(port)))
+        .set("content-type", "application/json")
+        .send_string(
+            &serde_json::json!({ "task": task, "owner": owner, "state": state, "title": "login flow" })
+                .to_string(),
+        )
+        .expect("the broker accepts the claim");
+}
+
+/// The role that owns `task` in the ledger, if any.
+fn ledger_owner(port: u16, task: &str) -> Option<String> {
+    let text = ureq::get(&format!("{}/ledger", base_url(port)))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let view: Value = serde_json::from_str(&text).unwrap();
+    view["tasks"]
+        .as_array()?
+        .iter()
+        .find(|item| item["task"] == task)
+        .and_then(|item| item["owner"].as_str().map(str::to_owned))
+}
+
 #[test]
 fn the_general_briefs_the_commander_a_role_and_all_units() {
     let port = start_broker();
@@ -145,5 +181,68 @@ fn a_brief_to_an_unroutable_target_fails_cleanly() {
     assert!(
         messages(port).is_empty(),
         "no message is sent when the target does not resolve",
+    );
+}
+
+#[test]
+fn the_general_reassigns_an_in_flight_task_and_informs_both_roles_and_the_commander() {
+    let port = start_broker();
+
+    // backend holds an in-flight task.
+    claim(port, "login", "backend", "in_progress");
+
+    // The General reassigns it to frontend (issue #42, the direct override's second
+    // half).
+    let out = stdout_of(
+        crew_general(port, &["reassign", "login", "--to", "frontend"]),
+        "reassign",
+    );
+    assert!(
+        out.contains("frontend") && out.contains("backend"),
+        "the confirmation names both roles: {out}",
+    );
+
+    // The work moved cleanly: the ledger now shows frontend as the owner.
+    assert_eq!(
+        ledger_owner(port, "login").as_deref(),
+        Some("frontend"),
+        "the ledger owner moved from backend to frontend",
+    );
+
+    // Both roles and the commander are informed, each as a General note.
+    let events = messages(port);
+    assert!(
+        general_note_reached(&events, "@backend"),
+        "the old owner is told to hand off: {events:?}",
+    );
+    assert!(
+        general_note_reached(&events, "@frontend"),
+        "the new owner is told to pick it up: {events:?}",
+    );
+    assert!(
+        general_note_reached(&events, "@commander"),
+        "the commander is informed of the reassignment: {events:?}",
+    );
+}
+
+#[test]
+fn reassigning_a_task_no_one_holds_fails_cleanly() {
+    let port = start_broker();
+
+    // No one holds `ghost`, so there is nothing in flight to reassign.
+    let output = crew_general(port, &["reassign", "ghost", "--to", "frontend"]);
+    assert!(
+        !output.status.success(),
+        "reassigning an unheld task is refused, not applied",
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("nothing in flight"),
+        "the error explains there is nothing to reassign: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    // The reassignment failed before any notice, so no note was posted.
+    assert!(
+        messages(port).is_empty(),
+        "a refused reassignment posts no notes",
     );
 }

@@ -16,8 +16,11 @@ keep the task) and `crew belay <role>` (halt and re-task); the role honors the
 directive at once (see `docs/communication.md`, command and control). You can also
 **command a role directly**, bypassing the commander, with `crew command <role> "<order>"`
 (issue #42): the specialist gets the order and the commander is informed rather than
-bypassed silently, so the chain of command stays intact. Briefing the commander stays the
-default; the direct override is explicit. A brake and a
+bypassed silently, so the chain of command stays intact. You can also **reassign an
+in-flight task** from one role to another with `crew reassign <task> --to <role>` (issue
+#42): it moves the task's owner in the work ledger and tells the old owner, the new owner,
+and the commander, so work in progress changes hands cleanly. Briefing the commander stays
+the default; the direct override is explicit. A brake and a
 kill switch gate the crew's work: `crew pause [role]` and `crew resume [role]` gate one
 role or the whole crew, and `crew standdown` halts every role at once and preserves the
 state, so the crew is recoverable. A gated role pulls no new work until you lift it; the

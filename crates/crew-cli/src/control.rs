@@ -1,5 +1,6 @@
-//! The General's operator-facing sends: the free-form `crew brief`, and the
-//! steering directives `crew redirect`, `crew belay`, and `crew command`.
+//! The General's operator-facing sends: the free-form `crew brief`, the
+//! steering directives `crew redirect`, `crew belay`, and `crew command`, and
+//! the task reassignment `crew reassign`.
 //!
 //! `crew brief` is the General's plain send (issue #118): a free-form `note` to
 //! the commander by default, a named role, or a channel (`all-units` or a
@@ -20,7 +21,9 @@
 //! specialist itself, bypassing the commander's fan-out, and the commander is
 //! informed rather than bypassed silently, so the chain of command stays
 //! intact. The default (brief the commander) is unchanged; the override is
-//! explicit.
+//! explicit. `crew reassign` is its other half: the General moves an in-flight
+//! task from one role to another in the work ledger, notifying both roles and
+//! the commander, so work in progress changes hands cleanly (issue #42).
 //!
 //! All post as the General, so unlike the agent shim they need no role card:
 //! the broker address comes from `--broker`, else the `CREW_BROKER_*`
@@ -155,6 +158,170 @@ pub fn command(
     Ok(())
 }
 
+/// Reassigns an in-flight task from its current owner to `to`, the General's
+/// authoritative override, and notifies both roles and the commander (issue
+/// #42).
+///
+/// This is the second half of the direct override: where [`command`] hands one
+/// role a fresh order, this **moves work already in flight**. It POSTs to the
+/// broker's `/ledger/reassign`, which moves the held task's owner (overriding
+/// the ledger's one-owner invariant, preserving the task's state) and publishes
+/// a `ledger` event, so the change is authoritative on the stream. It then
+/// posts a note to each party so no one is surprised: the old owner is told to
+/// hand the work off, the new owner to pick it up, and the commander that the
+/// General moved it, unless the commander is one of the two roles (it is
+/// already notified as a party). `from`, when given, guards a stale view: the
+/// broker refuses the move if that role no longer holds the task.
+///
+/// # Errors
+/// Returns an error if `to` (or `from`) is not a plain role name, the broker
+/// configuration is invalid, the broker refuses the reassignment (the task is
+/// not held, is held by a role other than `from`, or is already owned by `to`),
+/// or a notification cannot be posted.
+pub fn reassign(
+    broker: Option<&str>,
+    task: &str,
+    to: &str,
+    from: Option<&str>,
+    commander: Option<&str>,
+) -> Result<()> {
+    let to = plain_role(to);
+    let to_channel = role_channel(&to, "reassign to")?;
+    let from = from.map(plain_role);
+    let base = resolve_base(broker)?;
+
+    // Move the ledger owner authoritatively; the broker returns who held it and
+    // the state the task keeps, so the notes are precise.
+    let outcome = post_reassign(&base, task, &to, from.as_deref())?;
+    let previous_owner = outcome.previous_owner;
+
+    // Notify the old owner to hand off, and the new owner to pick the work up.
+    let old_channel = role_channel(&previous_owner, "notify")?;
+    let old_note = general_note(&reassign_old_owner_notice(task, &to));
+    post_message(
+        &base,
+        old_channel.name().as_str(),
+        &old_note,
+        "old-owner notice",
+    )?;
+
+    let new_note = general_note(&reassign_new_owner_notice(
+        task,
+        &previous_owner,
+        &outcome.state,
+    ));
+    post_message(
+        &base,
+        to_channel.name().as_str(),
+        &new_note,
+        "new-owner notice",
+    )?;
+
+    // Inform the commander, unless it is one of the two parties (already notified).
+    let commander = default_commander(commander);
+    if commander.eq_ignore_ascii_case(&previous_owner) || commander.eq_ignore_ascii_case(&to) {
+        println!("reassigned `{task}` from {previous_owner} to {to}");
+        return Ok(());
+    }
+    let commander_channel = role_channel(&commander, "inform")?;
+    let notice = general_note(&reassign_commander_notice(task, &previous_owner, &to));
+    post_message(
+        &base,
+        commander_channel.name().as_str(),
+        &notice,
+        "commander notice",
+    )?;
+    println!("reassigned `{task}` from {previous_owner} to {to}; informed {commander}");
+    Ok(())
+}
+
+/// What the broker reported for a reassignment: who held the task, and the
+/// state it kept across the move.
+struct ReassignOutcome {
+    /// The role that held the task before the reassignment.
+    previous_owner: String,
+    /// The task's state (`claimed` / `in_progress` / `blocked`), for the new
+    /// owner's notice.
+    state: String,
+}
+
+/// POSTs a reassignment to the broker's `/ledger/reassign`, returning who held
+/// the task and its preserved state, or surfacing the broker's refusal.
+fn post_reassign(base: &str, task: &str, to: &str, from: Option<&str>) -> Result<ReassignOutcome> {
+    let mut body = json!({ "task": task, "to": to });
+    if let Some(from) = from {
+        body["from"] = json!(from);
+    }
+    let url = format!("{base}/ledger/reassign");
+    let response = match ureq::post(&url)
+        .set("content-type", "application/json")
+        .send_string(&body.to_string())
+    {
+        Ok(response) => response,
+        // The broker answered with a typed 4xx/5xx (a stale view, or nothing to move).
+        Err(ureq::Error::Status(code, response)) => {
+            let reason = broker_error(response).unwrap_or_else(|| format!("HTTP {code}"));
+            return Err(eyre!("the broker refused the reassignment: {reason}"));
+        }
+        // A transport error means the broker is unreachable.
+        Err(err) => {
+            return Err(err).wrap_err_with(|| {
+                format!("could not reach the broker at {base}; is `crewd` running?")
+            });
+        }
+    };
+    let text = response
+        .into_string()
+        .wrap_err("could not read the reassignment response")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).wrap_err("could not parse the reassignment response")?;
+    let previous_owner = value["from"]
+        .as_str()
+        .ok_or_else(|| eyre!("the reassignment response omitted the previous owner"))?
+        .to_owned();
+    let state = value["state"].as_str().unwrap_or_default().to_owned();
+    Ok(ReassignOutcome {
+        previous_owner,
+        state,
+    })
+}
+
+/// A `note` payload from the General with `body`.
+fn general_note(body: &str) -> serde_json::Value {
+    json!({ "from": { "kind": "general" }, "kind": "note", "body": body })
+}
+
+/// The note telling the old owner its in-flight task has been reassigned away.
+fn reassign_old_owner_notice(task: &str, new_owner: &str) -> String {
+    format!(
+        "The General reassigned `{task}` to {new_owner}. Hand it off cleanly; you no longer own \
+         it."
+    )
+}
+
+/// The note telling the new owner it now holds the reassigned task, and where
+/// the work stands.
+fn reassign_new_owner_notice(task: &str, previous_owner: &str, state: &str) -> String {
+    let standing = if state.is_empty() {
+        String::new()
+    } else {
+        format!(" (currently `{state}`)")
+    };
+    format!(
+        "The General reassigned `{task}` to you, from {previous_owner}. Pick it up where it \
+         stands{standing}."
+    )
+}
+
+/// The note informing the commander of a reassignment, so the override is not
+/// silent.
+fn reassign_commander_notice(task: &str, previous_owner: &str, new_owner: &str) -> String {
+    format!(
+        "The General reassigned `{task}` from {previous_owner} to {new_owner}. You are informed, \
+         not bypassed: adjust your plan around it."
+    )
+}
+
 /// Posts a General directive (`kind`, a `redirect` or `belay`) to `role`'s
 /// direct channel with `body`, printing a short confirmation.
 fn direct(broker: Option<&str>, role: &str, kind: &str, body: &str) -> Result<()> {
@@ -256,7 +423,9 @@ fn broker_error(response: ureq::Response) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        brief_target, commander_notice, default_commander, normalize_base, plain_role, role_channel,
+        brief_target, commander_notice, default_commander, normalize_base, plain_role,
+        reassign_commander_notice, reassign_new_owner_notice, reassign_old_owner_notice,
+        role_channel,
     };
 
     #[test]
@@ -338,6 +507,39 @@ mod tests {
         assert!(
             notice.contains("informed, not bypassed"),
             "the commander is informed, not bypassed: {notice}",
+        );
+    }
+
+    #[test]
+    fn the_reassign_notices_name_the_task_the_roles_and_the_standing() {
+        // The old owner is told to hand off, naming the task and the new owner.
+        let old = reassign_old_owner_notice("login", "frontend");
+        assert!(old.contains("login") && old.contains("frontend"));
+        assert!(
+            old.contains("Hand it off") && old.contains("no longer own"),
+            "the old owner is told to hand off: {old}",
+        );
+
+        // The new owner is told it now holds the task, from whom, and where it stands.
+        let new = reassign_new_owner_notice("login", "backend", "in_progress");
+        assert!(new.contains("login") && new.contains("backend") && new.contains("in_progress"));
+        assert!(
+            new.contains("Pick it up"),
+            "the new owner is told to pick it up: {new}",
+        );
+        // With no known state, the notice still reads cleanly (no dangling parens).
+        let stateless = reassign_new_owner_notice("login", "backend", "");
+        assert!(
+            !stateless.contains("()") && !stateless.contains("``"),
+            "a missing state leaves no empty standing: {stateless}",
+        );
+
+        // The commander notice names both roles and says it is informed, not bypassed.
+        let commander = reassign_commander_notice("login", "backend", "frontend");
+        assert!(commander.contains("backend") && commander.contains("frontend"));
+        assert!(
+            commander.contains("informed, not bypassed"),
+            "the commander is informed, not bypassed: {commander}",
         );
     }
 }

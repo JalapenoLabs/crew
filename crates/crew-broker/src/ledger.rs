@@ -14,7 +14,11 @@
 
 use std::collections::BTreeMap;
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use crew_core::{
     ChannelId, Event, EventKind, LedgerEvent, RoleId, Sender, TaskState, Timestamp, ALL_UNITS,
 };
@@ -45,6 +49,33 @@ pub(crate) struct Conflict {
     pub holder: RoleId,
     /// The state it holds it in.
     pub state: TaskState,
+}
+
+/// The outcome of a [`reassign`](Ledger::reassign): who held the task and how
+/// it stands after the move.
+struct Reassignment {
+    /// The role that held the task before the reassignment.
+    previous_owner: RoleId,
+    /// The state the task keeps across the move.
+    state: TaskState,
+    /// The task's title, carried onto the new owner.
+    title: String,
+}
+
+/// Why a [`reassign`](Ledger::reassign) cannot proceed.
+enum ReassignError {
+    /// The task is absent or done, so there is nothing in flight to reassign.
+    NotHeld,
+    /// A `from` guard did not match the task's current holder (a stale view).
+    Mismatch {
+        /// The role that actually holds the task.
+        holder: RoleId,
+    },
+    /// The task is already owned by the target role, so the move is a no-op.
+    AlreadyOwned {
+        /// The role that already owns the task.
+        owner: RoleId,
+    },
 }
 
 impl Ledger {
@@ -88,6 +119,64 @@ impl Ledger {
         Ok(())
     }
 
+    /// Moves a held `task`'s owner to `to`, the General's authoritative
+    /// override (issue #42).
+    ///
+    /// Unlike [`set`](Ledger::set), this **overrides** the one-owner invariant:
+    /// it takes an in-flight task from its current holder. The task keeps its
+    /// state and title, so the work moves in place rather than restarting.
+    /// Returns the [`Reassignment`] (the previous owner and the preserved state
+    /// and title), so the caller can publish the change and notify the parties.
+    ///
+    /// `from`, when given, is a guard against a stale view: the move is refused
+    /// unless that role is the task's current holder.
+    ///
+    /// # Errors
+    /// Returns a [`ReassignError`] if `task` is not held (absent or done), if
+    /// `from` is given but is not the current holder, or if `to` already owns
+    /// it (nothing to move).
+    fn reassign(
+        &mut self,
+        task: &str,
+        to: &RoleId,
+        from: Option<&RoleId>,
+    ) -> Result<Reassignment, ReassignError> {
+        // Read the current holder and validate the move before mutating, so a
+        // refused reassignment leaves the ledger untouched.
+        let (previous_owner, state, title) = {
+            let entry = self.tasks.get(task).ok_or(ReassignError::NotHeld)?;
+            if !entry.state.is_held() {
+                return Err(ReassignError::NotHeld);
+            }
+            if let Some(from) = from {
+                if &entry.owner != from {
+                    return Err(ReassignError::Mismatch {
+                        holder: entry.owner.clone(),
+                    });
+                }
+            }
+            if &entry.owner == to {
+                return Err(ReassignError::AlreadyOwned {
+                    owner: entry.owner.clone(),
+                });
+            }
+            (entry.owner.clone(), entry.state, entry.title.clone())
+        };
+        self.tasks.insert(
+            task.to_owned(),
+            LedgerEntry {
+                title: title.clone(),
+                owner: to.clone(),
+                state,
+            },
+        );
+        Ok(Reassignment {
+            previous_owner,
+            state,
+            title,
+        })
+    }
+
     /// The ledger as a wire view: every task, sorted by key.
     fn view(&self) -> LedgerView {
         LedgerView {
@@ -105,9 +194,12 @@ impl Ledger {
     }
 }
 
-/// The ledger routes: set a task's state, and read the ledger.
+/// The ledger routes: set a task's state, read the ledger, and reassign a held
+/// task.
 pub(crate) fn routes() -> Router<AppState> {
-    Router::new().route("/ledger", get(list).post(claim))
+    Router::new()
+        .route("/ledger", get(list).post(claim))
+        .route("/ledger/reassign", post(reassign))
 }
 
 /// The `GET /ledger` response: the current ledger.
@@ -197,6 +289,109 @@ async fn claim(
     Ok(Json(view))
 }
 
+/// The `POST /ledger/reassign` body: the General moving a task to a new owner.
+#[derive(Debug, Deserialize)]
+struct ReassignRequest {
+    /// The task key to reassign.
+    task: String,
+    /// The role to move the task to.
+    to: String,
+    /// The role the task is expected to be held by, a guard against a stale
+    /// view; optional.
+    #[serde(default)]
+    from: Option<String>,
+}
+
+/// The `POST /ledger/reassign` response: the move that happened.
+#[derive(Debug, Serialize)]
+struct ReassignView {
+    /// The task reassigned.
+    task: String,
+    /// The role that held it before the move.
+    from: RoleId,
+    /// The role that owns it now.
+    to: RoleId,
+    /// The state the task kept across the move.
+    state: TaskState,
+    /// The task's title.
+    title: String,
+}
+
+/// `POST /ledger/reassign`: move a held task to a new owner, the General's
+/// authoritative override (issue #42).
+///
+/// Unlike a claim, this overrides the one-owner invariant to take work from its
+/// current holder, and preserves the task's state and title so the work moves
+/// in place. It publishes a `ledger` event with the new owner, so the change
+/// rides the stream and rebuilds the same ownership as any claim. The response
+/// names the previous owner, so the caller (`crew reassign`) can notify both
+/// roles.
+///
+/// # Errors
+/// Returns a 400 [`ApiError`] on an empty `task` or `to`, or a 409 if the task
+/// is not held, is held by a role other than `from`, or is already owned by
+/// `to`.
+async fn reassign(
+    State(state): State<AppState>,
+    JsonBody(request): JsonBody<ReassignRequest>,
+) -> Result<Json<ReassignView>, ApiError> {
+    let task = request.task.trim();
+    if task.is_empty() {
+        return Err(ApiError::bad_request("task must not be empty"));
+    }
+    let to = request.to.trim();
+    if to.is_empty() {
+        return Err(ApiError::bad_request(
+            "the new owner (`to`) must not be empty",
+        ));
+    }
+    let to = RoleId::new(to);
+    let from = request
+        .from
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(RoleId::new);
+
+    // Hold the ledger lock across the move and the publish, so the stream order
+    // matches the order changes are applied (as the claim path does).
+    let mut ledger = state.ledger();
+    let reassignment = ledger
+        .reassign(task, &to, from.as_ref())
+        .map_err(|err| reassign_conflict(task, &err))?;
+    state.publish(ledger_event(
+        task,
+        &to,
+        reassignment.state,
+        &reassignment.title,
+    ));
+    let view = ReassignView {
+        task: task.to_owned(),
+        from: reassignment.previous_owner,
+        to,
+        state: reassignment.state,
+        title: reassignment.title,
+    };
+    drop(ledger);
+    Ok(Json(view))
+}
+
+/// Renders a [`ReassignError`] as a 409 [`ApiError`] with a precise reason.
+fn reassign_conflict(task: &str, error: &ReassignError) -> ApiError {
+    let reason = match error {
+        ReassignError::NotHeld => {
+            format!("task `{task}` is not held by anyone; there is nothing in flight to reassign")
+        }
+        ReassignError::Mismatch { holder } => {
+            format!("task `{task}` is held by `{holder}`, not the role you named")
+        }
+        ReassignError::AlreadyOwned { owner } => {
+            format!("task `{task}` is already owned by `{owner}`")
+        }
+    };
+    ApiError::conflict(reason)
+}
+
 /// A ledger change as a first-class stream event, from the owner to
 /// `all-units`.
 fn ledger_event(task: &str, owner: &RoleId, state: TaskState, title: &str) -> Event {
@@ -249,6 +444,24 @@ mod tests {
             .iter()
             .find(|item| item["task"] == task)
             .and_then(|item| item["owner"].as_str().map(str::to_owned))
+    }
+
+    /// Posts a reassignment to `/ledger/reassign`, returning the status and
+    /// body.
+    async fn reassign_request(state: &AppState, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ledger/reassign")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = api::build(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     #[tokio::test]
@@ -343,5 +556,127 @@ mod tests {
         assert!(TaskState::InProgress.is_held());
         assert!(TaskState::Blocked.is_held());
         assert!(!TaskState::Done.is_held());
+    }
+
+    #[tokio::test]
+    async fn a_reassignment_moves_a_held_task_to_a_new_owner() {
+        let state = AppState::new(Config::default());
+
+        // backend claims and starts login.
+        request(
+            &state,
+            "POST",
+            json!({ "task": "login", "owner": "backend", "state": "in_progress", "title": "login flow" }),
+        )
+        .await;
+
+        // The General reassigns the in-flight task to frontend.
+        let mut stream = state.broadcast.subscribe();
+        let (status, view) =
+            reassign_request(&state, json!({ "task": "login", "to": "frontend" })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            view["from"], "backend",
+            "the response names the previous owner"
+        );
+        assert_eq!(view["to"], "frontend");
+        assert_eq!(
+            view["state"], "in_progress",
+            "the task keeps its state across the move"
+        );
+        assert_eq!(view["title"], "login flow", "the title carries over");
+
+        // The ledger now shows frontend as the owner, still in_progress.
+        let (_, ledger) = request(&state, "GET", Value::Null).await;
+        assert_eq!(owner_of(&ledger, "login").as_deref(), Some("frontend"));
+
+        // A `ledger` event rode the stream with the new owner and preserved state, so a
+        // consumer reconstructs the same ownership.
+        let event = stream.try_recv().unwrap().event;
+        let EventKind::Ledger(moved) = event.kind else {
+            panic!(
+                "the reassignment publishes a ledger event, got {:?}",
+                event.kind
+            );
+        };
+        assert_eq!(moved.owner.as_str(), "frontend");
+        assert_eq!(moved.state, TaskState::InProgress);
+    }
+
+    #[tokio::test]
+    async fn reassigning_an_unheld_task_is_refused() {
+        let state = AppState::new(Config::default());
+
+        // An absent task has nothing in flight to move.
+        let (status, body) =
+            reassign_request(&state, json!({ "task": "ghost", "to": "frontend" })).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("nothing in flight"),
+            "refusal names the reason: {body}"
+        );
+
+        // A done task is likewise not in flight, so it is not reassignable.
+        request(&state, "POST", json!({ "task": "api", "owner": "backend" })).await;
+        request(
+            &state,
+            "POST",
+            json!({ "task": "api", "owner": "backend", "state": "done" }),
+        )
+        .await;
+        let (status, _) =
+            reassign_request(&state, json!({ "task": "api", "to": "frontend" })).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a done task has nothing in flight to reassign"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_from_guard_that_does_not_match_the_holder_is_refused() {
+        let state = AppState::new(Config::default());
+        request(&state, "POST", json!({ "task": "db", "owner": "backend" })).await;
+
+        // The General's view is stale: it thinks qa holds `db`, but backend does.
+        let (status, body) = reassign_request(
+            &state,
+            json!({ "task": "db", "to": "frontend", "from": "qa" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"].as_str().unwrap().contains("backend"),
+            "the refusal names the real holder: {body}"
+        );
+
+        // The move is refused, so the ledger is untouched.
+        let (_, ledger) = request(&state, "GET", Value::Null).await;
+        assert_eq!(owner_of(&ledger, "db").as_deref(), Some("backend"));
+    }
+
+    #[tokio::test]
+    async fn reassigning_to_the_current_owner_is_refused_as_a_no_op() {
+        let state = AppState::new(Config::default());
+        request(
+            &state,
+            "POST",
+            json!({ "task": "auth", "owner": "backend" }),
+        )
+        .await;
+
+        let (status, body) =
+            reassign_request(&state, json!({ "task": "auth", "to": "backend" })).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("already owned by `backend`"),
+            "the refusal explains it is already owned: {body}"
+        );
     }
 }

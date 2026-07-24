@@ -169,9 +169,18 @@ notice, since it is the addressee. `--scope` and `--acceptance` fill the order's
 `--commander` names the commander to inform (default `commander`).
 
 This is the deliberate override, not the default: briefing the commander (`Channel::resolve`
-above) is unchanged, and `crew command` is the explicit way to reach past it. Reassigning an
-in-flight task from one role to another, updating the work ledger, is the override's other
-half; it lands once the work ledger (issue #46) exists to reassign against.
+above) is unchanged, and `crew command` is the explicit way to reach past it.
+
+**`crew reassign <task> --to <role>`** is the override's other half: the General moves an
+in-flight task from one role to another in the work ledger (issue #45). It POSTs to
+`/ledger/reassign`, which overrides the ledger's one-owner rule to take a held task from its
+current holder, keeps the task's state so the work moves in place, and publishes a `ledger`
+event with the new owner so the change is authoritative on the stream. It then posts a note to
+each party: the old owner is told to hand off, the new owner to pick the work up, and the
+commander that the General moved it (unless the commander is one of the two roles). An optional
+`--from <role>` guards against a stale view: the broker refuses the move unless that role still
+holds the task, and it also refuses a task no one holds (nothing in flight) or one the target
+already owns, surfacing the conflict rather than silently misfiring.
 
 ## Secret scrubbing
 

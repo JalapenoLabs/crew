@@ -85,8 +85,9 @@ it.
   risky actions; pause, resume, and emergency stand-down per role and crew-wide
   (`crew pause` / `crew resume` / `crew standdown`, issue #41, done); direct override of
   the commander (`crew command <role>`, issue #42: the General orders a specialist itself,
-  bypassing the commander while keeping it informed; reassigning an in-flight task against
-  the work ledger awaits issue #46).
+  bypassing the commander while keeping it informed; and `crew reassign` moves an in-flight
+  task from one role to another against the work ledger, informing both roles and the
+  commander, done).
 - **Coordination Robustness.** Worktree-per-role isolation (`worktrees` in the crew
   config, issue #43, done) with an integration step to follow (`crew integrate`, issue #44,
   done: merge each role's `crew/<role>` branch into one branch, surface conflicts rather than
