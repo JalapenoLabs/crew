@@ -34,6 +34,25 @@ impl Timestamp {
     pub fn to_datetime(self) -> DateTime<Utc> {
         self.0
     }
+
+    /// The instant as whole seconds and sub-second nanoseconds since the Unix
+    /// epoch.
+    ///
+    /// The lossless inverse of [`from_unix`](Timestamp::from_unix), so a
+    /// timestamp can be encoded as two integers (for example an opaque
+    /// pagination cursor) without leaking the chrono type or its string form.
+    #[must_use]
+    pub fn to_unix(self) -> (i64, u32) {
+        (self.0.timestamp(), self.0.timestamp_subsec_nanos())
+    }
+
+    /// Rebuilds a timestamp from [`to_unix`](Timestamp::to_unix) parts.
+    ///
+    /// Returns `None` if `secs` is outside the representable range.
+    #[must_use]
+    pub fn from_unix(secs: i64, nanos: u32) -> Option<Self> {
+        DateTime::from_timestamp(secs, nanos).map(Self)
+    }
 }
 
 impl From<DateTime<Utc>> for Timestamp {

@@ -104,9 +104,10 @@ The broker serves it both ways under one filter, so the live and historical view
 always agree (issues #12, #31). Historically, `GET /history` reads the past: filters
 (`channel`, `role` sent-by, `agent` a role's timeline, `kind` (a comma-separated set
 keeps several kinds in one query, issue #125), `task`, `since`),
-deterministic ordering by `ts` then log position, and cursor pagination that stays
-stable under concurrent writes, so a consumer or a late joiner reads the past without
-holding the stream open. `summary=true` returns the rolling compaction instead (issue
+deterministic ordering by `ts` then a per-event sequence, and opaque cursor pagination
+that stays stable under concurrent writes and a future log trim (the cursor is a
+prune-stable `(ts, seq)` key, not a log index, issue #208), so a consumer or a late
+joiner reads the past without holding the stream open. `summary=true` returns the rolling compaction instead (issue
 #19): the older events folded into bounded aggregates plus the recent raw tail, so
 joining a long-running conversation costs bounded context rather than the full log.
 Live, `GET /stream` delivers the same view over SSE, narrowed by the same filter

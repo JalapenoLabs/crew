@@ -90,8 +90,7 @@ async fn briefing(
             after: None,
             limit: usize::MAX,
         })
-        .map(|page| page.events)
-        .unwrap_or_default();
+        .events;
     let summary = summarize(&events);
 
     // The whole decision board: the crew's shared, curated memory a new role needs.

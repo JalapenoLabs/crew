@@ -60,6 +60,6 @@ pub use serve::{run, run_until, serve};
 pub use serve_error::ServeError;
 pub use state::{AppState, Sequenced};
 pub use store::{
-    Durability, EventFilter, EventKindTag, EventPage, EventQuery, InvalidCursor, Liveness,
-    LogStore, MemoryStore, RoleStatus, Roster, Storage,
+    Cursor, Durability, EventFilter, EventKindTag, EventPage, EventQuery, Liveness, LogStore,
+    MemoryStore, RoleStatus, Roster, Storage,
 };
