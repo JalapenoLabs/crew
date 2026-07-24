@@ -45,9 +45,14 @@ Two rules keep a unit healthy:
 Ownership by directory sets the lanes; the **work ledger** enforces them on live work
 (issue #45). A role claims a task before it starts (`crew_claim`, or the shim `crew
 claim`) and moves the claim to `in_progress`, `blocked`, and `done` as it goes, so two
-roles never grab the same work or edit the same file blind. The broker keeps one owner
-per task and refuses a conflicting claim, naming the holder, so a clash surfaces rather
-than races. `crew_ledger` shows who holds what. See `docs/observability.md`.
+roles never grab the same work or edit the same file blind. Issuing an order seeds the
+claim for the recipient automatically (`crew_order`, owner = the ordered role, state =
+`claimed`, keyed by the order title), so assigned-but-not-started work already shows on
+the ledger without a manual claim (issue #184); the recipient then moves that claim
+forward as it works. The seed is non-destructive: it never regresses an in-flight claim
+or steals a task another role holds. The broker keeps one owner per task and refuses a
+conflicting claim, naming the holder, so a clash surfaces rather than races. `crew_ledger`
+shows who holds what. See `docs/observability.md`.
 
 A crew is described by a declarative config (`crew_core::CrewConfig`, issue #25): the
 roles and the lane each owns, the model tier each runs (issue #53), the runtime each runs

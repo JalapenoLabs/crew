@@ -629,7 +629,9 @@ async fn joining_a_long_conversation_costs_bounded_context() {
     // A late joiner asks for the rolling summary with a small tail.
     let view = broker.get_json("/history?summary=true&limit=10").await;
 
-    // The tail is bounded to the requested size, not the whole 201-event log.
+    // The tail is bounded to the requested size, not the whole 202-event log (the
+    // 200 notes, the order, and the ledger claim the order auto-seeds, issue
+    // #184).
     let tail = view["tail"].as_array().unwrap();
     assert_eq!(
         tail.len(),
@@ -637,8 +639,10 @@ async fn joining_a_long_conversation_costs_bounded_context() {
         "the joiner reads a bounded tail, not the full log"
     );
 
-    // The rest is compacted into aggregates that stand in for the older events.
-    assert_eq!(view["summary"]["event_count"], backlog + 1 - 10);
+    // The rest is compacted into aggregates that stand in for the older events: the
+    // 200 notes plus the order and its auto-seeded ledger claim (issue #184),
+    // less the tail.
+    assert_eq!(view["summary"]["event_count"], backlog + 2 - 10);
     assert_eq!(
         view["summary"]["senders"][0]["name"], "backend",
         "the busiest sender leads the tally",

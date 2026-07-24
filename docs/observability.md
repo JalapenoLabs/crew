@@ -248,6 +248,14 @@ surfaced rather than raced. A task is **held** while `claimed`, `in_progress`, o
 `blocked`; `done` frees it, so a finished task may be claimed again. Only the owner may
 move its own task. `GET /ledger` reads the live ownership, sorted by key.
 
+An order seeds a claim for its recipient automatically (issue #184): when an `order`
+message is posted to a role's direct channel, the broker claims the work for that role
+(owner = the ordered role, state = `claimed`, keyed and titled by the order title), so
+assigned-but-not-started work shows on the ledger without a manual claim. The seed is
+non-destructive: it claims only when no one currently holds the task, so a re-order never
+regresses an in-flight claim and never steals a task another role holds (the General uses
+`crew reassign` for that). It rides the stream like any claim.
+
 Every change also rides the stream as a `ledger` event (from the owner, to `all-units`,
 filterable with `history?kind=ledger`), so the ledger is reconstructable from the log
 and the cockpit can render it. Agents use the ledger through `crew_claim` and

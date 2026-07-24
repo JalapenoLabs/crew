@@ -20,7 +20,8 @@ use axum::{
     Json, Router,
 };
 use crew_core::{
-    ChannelId, Event, EventKind, LedgerEvent, RoleId, Sender, TaskState, Timestamp, ALL_UNITS,
+    Channel, ChannelId, Event, EventKind, LedgerEvent, MessageKind, RoleId, Sender, TaskState,
+    Timestamp, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +118,14 @@ impl Ledger {
             },
         );
         Ok(())
+    }
+
+    /// Whether `task` is currently held by some role: present and in any state
+    /// but [`Done`](TaskState::Done).
+    fn is_held(&self, task: &str) -> bool {
+        self.tasks
+            .get(task)
+            .is_some_and(|entry| entry.state.is_held())
     }
 
     /// Moves a held `task`'s owner to `to`, the General's authoritative
@@ -390,6 +399,50 @@ fn reassign_conflict(task: &str, error: &ReassignError) -> ApiError {
         }
     };
     ApiError::conflict(reason)
+}
+
+/// Seeds a ledger claim for an order's recipient, so assigned-but-not-started
+/// work appears on the ledger without a manual claim (issue #184).
+///
+/// An order (`crew_order`, and the General's `crew command`) assigns scoped
+/// work to one role on its direct channel; this claims that work for the
+/// recipient, keyed and titled by the order's title, so `crew_ledger` shows it
+/// `claimed` before the role starts. The message-publish path calls it for
+/// every message; it acts only on an order to a single role.
+///
+/// It is non-destructive and best-effort: it seeds only when no one currently
+/// holds the task, so a re-order never regresses an in-progress claim and never
+/// steals another role's held work (the General uses `crew reassign` for that).
+/// A fresh claim publishes a `ledger` event, so the seed rides the stream like
+/// any claim.
+pub(crate) fn seed_order_claim(state: &AppState, event: &Event) {
+    // Only an order carries a title to claim, and only a direct channel names the
+    // one recipient to own it.
+    let EventKind::Message(message) = &event.kind else {
+        return;
+    };
+    let MessageKind::Order { title, .. } = &message.kind else {
+        return;
+    };
+    let Some(Channel::Direct(owner)) = Channel::parse(event.channel.as_str()) else {
+        return;
+    };
+    let key = title.trim();
+    if key.is_empty() {
+        return;
+    }
+
+    // Hold the ledger lock across the check, the claim, and the publish, so the
+    // seed is serialized with any concurrent claim and cannot regress or
+    // clobber one (mirroring the `claim` handler).
+    let mut ledger = state.ledger();
+    if ledger.is_held(key) {
+        return;
+    }
+    // The task is unheld, so the set cannot conflict; publish the seeded claim.
+    if ledger.set(key, &owner, TaskState::Claimed, key).is_ok() {
+        state.publish(ledger_event(key, &owner, TaskState::Claimed, key));
+    }
 }
 
 /// A ledger change as a first-class stream event, from the owner to
@@ -677,6 +730,141 @@ mod tests {
                 .unwrap()
                 .contains("already owned by `backend`"),
             "the refusal explains it is already owned: {body}"
+        );
+    }
+
+    /// The entry keyed by `task` in a ledger view, if present.
+    fn entry_of<'a>(view: &'a Value, task: &str) -> Option<&'a Value> {
+        view["tasks"]
+            .as_array()?
+            .iter()
+            .find(|item| item["task"] == task)
+    }
+
+    /// Posts an order from `from` to `channel` with `title`, driving the ledger
+    /// auto-seed (issue #184).
+    async fn post_order_to(state: &AppState, from: &str, channel: &str, title: &str) -> StatusCode {
+        let body = json!({
+            "from": { "kind": "role", "id": from },
+            "kind": "order",
+            "title": title,
+            "scope": "",
+            "owned_paths": [],
+            "acceptance": "",
+            "body": "",
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/channels/{channel}/messages"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        api::build(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Posts an order from `from` to `role`'s direct channel with `title`.
+    async fn post_order(state: &AppState, from: &str, role: &str, title: &str) -> StatusCode {
+        post_order_to(state, from, &format!("@{role}"), title).await
+    }
+
+    #[tokio::test]
+    async fn an_order_seeds_a_claim_for_the_recipient() {
+        let state = AppState::new(Config::default());
+
+        // The commander orders backend, with no manual claim following (issue #184).
+        assert_eq!(
+            post_order(&state, "commander", "backend", "login flow").await,
+            StatusCode::CREATED,
+        );
+
+        // The ledger already shows backend holding the work, claimed and titled.
+        let (_, view) = request(&state, "GET", Value::Null).await;
+        let entry = entry_of(&view, "login flow").expect("the order seeded a ledger claim");
+        assert_eq!(entry["owner"], "backend");
+        assert_eq!(entry["state"], "claimed");
+        assert_eq!(entry["title"], "login flow");
+    }
+
+    #[tokio::test]
+    async fn a_seeded_claim_rides_the_stream() {
+        let state = AppState::new(Config::default());
+        let mut stream = state.broadcast.subscribe();
+
+        post_order(&state, "commander", "backend", "login flow").await;
+
+        // The order message, then the seeded ledger claim.
+        let order = stream.try_recv().unwrap().event;
+        assert!(matches!(order.kind, EventKind::Message(_)));
+        let seeded = stream.try_recv().unwrap().event;
+        let EventKind::Ledger(claim) = seeded.kind else {
+            panic!("expected a seeded ledger event, got {:?}", seeded.kind);
+        };
+        assert_eq!(claim.owner.as_str(), "backend");
+        assert_eq!(claim.state, TaskState::Claimed);
+        assert_eq!(claim.task, "login flow");
+    }
+
+    #[tokio::test]
+    async fn a_re_order_does_not_regress_an_in_progress_claim() {
+        let state = AppState::new(Config::default());
+
+        // The recipient has already started the work.
+        request(
+            &state,
+            "POST",
+            json!({ "task": "login flow", "owner": "backend", "state": "in_progress",
+                    "title": "login flow" }),
+        )
+        .await;
+
+        // Re-ordering the same title must not reset the in-flight claim to `claimed`.
+        post_order(&state, "commander", "backend", "login flow").await;
+        let (_, view) = request(&state, "GET", Value::Null).await;
+        let entry = entry_of(&view, "login flow").unwrap();
+        assert_eq!(
+            entry["state"], "in_progress",
+            "a re-order leaves an in-flight claim untouched"
+        );
+        assert_eq!(entry["owner"], "backend");
+    }
+
+    #[tokio::test]
+    async fn an_order_does_not_steal_a_task_another_role_holds() {
+        let state = AppState::new(Config::default());
+
+        // qa already holds the work.
+        request(
+            &state,
+            "POST",
+            json!({ "task": "login flow", "owner": "qa", "state": "in_progress" }),
+        )
+        .await;
+
+        // Ordering the same title to backend must not take it from qa; that is a
+        // reassignment the General does explicitly.
+        post_order(&state, "commander", "backend", "login flow").await;
+        let (_, view) = request(&state, "GET", Value::Null).await;
+        assert_eq!(
+            owner_of(&view, "login flow").as_deref(),
+            Some("qa"),
+            "the seed never steals a task another role holds"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_order_broadcast_to_all_units_seeds_no_claim() {
+        let state = AppState::new(Config::default());
+
+        // A broadcast order names no single recipient to own the work.
+        post_order_to(&state, "commander", "all-units", "all hands").await;
+        let (_, view) = request(&state, "GET", Value::Null).await;
+        assert!(
+            view["tasks"].as_array().unwrap().is_empty(),
+            "a broadcast order seeds no claim: {view}"
         );
     }
 }

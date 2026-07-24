@@ -170,6 +170,10 @@ async fn post_message(
     // result to every subscriber, so the response, the log, and every stream
     // agree.
     let sequenced = state.publish(event);
+    // An order assigns scoped work to one role; seed a ledger claim for the
+    // recipient so assigned-but-not-started work shows on the ledger without a
+    // manual claim (issue #184). A no-op for every other message.
+    crate::ledger::seed_order_claim(&state, &sequenced.event);
     Ok((StatusCode::CREATED, Json(sequenced.event)))
 }
 

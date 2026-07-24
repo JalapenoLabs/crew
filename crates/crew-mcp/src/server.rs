@@ -376,7 +376,10 @@ fn messaging_tools() -> Vec<Value> {
                 brief into work. It direct-messages `to` an `order` the specialist can act \
                 on: `title` names the task, `scope` says what is in and out, `owned_paths` \
                 are the paths it owns while working, and `acceptance` is how it is judged \
-                done. `body` adds any freeform detail. Use crew_send for a plain message.",
+                done. `body` adds any freeform detail. The order also claims the task for the \
+                specialist on the work ledger, so assigned work shows up without a manual \
+                crew_claim; the specialist moves that claim forward as it works. Use crew_send \
+                for a plain message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
