@@ -506,9 +506,8 @@ in seconds. The endpoint reuses the existing rolling summary (issue #19) and boa
 So the packet lands in context even if the agent skips the tool, the supervisor also pushes
 it into the agent's opening `claude -p` turn at spawn (issue #122). `RosterClient::briefing`
 fetches the packet and `spawn::boot_command` folds it into the boot prompt after the card
-briefing at the spawn moment (both the eager `Crew::spawn` and the lazy `Fleet`'s
-`AgentLifecycle::spawn`), so it is fetched at spawn rather than provision and is current for
-a lazily started role. It is best-effort: an unreachable broker leaves the agent booting on
+briefing at the spawn moment (the `Fleet`'s `AgentLifecycle::spawn`), so it is fetched at
+spawn rather than provision and is current for a lazily started role. It is best-effort: an unreachable broker leaves the agent booting on
 its card briefing alone (a debug `supervisor.briefing.skipped` log), and a stub command with
 no `-p` prompt is untouched, so `crew_briefing` stays the re-read path. See `docs/roles.md`
 (the briefing packet) and `docs/communication.md` (context management).
@@ -522,21 +521,20 @@ fails loudly if it is missing) and `register_server` records it at user scope
 silently. Registration is one-time and unit-wide: per-agent role and broker ride the
 `CREW_ROLE_CARD` environment the `crew-mcp` child inherits.
 
-`crew_supervisor::Supervisor::up` ties these together into the auto-spawn flow (issue
-#21): register the MCP server, then per resolved role card provision the card,
-register the role on the broker roster, and spawn one `claude -p` process wired to the
-broker. The supervisor owns lifecycle, so it registers a role on start and
-deregisters it on exit (via `RosterClient`), keeping `GET /roster` a true picture of
-the live unit; each process's stdout and stderr are captured and streamed as
-`Captured` lines the activity parser reads (issue #24, below). `Crew::spawn` holds the
-lifecycle mechanics and takes fully-resolved `AgentCommand`s, so it is exercised in
-tests with a stub process instead of a real `claude`. Shutting the crew down kills the
-processes and deregisters every role; a dropped crew still kills its processes.
-The roster of roles comes from the crew config (issue #25), which `up` consumes as
-role cards. Like the lazy `Fleet`, the eager `Crew` owns its worktrees and cleans them
-up on stand-down (`Crew::with_worktrees`, issue #127): `up` takes an optional `CrewConfig`
-and, when it opts into worktree isolation, hands the crew the per-role worktrees so both
-spawn paths isolate and clean up the same way (a failed bring-up removes any it created).
+`crew_supervisor::Supervisor::launch` ties these together into the auto-spawn flow
+(issues #21, #26): register the MCP server (for Claude roles), then per resolved role
+card provision the card and build its spawn command, and hand the fully-resolved agents
+to the lifecycle-managed `Fleet`, the single spawn engine. The `Fleet` owns lifecycle,
+so it registers a role on start and deregisters it on exit (via `RosterClient`), keeping
+`GET /roster` a true picture of the live unit; each process's stdout and stderr are
+captured and streamed as `Captured` lines the activity parser reads (issue #24, below).
+`spawn::prepare` builds fully-resolved `AgentCommand`s, so the process management is
+exercised in tests with stub processes instead of a real `claude`. The roster of roles
+comes from the crew config (issue #25), which `launch` consumes as role cards. The
+`Fleet` owns the per-role worktrees and cleans them up on stand-down
+(`Fleet::with_worktrees`, issue #127): when the config opts into worktree isolation,
+`prepare` creates each role's worktree and hands them to the fleet, so an unchanged
+worktree is removed on stand-down and a failed bring-up removes any already created.
 
 `crew_supervisor::Fleet` manages each agent's lifecycle so idle roles cost nothing and
 crashes recover (issue #22). Each agent runs a state machine on its own driver thread:
@@ -580,8 +578,7 @@ died / recovered): the broker derives `recovered` from a `dead` role coming back
 a twenty-five-minute watchdog, and three recoveries. The activity parser now puts turn
 boundaries on the stream (issue #24), but the watchdog does not yet key on them for precise
 hang-versus-idle discrimination, so by default a quiet agent still parks rather than being
-force-recovered. (Wiring the watchdog to those turn boundaries, and unifying the eager
-`Crew` from #21 into the lifecycle-managed `Fleet`, are later cleanups.)
+force-recovered. (Wiring the watchdog to those turn boundaries is a later cleanup.)
 
 The defibrillator also catches a crew stuck waiting on itself, not just a dead agent
 (issue #48, `crew_supervisor::stall`). A fleet-wide **stall monitor** thread reads a

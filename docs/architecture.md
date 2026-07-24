@@ -98,16 +98,16 @@ command, so it is a one-time, unit-wide step, not per-agent: each agent's broker
 address, role, and lane ride the `CREW_ROLE_CARD` environment its `claude` process
 is launched with, which the `crew-mcp` child inherits.
 
-`crew_supervisor::Supervisor::up` ties this together into the auto-spawn flow (issue
-#21): register the MCP server, then for each resolved role card provision the card,
-register the role on the broker roster, and spawn a `claude -p` process wired to the
-broker. The supervisor owns lifecycle, so it is the authority on liveness: it
-registers a role on start and deregisters it on exit, so `GET /roster` always
-reflects the live unit. Each process's stdout and stderr are captured and streamed as
-`Captured` lines; the fleet's forwarder parses each agent's stdout stream-json into
-`activity` events on the broker, keyed by role (issue #24). The set of roles comes from the
-crew config (issue #25); the supervisor consumes resolved role cards, so the two
-compose without either owning the other's job.
+`crew_supervisor::Supervisor::launch` ties this together into the auto-spawn flow
+(issues #21, #26): register the MCP server, then for each resolved role card provision
+the card and build its spawn command, and hand the resolved agents to the
+lifecycle-managed `Fleet`, the single spawn engine. The fleet owns lifecycle, so it is
+the authority on liveness: it registers a role on start and deregisters it on exit, so
+`GET /roster` always reflects the live unit. Each process's stdout and stderr are
+captured and streamed as `Captured` lines; the fleet's forwarder parses each agent's
+stdout stream-json into `activity` events on the broker, keyed by role (issue #24). The
+set of roles comes from the crew config (issue #25); the supervisor consumes resolved
+role cards, so the two compose without either owning the other's job.
 
 `crew_supervisor::Fleet` manages each agent's lifecycle so idle roles cost nothing
 and crashes recover (issue #22). Each agent runs a small state machine on its own
@@ -155,11 +155,11 @@ role. See `docs/codex.md`.
 (issue #43). With `worktrees` on in the config, the supervisor gives each role its own
 git worktree of each configured repo, on a `crew/<role>` branch, and points the agent's
 working directory at it, so two roles editing the same file at once never corrupt each
-other: git keeps each worktree's index and files separate. The running crew owns the
-worktrees and cleans them up on stand-down, after each agent has stopped, whether it came
-up through the lazy `Fleet` or the eager `Crew` (issue #127): an unchanged worktree is
-removed (its branch, and any commits on it, survive), while one with uncommitted changes
-is kept, since integrating a role's work is a deliberate later step (issue #48).
+other: git keeps each worktree's index and files separate. The running `Fleet` owns the
+worktrees and cleans them up on stand-down, after each agent has stopped (issue #127): an
+unchanged worktree is removed (its branch, and any commits on it, survive), while one with
+uncommitted changes is kept, since integrating a role's work is a deliberate later step
+(issue #48).
 Isolation is opt-in and off by default; a crew with no repos configured runs each role
 in its own scratch directory as before.
 
