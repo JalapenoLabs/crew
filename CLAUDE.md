@@ -276,8 +276,9 @@ graceful drain waits for in-flight connections, yet an SSE subscriber (`/inbox`,
 `/stream`) holds its connection open indefinitely, so after a short grace any still-open
 stream is forced closed and crewd exits promptly rather than hanging on a live watcher
 (issue #204). It keeps state
-behind a swappable `Storage` trait (append, flush, durability, query, roster read/write;
-issue #13): the daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus
+behind a swappable `Storage` trait (append, flush, durability, query, an O(1) `message`
+by-id lookup (issue #273), roster read/write; issue #13): the daemon uses the durable
+`LogStore` (an on-disk append-only JSONL log plus
 an in-memory index, rooted at the state dir), so a restart replays the full log; tests use
 the in-memory `MemoryStore`. `LogStore` persists on a dedicated writer thread, so an append
 never blocks the async runtime under a burst (issue #206): the append indexes in memory and

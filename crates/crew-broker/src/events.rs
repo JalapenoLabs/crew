@@ -219,9 +219,8 @@ fn ensure_order_authorized(request: &PostMessage, commander: &RoleId) -> Result<
 /// front-end and the commander pair the two without parsing the prose body. A
 /// reference to a message that is not a stored question would leave that thread
 /// dangling, so it is rejected here rather than persisted; every other kind
-/// passes untouched. The answerer saw the question before replying, so a valid
-/// reference is already in the log (a linear scan suits the human-rate answer
-/// path).
+/// passes untouched. The lookup is an O(1) [`Storage::message`] by-id read, not
+/// a full-log clone-and-scan (issue #273).
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if the answer's `in_reply_to` does not name an
@@ -233,14 +232,11 @@ fn ensure_answer_references_a_question(
     let MessageKind::Answer { in_reply_to } = &request.kind else {
         return Ok(());
     };
-    let names_a_question = storage.events().iter().any(|event| {
-        matches!(
-            &event.kind,
-            EventKind::Message(message)
-                if message.id == *in_reply_to
-                    && matches!(&message.kind, MessageKind::Question { .. })
-        )
-    });
+    // O(1) by-id lookup rather than cloning and scanning the whole log (issue
+    // #273): the reference must resolve to a stored `question` message.
+    let names_a_question = storage
+        .message(in_reply_to)
+        .is_some_and(|message| matches!(message.kind, MessageKind::Question { .. }));
     if names_a_question {
         Ok(())
     } else {
