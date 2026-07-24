@@ -420,7 +420,12 @@ is a path or a bare name; `repo_paths(config_dir)` resolves it for worktree isol
 (issue #126): an absolute path as-is, else joined under the `workspace` root, which
 defaults to the crew config file's own directory (overridable with the `workspace` field).
 Anchoring to the config, not the shell's cwd, means a name points at the same clone
-wherever `crew up` runs. Each role also carries a `runtime` (issue #128): `to_cards` stamps
+wherever `crew up` runs. `repo_paths` is a pure path join (crew-core is sans-io), so before
+bring-up the supervisor's `prepare` pre-flight validates that every resolved path is an
+existing git repository (`worktree::validate_repos`, issue #164): a typo'd `repos` name or a
+misdirected `workspace` fails fast with one message naming every missing or non-git repo,
+rather than one late per-role failure in `Worktree::create` after some worktrees were
+already made and rolled back. Each role also carries a `runtime` (issue #128): `to_cards` stamps
 it onto the role card, and the supervisor's `agent_command` spawns `claude -p` (MCP tools)
 for a Claude role or `codex exec --dangerously-bypass-approvals-and-sandbox
 --skip-git-repo-check` (wired to the CLI shim) for a Codex role, adapting the card briefing

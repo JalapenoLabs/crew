@@ -78,6 +78,10 @@ Every field is optional and takes a default:
   each role its own git worktree of those repos (on a `crew/<role>` branch), so
   parallel roles never clobber each other's edits (issue #43). An unchanged worktree is
   cleaned up on stand-down; one with uncommitted changes is kept for integration (#48).
+  Before bringing the unit up, the supervisor pre-flight validates that every resolved
+  `repos` path is an existing git repository (issue #164): a typo'd name or a misdirected
+  `workspace` fails fast with one message naming every missing or non-git repo, rather
+  than one role at a time mid-spawn.
 - `lane_enforcement` defaults to `warn`. It sets what happens when a role reaches
   outside its owned paths (issue #46): `warn` reports the crossing to the unit and lets
   the role proceed, `block` reports and refuses the out-of-lane edit, and `off` disables

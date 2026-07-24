@@ -176,6 +176,66 @@ pub(crate) fn clean_all(worktrees: &[Worktree]) {
     }
 }
 
+/// Verifies every path in `repos` is an existing git repository, failing fast
+/// with one message listing all that are missing or not a git repo (issue
+/// #164).
+///
+/// [`repo_paths`](crew_core::CrewConfig::repo_paths) is a pure path join, so a
+/// typo'd `repos` name or a misdirected `workspace` resolves to a path that
+/// does not exist or is not a git repository. Catching them all here, before
+/// any worktree is created, is friendlier than the late, per-role failure in
+/// [`Worktree::create`] that surfaces one at a time after some worktrees have
+/// been made and rolled back. An empty `repos` (isolation off) is a no-op.
+///
+/// # Errors
+/// Returns an error naming every repo that is missing or not a git repository.
+pub(crate) fn validate_repos(repos: &[PathBuf]) -> Result<()> {
+    let problems: Vec<String> = repos
+        .iter()
+        .filter_map(|repo| repo_problem(repo).map(|why| format!("  - {}: {why}", repo.display())))
+        .collect();
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let repos_are = if problems.len() == 1 {
+        "repo is"
+    } else {
+        "repos are"
+    };
+    bail!(
+        "{} configured {repos_are} not usable for worktree isolation:\n{}\n\
+         check the crew config's `repos` and `workspace` so each resolves to an existing \
+         git repository",
+        problems.len(),
+        problems.join("\n"),
+    );
+}
+
+/// Why `repo` cannot be a worktree source, or `None` if it is a git repository.
+fn repo_problem(repo: &Path) -> Option<String> {
+    if !repo.exists() {
+        return Some("no such path".to_owned());
+    }
+    if !is_git_repo(repo) {
+        return Some("not a git repository".to_owned());
+    }
+    None
+}
+
+/// Whether `path` is inside a git repository, the same thing
+/// [`Worktree::create`] needs to add a worktree there.
+///
+/// `rev-parse --git-dir` succeeds inside any git repository and fails
+/// otherwise, so a missing path or a plain directory both read as `false`.
+fn is_git_repo(path: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 /// Runs a git command in `dir`, returning its stdout or an error carrying
 /// stderr.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -196,7 +256,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 mod tests {
     use crew_core::RoleId;
 
-    use super::{git, Worktree};
+    use super::{git, validate_repos, Worktree};
 
     /// A fresh temp directory unique to a test, cleaned on entry.
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -299,5 +359,62 @@ mod tests {
         let second = Worktree::create(&repo, &role, &root.join("docs")).unwrap();
         assert_eq!(second.branch(), "crew/docs");
         assert!(second.path().exists());
+    }
+
+    #[test]
+    fn validate_repos_passes_a_git_repo_and_names_every_bad_one() {
+        let root = scratch("validate");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        // A directory that exists but is not a git repo, and a path that does not
+        // exist at all: the two ways a resolved `repos` entry goes wrong (#164).
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let missing = root.join("missing");
+
+        // A real git repo alone is usable.
+        validate_repos(&[repo.clone()]).expect("a git repo passes pre-flight");
+
+        // Both the missing and the non-git path are reported together, in one error,
+        // while the valid repo is not flagged.
+        let error = validate_repos(&[repo.clone(), plain.clone(), missing.clone()])
+            .expect_err("a missing and a non-git repo fail pre-flight");
+        let message = error.to_string();
+        assert!(
+            message.contains(&missing.display().to_string()) && message.contains("no such path"),
+            "the missing repo is named as missing: {message}",
+        );
+        assert!(
+            message.contains(&plain.display().to_string())
+                && message.contains("not a git repository"),
+            "the non-git repo is named as such: {message}",
+        );
+        assert!(
+            !message.contains(&repo.display().to_string()),
+            "the valid repo is not flagged: {message}",
+        );
+        assert!(
+            message.contains("2 configured repos are not usable"),
+            "the count and plural agree: {message}",
+        );
+    }
+
+    #[test]
+    fn validate_repos_reports_a_single_bad_repo_in_the_singular() {
+        let root = scratch("validate-singular");
+        let missing = root.join("nope");
+        let error = validate_repos(&[missing]).expect_err("one missing repo fails");
+        assert!(
+            error
+                .to_string()
+                .contains("1 configured repo is not usable"),
+            "a lone bad repo reads in the singular: {error}",
+        );
+    }
+
+    #[test]
+    fn validate_repos_is_a_no_op_when_none_are_configured() {
+        validate_repos(&[]).expect("no repos means nothing to validate (isolation off)");
     }
 }

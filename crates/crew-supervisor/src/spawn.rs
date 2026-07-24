@@ -329,9 +329,11 @@ impl Supervisor {
     /// so the same provisioning serves the eager [`up`](Supervisor::up) and
     /// the lifecycle-managed [`launch`](Supervisor::launch).
     /// With `worktrees` on and repos configured, each role works in its own git
-    /// worktree of those repos; the returned worktrees are the ones to clean up
-    /// on stand-down. A failure part-way cleans up the worktrees already
-    /// created.
+    /// worktree of those repos; the resolved repos are pre-flight validated as
+    /// existing git repositories before any worktree is created (issue #164),
+    /// so a missing or non-git repo fails fast with one message. The
+    /// returned worktrees are the ones to clean up on stand-down; a failure
+    /// part-way cleans up the worktrees already created.
     fn prepare(
         &self,
         cards: &[RoleCard],
@@ -345,6 +347,11 @@ impl Supervisor {
             .filter(|config| config.worktrees)
             .map(|config| config.repo_paths(config_dir))
             .unwrap_or_default();
+
+        // Pre-flight: fail fast, before spawning or creating any worktree, if a
+        // configured repo is missing or not a git repository (issue #164). One
+        // message lists every bad repo, rather than one late per-role failure.
+        worktree::validate_repos(&repos)?;
 
         let mut prepared = Vec::with_capacity(cards.len());
         let mut worktrees = Vec::new();

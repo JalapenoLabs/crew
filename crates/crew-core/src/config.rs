@@ -299,9 +299,11 @@ impl CrewConfig {
     /// Each entry is a path or a name (the `repos` field, see
     /// `docs/config.md`): an absolute path is taken as-is, and anything else, a
     /// bare name like `api` or a relative path like `../api`, resolves under
-    /// the [`workspace_root`](Self::workspace_root). Purely a path join, so
-    /// a repo that does not exist is caught later, when the worktree is
-    /// created, with a clear error rather than here.
+    /// the [`workspace_root`](Self::workspace_root). Purely a path join, since
+    /// this crate is sans-io; the supervisor pre-flight validates that each
+    /// resolved path is an existing git repository before bring-up (issue
+    /// #164), so a typo'd name or a misdirected `workspace` fails fast rather
+    /// than mid-spawn.
     #[must_use]
     pub fn repo_paths(&self, config_dir: &Path) -> Vec<PathBuf> {
         let root = self.workspace_root(config_dir);
