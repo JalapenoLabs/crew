@@ -715,6 +715,52 @@ async fn events_survive_a_broker_restart_via_log_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_is_bounded_even_with_an_open_sse_subscriber() {
+    // An SSE subscriber (`/inbox`, `/stream`) holds a long-lived connection that
+    // never completes on its own, which would stall axum's graceful shutdown
+    // forever; the bounded grace makes crewd exit anyway (issue #204). This drives
+    // `serve` with its real shutdown future rather than aborting the task the way
+    // `TestBroker::stop` does.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = AppState::new(Config::default());
+
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let served: JoinHandle<Result<(), _>> = tokio::spawn(async move {
+        crew_broker::serve(listener, state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+
+    // Open an inbox SSE subscription and hold it, a live `crew watch` subscriber:
+    // `send` returns once the stream is open, and keeping the response alive keeps
+    // the connection in-flight on the server across the shutdown.
+    let client = reqwest::Client::new();
+    let subscriber = client
+        .get(format!("http://{addr}/inbox?role=backend"))
+        .send()
+        .await
+        .expect("the inbox subscription opens");
+    assert_eq!(subscriber.status(), StatusCode::OK, "the SSE stream opens");
+
+    // Signal shutdown while the subscriber is connected. Without the bound this
+    // would never return; assert it stops well within a generous deadline.
+    shutdown.send(()).expect("the serve task is running");
+    let stopped = tokio::time::timeout(Duration::from_secs(10), served).await;
+    assert!(
+        stopped.is_ok(),
+        "crewd must stop promptly even with an open SSE subscriber, not hang on the drain",
+    );
+    assert!(
+        matches!(stopped.unwrap(), Ok(Ok(()))),
+        "a bounded, forced shutdown returns Ok, not a serve error",
+    );
+
+    drop(subscriber);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_inbox_resumes_from_last_event_id_without_loss() {
     // The inbox reconnect-resume path (issue #10): a dropped `/inbox` reconnects
     // with `Last-Event-ID` set to the last event it saw and the broker replays
