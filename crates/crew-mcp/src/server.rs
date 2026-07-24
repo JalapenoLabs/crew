@@ -6,7 +6,10 @@
 //! `tools/call`, dispatching a call to the [`crew_client::Broker`] client. The
 //! tool docs are written for the agent to get the call right the first try.
 
-use std::io::{BufRead, Write};
+use std::{
+    io::{BufRead, Write},
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use crew_client::{
     BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot,
@@ -50,16 +53,43 @@ impl Server {
     /// Runs the stdio JSON-RPC loop, reading requests and writing responses,
     /// until the input ends.
     ///
+    /// Subscribes to the role's live inbox and pushes an MCP notification each
+    /// time a message addressed to it is buffered, so the agent is nudged to
+    /// read without polling (issue #174). The background inbox thread and this
+    /// loop share the output behind a lock, so a notification frames a whole
+    /// line between responses rather than interleaving with one.
+    ///
     /// # Errors
     /// Returns an error only if reading the input or writing the output fails.
-    pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+    pub fn serve<W>(&mut self, input: impl BufRead, output: W) -> std::io::Result<()>
+    where
+        W: Write + Send + 'static,
+    {
+        // Share the output between this request/response loop and the background inbox
+        // thread. Each writer locks, writes one framed line, and unlocks, so the two
+        // never interleave on the JSON-RPC channel (issue #174).
+        let output = Arc::new(Mutex::new(output));
+
+        // Subscribe to the live inbox, nudging the agent with a notification each time
+        // a message addressed to it is buffered. Best-effort: without streaming
+        // the pull-based `crew_inbox` read still works, so a failure is logged,
+        // not fatal.
+        let notify_output = Arc::clone(&output);
+        if let Err(reason) = self
+            .broker
+            .subscribe_notifying(move || emit_inbox_notification(&notify_output))
+        {
+            eprintln!("crew-mcp: inbox streaming unavailable, using pull reads: {reason}");
+        }
+
         for line in input.lines() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
             if let Some(response) = self.handle_line(&line) {
-                serde_json::to_writer(&mut output, &response)?;
+                let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
+                serde_json::to_writer(&mut *output, &response)?;
                 output.write_all(b"\n")?;
                 output.flush()?;
             }
@@ -258,8 +288,33 @@ impl Server {
     }
 }
 
+/// Writes a `notifications/message` to `output`, nudging the agent to read its
+/// inbox without polling (issue #174).
+///
+/// Runs on the background inbox thread, so it locks `output` to frame its line
+/// against the request/response loop's writes. A write failure means the client
+/// has gone; the serve loop ends on its own at the next read, so the error is
+/// dropped rather than propagated across the thread boundary.
+fn emit_inbox_notification<W: Write>(output: &Mutex<W>) {
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {
+            "level": "info",
+            "logger": "crew.inbox",
+            "data": "A new message is addressed to you. Call crew_inbox to read it.",
+        },
+    });
+    let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
+    // Best-effort: drop a write error, since a disconnected client is not this
+    // thread's to report.
+    let _ = serde_json::to_writer(&mut *output, &notification);
+    let _ = output.write_all(b"\n");
+    let _ = output.flush();
+}
+
 /// The `initialize` result: echo the client's protocol version (or the default)
-/// and advertise the tools capability.
+/// and advertise the tools and logging capabilities.
 fn initialize(params: Option<&Value>) -> Value {
     let version = params
         .and_then(|p| p.get("protocolVersion"))
@@ -267,7 +322,9 @@ fn initialize(params: Option<&Value>) -> Value {
         .unwrap_or(PROTOCOL_VERSION);
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": {} },
+        // `logging` advertises the `notifications/message` the inbox stream pushes
+        // (issue #174); `tools` advertises the crew tool catalog.
+        "capabilities": { "tools": {}, "logging": {} },
         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
     })
 }
@@ -907,6 +964,44 @@ mod tests {
         assert!(
             result["capabilities"]["tools"].is_object(),
             "advertises tools"
+        );
+        assert!(
+            result["capabilities"]["logging"].is_object(),
+            "advertises logging, for the inbox notifications it pushes (issue #174)"
+        );
+    }
+
+    #[test]
+    fn an_inbox_notification_is_a_well_formed_logging_message() {
+        use std::sync::Mutex;
+
+        use super::emit_inbox_notification;
+
+        let output = Mutex::new(Vec::new());
+        emit_inbox_notification(&output);
+        let line = String::from_utf8(output.into_inner().unwrap()).unwrap();
+
+        assert!(
+            line.ends_with('\n'),
+            "the notification is one newline-framed line: {line:?}"
+        );
+        let value: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(value["jsonrpc"], "2.0");
+        assert_eq!(
+            value["method"], "notifications/message",
+            "an MCP server-to-client logging notification"
+        );
+        assert!(
+            value.get("id").is_none(),
+            "a notification carries no id, so the client sends no reply"
+        );
+        assert_eq!(value["params"]["level"], "info");
+        assert!(
+            value["params"]["data"]
+                .as_str()
+                .unwrap()
+                .contains("crew_inbox"),
+            "the nudge points the agent at crew_inbox: {value}"
         );
     }
 

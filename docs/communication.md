@@ -106,9 +106,11 @@ for a runtime without MCP.
 ## Delivery and notifications
 
 An agent subscribes to its inbox stream and receives native notifications on new
-messages, so it spends no context polling. Because the stream is self-filtered,
-there is no "ignore your own writes" rule to remember. The broker, not a
-convention in a skill, guarantees it.
+messages, so it spends no context polling. As each message addressed to the role
+is buffered, the MCP server pushes a native `notifications/message` (issue #174),
+nudging the agent to call `crew_inbox` and read; the read drains the buffered
+batch. Because the stream is self-filtered, there is no "ignore your own writes"
+rule to remember. The broker, not a convention in a skill, guarantees it.
 
 Two SSE feeds serve subscribers. `GET /stream` is the whole firehose: every event,
 live. `GET /inbox?role=<role>` is a role's own view, the events addressed to it

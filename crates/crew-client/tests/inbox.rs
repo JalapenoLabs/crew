@@ -12,6 +12,10 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -153,5 +157,67 @@ fn the_pull_fallback_reads_the_inbox_without_a_subscription() {
     assert!(
         backend.inbox().unwrap().is_empty(),
         "the pull cursor advances"
+    );
+}
+
+/// Spins until `counter` reaches `target`, or a deadline passes.
+fn wait_for_count(counter: &AtomicUsize, target: usize) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if counter.load(Ordering::Relaxed) >= target {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn a_notifying_subscription_nudges_once_per_live_message() {
+    let addr = start_broker();
+    let commander = client(addr, "commander");
+    let mut backend = client(addr, "backend");
+    backend.register(&["api/".to_owned()]).unwrap();
+
+    // A message addressed to backend before it subscribes seeds the backlog, which
+    // the main thread reads from history rather than the stream pushing it live.
+    commander
+        .send(Some("backend"), None, "before you subscribed")
+        .unwrap();
+
+    let nudges = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&nudges);
+    backend
+        .subscribe_notifying(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
+        .expect("the inbox stream opens");
+
+    // The seeded backlog is not a live push, so it nudges nothing.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        nudges.load(Ordering::Relaxed),
+        0,
+        "the seeded backlog nudges nothing",
+    );
+
+    // A live message addressed to the role pushes exactly one nudge.
+    commander
+        .send(Some("backend"), None, "sent after you subscribed")
+        .unwrap();
+    assert!(
+        wait_for_count(&nudges, 1),
+        "a live message nudges the subscriber",
+    );
+
+    // The role's own broadcast is dropped by the stream, so it nudges nothing more.
+    backend
+        .send(None, Some("all-units"), "my own note")
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        nudges.load(Ordering::Relaxed),
+        1,
+        "a role's own message is not delivered, so it adds no nudge",
     );
 }
