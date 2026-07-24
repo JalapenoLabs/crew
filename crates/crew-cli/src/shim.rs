@@ -11,7 +11,9 @@
 //! the role card at `CREW_ROLE_CARD`, or `CREW_ROLE` plus the broker's own
 //! `CREW_BROKER_*` environment. So the supervisor spawns a Codex agent with the
 //! same environment it hands a Claude agent, and the agent shells out to `crew`
-//! instead of calling a tool.
+//! instead of calling a tool. The one exception is [`send`]: with no role
+//! context it posts as the General, so an operator at a terminal can inject a
+//! message without a role card (issue #192).
 //!
 //! Each invocation is its own short-lived process, so where the long-lived MCP
 //! server holds per-session state in memory, the shim persists it on disk: a
@@ -30,7 +32,10 @@ use crew_substrate::{
 };
 use eyre::{eyre, Result, WrapErr};
 
-use crate::cursor::{InboxCursor, TaskContext};
+use crate::{
+    control,
+    cursor::{InboxCursor, TaskContext},
+};
 
 /// The resolved agent context a shim command acts as: its broker, role, and
 /// lane.
@@ -88,23 +93,34 @@ pub fn register() -> Result<()> {
     Ok(())
 }
 
-/// Sends a message as this agent's role to a teammate, a channel, or the
+/// Sends a plain `note`, as this agent's role when the environment names one,
+/// else as the General (issue #192).
+///
+/// This is the one unified `crew send`. With a role context (`CREW_ROLE` or a
+/// role card) it posts as that role, the coordination send a coworker agent
+/// uses, mirroring `crew_send`. With none it posts as the General, so an
+/// operator at a terminal injects a message without a role card, the same path
+/// as `crew brief`. Either way the target follows the crew's one addressing
+/// rule: `to` direct-messages a role, `channel` posts to a named channel
+/// (`all-units` or a pair like `frontend+backend`), and neither reaches the
 /// commander.
 ///
-/// Mirrors `crew_send`: `to` direct-messages a role, `channel` posts to a named
-/// channel (`all-units` or a pair like `frontend+backend`), and neither reaches
-/// the commander.
-///
 /// # Errors
-/// Returns an error if no role context is set, or the broker rejects the
-/// message.
+/// Returns an error if a set role context is broken, the target is not
+/// routable, or the broker rejects the message or cannot be reached.
 pub fn send(to: Option<&str>, channel: Option<&str>, body: &str) -> Result<()> {
-    let agent = load_agent()?;
-    let confirmation = agent
-        .broker()
-        .send(to, channel, body)
-        .map_err(|reason| eyre!("{reason}"))?;
-    println!("{confirmation}");
+    if let Some(agent) = resolve_agent()? {
+        let confirmation = agent
+            .broker()
+            .send(to, channel, body)
+            .map_err(|reason| eyre!("{reason}"))?;
+        println!("{confirmation}");
+    } else {
+        // No role names an agent, so this is the General at a terminal: post the
+        // note as the General, the same path `crew brief` takes (issue #192).
+        let target = control::post_general_note(None, to, channel, None, body, "send")?;
+        println!("sent to {} as the general", target.name());
+    }
     Ok(())
 }
 
@@ -476,32 +492,50 @@ pub fn briefing(task: Option<&str>, budget: Option<usize>) -> Result<()> {
 /// the broker's own `CREW_BROKER_*` config gives the address, for a bare manual
 /// boot with an empty lane.
 fn load_agent() -> Result<Agent> {
+    resolve_agent()?
+        .ok_or_else(|| eyre!("set {ROLE_CARD_ENV} to a role card, or CREW_ROLE to name the role"))
+}
+
+/// Resolves this agent's role context, or `None` when the environment names no
+/// role.
+///
+/// A role card at `CREW_ROLE_CARD` wins; else `CREW_ROLE` plus the broker's own
+/// `CREW_BROKER_*` config names the role. `None` means no role context is set
+/// at all, which the unified [`send`] treats as the General rather than an
+/// error (issue #192); every other shim command turns `None` into an error via
+/// [`load_agent`].
+///
+/// # Errors
+/// Returns an error only when a role context is set but broken: an unreadable
+/// or invalid role card, or an invalid broker configuration behind a
+/// `CREW_ROLE`.
+fn resolve_agent() -> Result<Option<Agent>> {
     if let Some(path) = std::env::var_os(ROLE_CARD_ENV) {
         let path = PathBuf::from(path);
         let text = std::fs::read_to_string(&path)
             .wrap_err_with(|| format!("could not read the role card at {}", path.display()))?;
         let card = RoleCard::from_toml(&text).wrap_err("the role card is not valid")?;
-        return Ok(Agent {
+        return Ok(Some(Agent {
             base: card.broker.base_url(),
             role: card.role,
             commander: card.commander,
             owned_paths: card.owned_paths,
             lane_enforcement: card.lane_enforcement,
-        });
+        }));
     }
 
     let role = std::env::var("CREW_ROLE").ok();
-    let role = role
+    let Some(role) = role
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty())
-        .ok_or_else(|| {
-            eyre!("set {ROLE_CARD_ENV} to a role card, or CREW_ROLE to name the role")
-        })?;
+    else {
+        return Ok(None);
+    };
 
     let config = BrokerConfig::from_env().wrap_err("could not read the broker configuration")?;
     let base = BrokerEndpoint::new(config.host.to_string(), config.port).base_url();
-    Ok(Agent {
+    Ok(Some(Agent {
         base,
         role: RoleId::new(role),
         // No card to name the commander, so fall back to the conventional default,
@@ -509,7 +543,7 @@ fn load_agent() -> Result<Agent> {
         commander: RoleId::new("commander"),
         owned_paths: Vec::new(),
         lane_enforcement: LaneEnforcement::default(),
-    })
+    }))
 }
 
 /// Prints the inbox items, one per line, the way the MCP server renders them.

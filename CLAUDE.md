@@ -771,7 +771,9 @@ the `crew-mcp` binary reads (`CREW_ROLE_CARD`, else `CREW_ROLE` plus the `CREW_B
 config) and reuses the same `crew_client::Broker` the MCP server dispatches to (issue
 #129), so a shim agent's I/O maps onto
 the broker identically to the MCP path: it registers on boot (appearing on the roster
-and stream) and sends and reads the same way. The shim is a short-lived process per
+and stream) and sends and reads the same way. `crew send` is the one exception: with no
+role context it posts as the General rather than erroring, so the one command serves both
+a coworker agent and an operator at a terminal (issue #192). The shim is a short-lived process per
 call, so where the MCP server holds its inbox cursor in memory, the shim persists a
 per-role cursor on disk (`<state_dir>/shim-cursors/<role>.cursor`, the id of the last
 inbox message read), so `crew inbox` shows only messages since the last call (issue
@@ -783,15 +785,18 @@ remaining parity gap (no push) is in `docs/codex.md`. A Codex role no longer nee
 `runtime = "codex"` in the config, `crew up` supervisor-spawns it alongside the Claude
 roles (issue #128).
 
-`crew brief` is the General's plain send (issue #118), the operator-facing counterpart to the
-agent shim's `crew send`. It posts a free-form `note` as the General, so unlike the shim it
-needs no role card, only the broker address. The target follows the crew's one addressing rule
-(`Channel::resolve`): `--to` a role wins, else `--channel` a name (`all-units` or a pair), else
-the commander (`--commander`, default `commander`). So `crew brief "..."` is the default brief
-that sets the unit to work, and `crew brief --channel all-units "..."` is the General's
-broadcast. It shares the General front-end path with `crew redirect` / `crew belay` / `crew
-command` in `src/control.rs` (posting as the General, no role card), so it needs no broker
-change. See `docs/communication.md`.
+`crew send` is unified so one command serves both audiences (issue #192): with a role context
+(`CREW_ROLE` or a role card) it posts as that role, the coordination send a coworker agent
+uses; with none it posts as the General, so an operator at a terminal injects a message without
+a role card. `crew brief` is the General's plain send (issue #118), the same General note with
+the explicit `--broker` and `--commander` controls. The target follows the crew's one
+addressing rule (`Channel::resolve`): `--to` a role wins, else `--channel` a name (`all-units`
+or a pair), else the commander (`--commander`, default `commander`). So `crew brief "..."` (or
+a role-less `crew send "..."`) is the default brief that sets the unit to work, and `crew brief
+--channel all-units "..."` is the General's broadcast. The role-less `crew send` and `crew
+brief` share the General note path (`post_general_note` in `src/control.rs`), which also backs
+`crew redirect` / `crew belay` / `crew command`, so the unification needs no broker change. See
+`docs/communication.md`.
 
 `crew command` is the General's direct override (issue #42): it commands a specialist itself,
 bypassing the commander's fan-out, without breaking the chain of command. It posts an `order`
