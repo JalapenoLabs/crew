@@ -263,10 +263,14 @@ the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes
 pair regardless of member order, and resolves which roles a channel reaches; and
 `crewd` (the broker, issues #7, #8, #9, #10, #11, #12, #13 and #14)
 starts on loopback, serves `GET /health`, and shuts down gracefully. It keeps state
-behind a swappable `Storage` trait (append, query, roster read/write; issue #13): the
-daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus an in-memory
-index, rooted at the state dir), so a restart replays the full log; tests use the
-in-memory `MemoryStore`. It stores the
+behind a swappable `Storage` trait (append, flush, query, roster read/write; issue
+#13): the daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus
+an in-memory index, rooted at the state dir), so a restart replays the full log;
+tests use the in-memory `MemoryStore`. `LogStore` persists on a dedicated writer
+thread, so an append never blocks the async runtime under a burst (issue #206): the
+append indexes in memory and queues the line, a single writer drains the queue in
+order, and `crewd` flushes it on graceful shutdown so a clean stop loses nothing.
+It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
 reads the log over `GET /events`, and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps

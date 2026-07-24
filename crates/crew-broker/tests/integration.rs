@@ -693,8 +693,13 @@ async fn joining_a_long_conversation_costs_bounded_context() {
 async fn events_survive_a_broker_restart_via_log_replay() {
     let dir = TempDir::new();
 
-    // First run: a durable broker over the temp state dir.
-    let first = TestBroker::start(durable(dir.path())).await;
+    // First run: a durable broker over the temp state dir. Retain the store so the
+    // test can drain its background writer before reopening (issue #206): the
+    // durable log persists off the request path, so durability is a `flush`, not a
+    // side effect of the append returning.
+    let store = Arc::new(LogStore::open(dir.path()).expect("open the log store"));
+    let shared: Arc<LogStore> = Arc::clone(&store);
+    let first = TestBroker::start(AppState::with_storage(Config::default(), shared)).await;
     first
         .post_note("all-units", role("backend"), "durable one")
         .await;
@@ -702,6 +707,8 @@ async fn events_survive_a_broker_restart_via_log_replay() {
         .post_note("@frontend", role("backend"), "durable two")
         .await;
     first.stop().await;
+    store.flush();
+    drop(store);
 
     // Second run: a fresh broker over the same dir replays the log.
     let second = TestBroker::start(durable(dir.path())).await;
