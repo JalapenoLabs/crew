@@ -585,8 +585,15 @@ The defibrillator also catches a crew stuck waiting on itself, not just a dead a
 recent window of the event stream (`RosterClient::history_since`, over the stable stream
 contract rather than `crew_core::EventKind`, so a kind it does not model passes through;
 it fetches only the `message` / `ledger` / `verification` kinds it inspects, so a busy
-crew's high-volume `activity` events never ride the wire each scan, issue #125)
-on the `stall_scan_interval` and runs `detect_stalls`, a pure function that finds three
+crew's high-volume `activity` events never ride the wire each scan, issue #125). The scan
+is incremental (issue #165): a stateful rolling `ScanWindow` keeps the lookback window's
+events, and each tick fetches only the events since the previous scan's newest one
+(`since` = the buffered cursor), splices them onto the buffer (the inclusive `since` re-reads
+the boundary-timestamp run, which `ScanWindow::refresh` drops before re-appending, so there
+are no duplicates), and trims the aged-out front, keeping each scan O(new) rather than
+re-reading the whole window; a cold start or a wholly aged-out buffer resets to a full
+window read. It runs `detect_stalls` over the buffer on the `stall_scan_interval`, a pure
+function that finds three
 shapes past the `stall_timeout` (ten minutes by default, below the process heartbeat): a
 **deadlock** (a cycle of unanswered questions), an **unanswered question** (a one-sided
 wait with no cycle), and a **stalled ledger** (a task with no forward motion, a `ledger`
