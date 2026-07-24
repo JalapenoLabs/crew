@@ -10,8 +10,10 @@
 //! test body stays synchronous and calls the blocking `ureq`-based client
 //! directly.
 
+mod common;
+
 use std::{
-    net::{Ipv4Addr, SocketAddr, TcpListener},
+    net::SocketAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -20,29 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crew_broker::{AppState, Config};
+use common::start_broker;
 use crew_client::Broker;
 use crew_core::RoleId;
-
-/// Starts a broker over a fresh in-memory store, returning the address it
-/// serves on.
-fn start_broker() -> SocketAddr {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            let state = AppState::new(Config::default());
-            let _ = crew_broker::serve(listener, state, std::future::pending::<()>()).await;
-        });
-    });
-    addr
-}
 
 /// A client for `role`, using `commander` as its default addressee.
 fn client(addr: SocketAddr, role: &str) -> Broker {
