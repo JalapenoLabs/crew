@@ -182,6 +182,53 @@ pub fn order(
     Ok(())
 }
 
+/// Reports progress as this agent's role, without asking anything (issue #167).
+///
+/// Mirrors `crew_status`: a typed `status`, not a plain note, so a front-end
+/// renders it as a progress update and any projection that keys on `status`
+/// sees it. The target follows the same addressing rule as [`send`].
+///
+/// # Errors
+/// Returns an error if no role context is set, the target is not routable, or
+/// the broker rejects the message.
+pub fn status(to: Option<&str>, channel: Option<&str>, body: &str) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .status(to, channel, body)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
+/// References a produced thing as this agent's role (issue #167).
+///
+/// Mirrors `crew_artifact`: a typed `artifact` naming a `reference` (a branch,
+/// a PR URL, a file path, or a route) and its `kind` (`branch`, `pull_request`,
+/// `file`, or `route`), so a teammate or a front-end can find and link it
+/// rather than parse it out of prose. The target follows the same addressing
+/// rule as [`send`].
+///
+/// # Errors
+/// Returns an error if no role context is set, `kind` is not one of the four
+/// artifact kinds, the target is not routable, or the broker rejects the
+/// message.
+pub fn artifact(
+    to: Option<&str>,
+    channel: Option<&str>,
+    body: &str,
+    reference: &str,
+    kind: &str,
+) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .artifact(to, channel, body, reference, kind)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
 /// Prints the messages addressed to this agent's role that are new since the
 /// last call.
 ///

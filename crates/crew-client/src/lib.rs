@@ -36,8 +36,8 @@ use std::{
 };
 
 use crew_core::{
-    path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind, RoleId,
-    Sender, TaskId,
+    path_in_lane, ArtifactKind, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind,
+    RoleId, Sender, TaskId,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -266,6 +266,81 @@ impl Broker {
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": "answer",
             "in_reply_to": in_reply_to,
+            "body": body,
+        }));
+        self.post_message(target.name().as_str(), &payload)
+    }
+
+    /// Reports progress as this role with a typed `status`, to a role, a
+    /// channel, or the commander by default (issue #167).
+    ///
+    /// A `status` reports progress without asking anything, so a front-end
+    /// renders it as a progress ping rather than a plain note and any
+    /// projection that keys on `status` sees it, unlike a `crew_send` note
+    /// that would lose the typed rendering. The target follows the same one
+    /// addressing rule as [`send`](Broker::send).
+    ///
+    /// # Errors
+    /// Returns a message if the target is not routable, or the broker rejects
+    /// the post or cannot be reached.
+    pub fn status(
+        &self,
+        to: Option<&str>,
+        channel: Option<&str>,
+        body: &str,
+    ) -> Result<String, String> {
+        let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
+            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
+                .to_owned()
+        })?;
+        let payload = self.stamp_task(json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": "status",
+            "body": body,
+        }));
+        self.post_message(target.name().as_str(), &payload)
+    }
+
+    /// References a produced thing as this role with a typed `artifact`, to a
+    /// role, a channel, or the commander by default (issue #167).
+    ///
+    /// An `artifact` points at a `reference` (a branch name, a PR URL, a file
+    /// path, or a route) tagged with its `artifact_kind` (`branch`,
+    /// `pull_request`, `file`, or `route`), so a teammate or a front-end can
+    /// find and link it rather than parse it out of a note. The target follows
+    /// the same one addressing rule as [`send`](Broker::send).
+    ///
+    /// # Errors
+    /// Returns a message if `artifact_kind` is not one of the four kinds, the
+    /// target is not routable, or the broker rejects the post or cannot be
+    /// reached.
+    pub fn artifact(
+        &self,
+        to: Option<&str>,
+        channel: Option<&str>,
+        body: &str,
+        reference: &str,
+        artifact_kind: &str,
+    ) -> Result<String, String> {
+        // Validate the kind against the source of truth (crew_core's `ArtifactKind`),
+        // so a bad value is a clear local error rather than a broker 400. Serializing
+        // the parsed value back single-sources the wire label.
+        let kind: ArtifactKind = serde_json::from_value(Value::String(artifact_kind.to_owned()))
+            .map_err(|_error| {
+                format!(
+                    "`{artifact_kind}` is not an artifact kind; use branch, pull_request, file, \
+                     or route"
+                )
+            })?;
+        let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
+            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
+                .to_owned()
+        })?;
+        let payload = self.stamp_task(json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": "artifact",
+            "reference": reference,
+            "artifact_kind": kind,
             "body": body,
         }));
         self.post_message(target.name().as_str(), &payload)
@@ -1248,7 +1323,7 @@ fn kind_detail(kind: &MessageKind) -> String {
 mod tests {
     use crew_core::{MessageKind, RoleId, Sender};
 
-    use super::{message_kind_label, sender_label};
+    use super::{message_kind_label, sender_label, Broker};
 
     #[test]
     fn a_sender_labels_a_role_or_the_general() {
@@ -1269,5 +1344,23 @@ mod tests {
         };
         assert_eq!(message_kind_label(&order), "order");
         assert_eq!(message_kind_label(&MessageKind::Note), "note");
+    }
+
+    #[test]
+    fn an_artifact_rejects_an_unknown_kind_before_touching_the_broker() {
+        // The base is bogus, but a bad `artifact_kind` fails validation before any
+        // request, so no connection is attempted (issue #167).
+        let broker = Broker::new(
+            "http://127.0.0.1:1",
+            RoleId::new("backend"),
+            RoleId::new("commander"),
+        );
+        let error = broker
+            .artifact(None, None, "opened it", "feature/x", "pr")
+            .expect_err("an unknown artifact kind is rejected");
+        assert!(
+            error.contains("not an artifact kind") && error.contains("pull_request"),
+            "the error names the valid kinds: {error}",
+        );
     }
 }

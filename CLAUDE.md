@@ -345,14 +345,18 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and dispatches each tool to a `crew_client::Broker`, the shared
 thin synchronous client (`ureq`) over the broker's HTTP API (issue #129); it never
-touches the store. It exposes sixteen
+touches the store. It exposes eighteen
 tools with self-documenting schemas: `crew_send` (post a note as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
 fan-out handle, issue #27), the typed-message pair `crew_ask` / `crew_answer` (post a
 `question` or an `answer` rather than a plain note, so an unanswered question surfaces a
 coordination stall instead of stalling silently; `crew_answer` names the question by the
-`in_reply_to` id the inbox shows, issue #123), `crew_inbox` (read the messages addressed to
+`in_reply_to` id the inbox shows, issue #123), the typed-message pair `crew_status` /
+`crew_artifact` (post a progress `status` or a reference to a produced `artifact` (a
+`branch` / `pull_request` / `file` / `route`) rather than a plain note, so the typed
+rendering and any projection that keys on the kind is not lost; issue #167), `crew_inbox`
+(read the messages addressed to
 the role since the last call, self-filtered, over a per-session history cursor, surfacing an
 order's structured fields and each message's id so a reply can name it), `crew_roster`
 (list registered teammates, their owned paths, and liveness), `crew_lane` (check a path against the role's owned lane
@@ -707,6 +711,8 @@ in-process broker's shutdown itself.
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
 `crew order` (issue a scoped order to a specialist, issue #27),
 `crew ask` / `crew answer` (post a typed question or answer, issue #123),
+`crew status` / `crew artifact` (post a typed progress status or a reference to a produced
+branch, PR, file, or route, issue #167),
 `crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue #45), the
 done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), `crew complete
 [summary]` (report the mission gracefully finished, with an optional summary of what
