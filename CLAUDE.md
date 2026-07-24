@@ -366,7 +366,13 @@ work for verification instead of asserting it done, judge a teammate's work as a
 independent skeptic, and read the gate; issue #47), `crew_complete` (report the mission
 gracefully finished, typically as the commander, with a short `summary` of what shipped
 that the completion push renders, so `crew notify` fires on a true completion rather than a
-stand-down; issues #121, #155), the situation-board pair `crew_board`
+stand-down; it announces, it never gates the crew: completion is a report the crew makes,
+not a control the General issues, so gating on it would let a role halt everyone by
+declaring victory and would cut in-flight work short. A finished mission has no work to
+pull, so its roles idle-stop on their own (issue #55); to stop the crew the General uses
+`crew standdown` or `crew down`. This keeps the crew `Standing` a three-level brake,
+`Running` / `Paused` / `StoodDown`, all cleared by `crew resume`, with no terminal
+`Complete` level; issues #121, #154, #155), the situation-board pair `crew_board`
 / `crew_record` (read the crew's durable memory, and record or retract a decision,
 interface, or gotcha; issue #49), and `crew_briefing` (the bounded new-role briefing
 packet: the board plus a lane-scoped rolling summary, size-capped; issue #50). A tool

@@ -11,6 +11,19 @@
 //! an empty or missing summary is fine. It is an announcement, not a brake:
 //! unlike stand-down it does not gate the crew, since the mission is finished,
 //! not paused.
+//!
+//! Whether completion should also quiesce the crew was a deliberate product
+//! decision (issue #154): it does not, and this endpoint stays a pure
+//! announcement. Completion is a **report** the crew makes, not a **control**
+//! the General issues. Gating on it would let a role halt the whole crew by
+//! declaring victory, inverting the "the General commands, the crew reports"
+//! model, and would abruptly cut any in-flight work, the opposite of a graceful
+//! finish. A finished mission has no more work to pull, so its roles idle-stop
+//! on their own (issue #55); to stop the crew deliberately the General uses
+//! `crew standdown` (emergency) or `crew down` (graceful shutdown). So the crew
+//! `Standing` keeps its three brake levels (`Running` / `Paused` /
+//! `StoodDown`), all reversible by `crew resume`, rather than gaining a
+//! terminal `Complete` that resume would then have to un-declare.
 
 use axum::{extract::State, routing::post, Json, Router};
 use crew_core::{ChannelId, Event, EventKind, MissionEvent, RoleId, Sender, Timestamp, ALL_UNITS};
@@ -135,13 +148,27 @@ mod tests {
     #[tokio::test]
     async fn a_completion_does_not_gate_the_crew() {
         // Completion is a graceful finish, not a brake: unlike stand-down it must
-        // not pause new work.
+        // not pause new work. Whether it should quiesce the crew was a deliberate
+        // product decision (issue #154): it does not, so the standing stays
+        // `Running` and no role is gated. This test locks that decision.
+        use crate::state::Standing;
+
         let state = AppState::new(Config::default());
         let (status, _) = post(&state, json!({ "role": "commander" })).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             !state.is_role_paused(&crew_core::RoleId::new("backend")),
             "a mission completion must not gate the crew"
+        );
+        let (standing, paused_roles) = state.control_snapshot();
+        assert_eq!(
+            standing,
+            Standing::Running,
+            "completion is an announcement, not a control: it never changes the crew standing"
+        );
+        assert!(
+            paused_roles.is_empty(),
+            "completion pauses no role; stopping the crew is `crew standdown` / `crew down`"
         );
     }
 
