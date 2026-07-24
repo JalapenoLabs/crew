@@ -111,10 +111,13 @@ holding the stream open. `summary=true` returns the rolling compaction instead (
 joining a long-running conversation costs bounded context rather than the full log.
 Live, `GET /stream` delivers the same view over SSE, narrowed by the same filter
 params applied with the very same `EventFilter::matches`: with no filter it is the
-firehose, and with one it delivers only matching events. A consumer loads the backlog
-from `/history` and subscribes to `/stream` for what follows, both under the same
-filter; on a lagged or dropped connection it catches the gap up through `/history`
-again, since the stream is live-only.
+firehose, and with one it delivers only matching events. It resumes losslessly like
+`GET /inbox` (issue #134): a consumer subscribes to `/stream` for what follows, and on
+a lagged or dropped connection it reconnects with its `Last-Event-ID` and the stream
+replays the matching events it missed before returning to the live tail, so it needs no
+separate `/history` catch-up. A fresh connection with no cursor starts at the live tail.
+The replay reuses the same `EventFilter::matches` as the live tail and `/history`, so
+the three agree; `/inbox`, `/activity`, and `/stream` share one replay-then-live engine.
 
 ### Lane boundary crossings
 

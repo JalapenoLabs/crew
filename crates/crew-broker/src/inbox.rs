@@ -13,10 +13,12 @@
 //! what the role does as well as what reaches it. It is the live counterpart of
 //! `GET /history?agent=<role>`.
 //!
-//! Both share one SSE engine ([`role_stream`]) parameterized by a per-event
-//! predicate, so the replay-from-`Last-Event-ID` and live-tail machinery is
-//! written once. Each event carries its log sequence as the SSE `id`, so a
-//! reconnecting client resumes without loss.
+//! Both build on the shared replay-then-live SSE engine ([`crate::sse`]), which
+//! the aggregate `GET /stream` uses too (issue #134), parameterized by a
+//! per-event predicate: the inbox keeps the events addressed to a role, the
+//! timeline keeps a role's whole timeline. Each event carries its log sequence
+//! as the SSE `id`, so a reconnecting client resumes from `Last-Event-ID`
+//! without loss.
 //!
 //! Channel membership is the canonical [`crew_core::Channel::addresses`], the
 //! same test [`Event::in_timeline_of`] applies, so the inbox holds no second
@@ -27,22 +29,16 @@ use std::convert::Infallible;
 use axum::{
     extract::{Query, State},
     http::HeaderMap,
-    response::sse::{Event as SseEvent, KeepAlive, Sse},
+    response::sse::{Event as SseEvent, Sse},
     routing::get,
     Router,
 };
 use crew_core::{Channel, Event, RoleId, Sender};
 use serde::Deserialize;
-use tokio_stream::{
-    wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
-    Stream, StreamExt,
-};
+use tokio_stream::Stream;
 use tracing::{event, Level};
 
-use crate::{
-    error::ApiError,
-    state::{AppState, Sequenced},
-};
+use crate::{error::ApiError, state::AppState};
 
 /// The per-role stream routes: the self-filtered inbox and the full activity
 /// timeline.
@@ -124,95 +120,46 @@ fn require_role(value: Option<&str>, param: &str) -> Result<RoleId, ApiError> {
     Ok(RoleId::new(role))
 }
 
-/// The shared per-role SSE engine: replay the matching backlog, then stream
-/// live.
+/// Streams a role's slice of the log over the shared SSE engine: replay the
+/// backlog it kept after the `Last-Event-ID` cursor, then the live tail.
 ///
-/// Subscribes before snapshotting the log, so an event appended while the
-/// backlog is read is buffered on the receiver and delivered live rather than
-/// missed. `keep` decides which events reach this role's stream, so the inbox
-/// and the activity timeline share one replay-and-live implementation.
+/// `keep` decides which events reach this role's stream, so the inbox
+/// (addressed to the role) and the activity timeline (the role's whole
+/// timeline) share one replay-and-live implementation with the aggregate
+/// `GET /stream` (see [`crate::sse`]).
 fn role_stream(
     state: &AppState,
     headers: &HeaderMap,
     role: RoleId,
     keep: Keep,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let receiver = state.broadcast.subscribe();
-    let backlog = state.storage.events();
-    let live_from = backlog.len() as u64;
-
-    // A reconnect resumes right after its last delivered event; a fresh connection
-    // (no cursor) starts at the live tail.
-    let resume_from = last_event_id(headers).map_or(live_from, |id| id + 1);
-
-    let replay: Vec<Result<SseEvent, Infallible>> = backlog
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, event)| {
-            let seq = index as u64;
-            if seq >= resume_from && keep(&event, &role) {
-                to_sse(seq, &event).map(Ok)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let live = BroadcastStream::new(receiver)
-        .filter_map(move |result| map_live_event(result, &role, live_from, keep));
-
-    let stream = tokio_stream::iter(replay).chain(live);
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let lagged_role = role.clone();
+    crate::sse::resume_stream(
+        state,
+        headers,
+        move |event| keep(event, &role),
+        move |skipped| warn_lagged(&lagged_role, skipped),
+    )
 }
 
-/// Maps one broadcast result to a live SSE item for `role`, surfacing a lag.
+/// Logs a per-role stream subscriber that lagged off the broadcast (issue
+/// #116).
 ///
-/// A [`Lagged`](BroadcastStreamRecvError::Lagged) receiver has fallen behind
-/// the broadcast capacity and skipped events. Observability is a first-class
-/// output, so the lag is logged (`broker.inbox.lagged`, with the role and
-/// skipped count) rather than dropped silently, and the gap is skipped here:
-/// the client recovers it from its `Last-Event-ID` on reconnect, so nothing is
-/// lost, but a recurring lag tells the operator the broadcast capacity is too
-/// small under load. Otherwise the event is delivered when it passes `keep` and
-/// is newer than the pre-subscription snapshot (`live_from`); earlier ones are
-/// already in the replay.
-fn map_live_event(
-    result: Result<Sequenced, BroadcastStreamRecvError>,
-    role: &RoleId,
-    live_from: u64,
-    keep: Keep,
-) -> Option<Result<SseEvent, Infallible>> {
-    let Sequenced { seq, event } = match result {
-        Ok(sequenced) => sequenced,
-        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-            event!(
-                name: "broker.inbox.lagged",
-                Level::WARN,
-                crew.role = %role,
-                skipped,
-                "inbox subscriber for `{{crew.role}}` lagged off the broadcast and skipped \
-                 {{skipped}} events; the client replays them from Last-Event-ID. Raise the \
-                 broadcast capacity if this recurs under load.",
-            );
-            return None;
-        }
-    };
-    if seq >= live_from && keep(&event, role) {
-        to_sse(seq, &event).map(Ok)
-    } else {
-        None
-    }
-}
-
-/// Parses the `Last-Event-ID` reconnect cursor from the request headers.
-///
-/// Returns `None` when the header is absent or not a sequence number, so a
-/// client with no valid cursor starts from the live tail.
-fn last_event_id(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
+/// Observability is a first-class output, so the lag is named
+/// (`broker.inbox.lagged`, with the role and skipped count) rather than dropped
+/// silently. The gap itself is skipped: the client recovers it from its
+/// `Last-Event-ID` on reconnect, so nothing is lost, but a recurring lag tells
+/// the operator the broadcast capacity is too small under load.
+fn warn_lagged(role: &RoleId, skipped: u64) {
+    event!(
+        name: "broker.inbox.lagged",
+        Level::WARN,
+        crew.role = %role,
+        skipped,
+        "inbox subscriber for `{{crew.role}}` lagged off the broadcast and skipped \
+         {{skipped}} events; the client replays them from Last-Event-ID. Raise the \
+         broadcast capacity if this recurs under load.",
+    );
 }
 
 /// Whether `event` should be delivered to `role`'s inbox.
@@ -231,18 +178,6 @@ fn event_reaches_role(event: &Event, role: &RoleId) -> bool {
     Channel::parse(event.channel.as_str()).is_some_and(|channel| channel.addresses(role))
 }
 
-/// Renders an event as a Server-Sent Event carrying its sequence as the `id`.
-///
-/// Returns `None` only if the event fails to serialize, which cannot happen for
-/// a well-formed [`Event`]; such an event is skipped rather than closing the
-/// stream.
-fn to_sse(seq: u64, event: &Event) -> Option<SseEvent> {
-    SseEvent::default()
-        .id(seq.to_string())
-        .json_data(event)
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -253,15 +188,11 @@ mod tests {
     };
     use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender};
     use serde_json::{json, Value};
-    use tokio_stream::{wrappers::errors::BroadcastStreamRecvError, StreamExt};
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
-    use super::{event_reaches_role, map_live_event};
-    use crate::{
-        api,
-        config::Config,
-        state::{AppState, Sequenced},
-    };
+    use super::event_reaches_role;
+    use crate::{api, config::Config, state::AppState};
 
     fn role(name: &str) -> RoleId {
         RoleId::new(name)
@@ -329,56 +260,6 @@ mod tests {
             ..message_from("backend", "all-units")
         };
         assert!(event_reaches_role(&from_general, &role("backend")));
-    }
-
-    #[test]
-    fn a_lagged_receiver_skips_the_gap_rather_than_delivering_it() {
-        // A lagged receiver has fallen behind the broadcast capacity; the gap is
-        // skipped (the client replays it from Last-Event-ID) and logged as
-        // `broker.inbox.lagged`.
-        let mapped = map_live_event(
-            Err(BroadcastStreamRecvError::Lagged(7)),
-            &role("backend"),
-            0,
-            event_reaches_role,
-        );
-        assert!(
-            mapped.is_none(),
-            "a lag skips the gap here rather than delivering it out of order"
-        );
-    }
-
-    #[test]
-    fn a_live_event_is_delivered_only_when_it_passes_the_filter_and_is_after_the_snapshot() {
-        // Addressed to backend and after the snapshot: delivered.
-        let addressed = Sequenced {
-            seq: 3,
-            event: message_from("frontend", "@backend"),
-        };
-        assert!(
-            map_live_event(Ok(addressed), &role("backend"), 0, event_reaches_role).is_some(),
-            "a live, addressed event is delivered",
-        );
-
-        // Its own message: filtered out even though it is live.
-        let own = Sequenced {
-            seq: 3,
-            event: message_from("backend", "all-units"),
-        };
-        assert!(
-            map_live_event(Ok(own), &role("backend"), 0, event_reaches_role).is_none(),
-            "a role never receives its own message",
-        );
-
-        // Before the snapshot (already in the replay): skipped, not delivered twice.
-        let early = Sequenced {
-            seq: 0,
-            event: message_from("frontend", "@backend"),
-        };
-        assert!(
-            map_live_event(Ok(early), &role("backend"), 5, event_reaches_role).is_none(),
-            "an event before the live snapshot is already in the replay",
-        );
     }
 
     /// Posts a note from `from` to `channel`, asserting it is accepted. The

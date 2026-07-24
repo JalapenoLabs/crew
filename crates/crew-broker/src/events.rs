@@ -14,21 +14,18 @@ use std::convert::Infallible;
 use axum::{
     body::Bytes,
     extract::{FromRequest, Path, Query, Request, State},
-    http::StatusCode,
-    response::sse::{Event as SseEvent, KeepAlive, Sse},
+    http::{HeaderMap, StatusCode},
+    response::sse::{Event as SseEvent, Sse},
     routing::{get, post},
     Json, Router,
 };
 use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, Sender, TaskId};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
+use tokio_stream::Stream;
+use tracing::{event, Level};
 
-use crate::{
-    error::ApiError,
-    filter::FilterQuery,
-    state::{AppState, Sequenced},
-};
+use crate::{error::ApiError, filter::FilterQuery, state::AppState};
 
 /// The message routes: post to a channel, read the log, and subscribe to the
 /// feed.
@@ -199,46 +196,61 @@ async fn list_events(State(state): State<AppState>) -> Json<EventLog> {
 /// query applies, so the live and historical views agree. `GET /inbox` is the
 /// per-role, self-filtered delivery view instead.
 ///
-/// Each event arrives already scrubbed and carries its log sequence as the SSE
-/// `id`. A subscriber that lags past the channel's buffer skips the dropped
-/// events rather than closing the stream, so a slow reader still receives
-/// everything after the gap; it catches up on the gap through `GET /history`
-/// with the same filter.
+/// It resumes losslessly like `GET /inbox` (issue #134): on reconnect the
+/// client's `Last-Event-ID` replays the matching events it missed from the log
+/// before switching to the live tail, so a dropped or lagged consumer needs no
+/// separate `/history` catch-up call. A fresh connection with no cursor starts
+/// at the live tail rather than replaying the whole history. The replay reuses
+/// the same [`EventFilter::matches`](crate::store::EventFilter::matches) as the
+/// live tail and `GET /history`, so all three agree on the view. Each event
+/// arrives already scrubbed and carries its log sequence as the SSE `id`; a
+/// subscriber that lags past the broadcast buffer skips the gap and recovers it
+/// from its `Last-Event-ID`.
 ///
 /// # Errors
 /// Returns a 400 [`ApiError`] if a filter parameter is malformed.
 async fn stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(filter): Query<FilterQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
     let filter = filter.to_filter()?;
-    let receiver = state.broadcast.subscribe();
-    let events = BroadcastStream::new(receiver).filter_map(move |result| {
-        // A lagged receiver skips the gap; the firehose is live-only, and a consumer
-        // catches up through `/history` with the same filter.
-        let Ok(Sequenced { seq, event }) = result else {
-            return None;
-        };
-        if !filter.matches(&event) {
-            return None;
-        }
-        SseEvent::default()
-            .id(seq.to_string())
-            .json_data(&event)
-            .ok()
-            .map(Ok)
-    });
-    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+    Ok(crate::sse::resume_stream(
+        &state,
+        &headers,
+        move |event| filter.matches(event),
+        warn_lagged,
+    ))
+}
+
+/// Logs a filtered `/stream` subscriber that lagged off the broadcast (issue
+/// #134).
+///
+/// The gap is skipped, since the client replays it from `Last-Event-ID` on
+/// reconnect; a recurring lag tells the operator the broadcast capacity is too
+/// small under load.
+fn warn_lagged(skipped: u64) {
+    event!(
+        name: "broker.stream.lagged",
+        Level::WARN,
+        skipped,
+        "a /stream subscriber lagged off the broadcast and skipped {{skipped}} events; the \
+         client replays them from Last-Event-ID. Raise the broadcast capacity if this recurs \
+         under load.",
+    );
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
     use crew_core::{Event, EventKind};
     use serde_json::{json, Value};
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     use crate::{api, config::Config, state::AppState};
@@ -513,6 +525,109 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(value.get("error").is_some(), "typed error body: {value}");
+    }
+
+    /// Opens `GET /stream` with `filter` query params, optionally resuming from
+    /// a `Last-Event-ID`.
+    async fn open_stream(
+        state: &AppState,
+        filter: &str,
+        last_event_id: Option<&str>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder().uri(format!("/stream?{filter}"));
+        if let Some(id) = last_event_id {
+            request = request.header("last-event-id", id);
+        }
+        api::build(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// Reads up to `want` Server-Sent Events `(id, data)` from a body, giving
+    /// up after a short budget since the live tail never closes the stream.
+    async fn read_sse(body: Body, want: usize) -> Vec<(u64, Value)> {
+        let mut stream = body.into_data_stream();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut events = Vec::new();
+        while events.len() < want {
+            match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    buffer.extend_from_slice(&chunk);
+                    while let Some(pos) = buffer.windows(2).position(|window| window == b"\n\n") {
+                        let block: Vec<u8> = buffer.drain(..pos + 2).collect();
+                        let block = String::from_utf8_lossy(&block);
+                        let mut id = None;
+                        let mut data = None;
+                        for line in block.lines() {
+                            if let Some(rest) = line.strip_prefix("id:") {
+                                id = rest.trim().parse::<u64>().ok();
+                            } else if let Some(rest) = line.strip_prefix("data:") {
+                                data = serde_json::from_str::<Value>(rest.trim()).ok();
+                            }
+                        }
+                        if let (Some(id), Some(data)) = (id, data) {
+                            events.push((id, data));
+                        }
+                    }
+                }
+                _ => break, // timeout, end of stream, or a read error
+            }
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn the_stream_replays_the_filtered_gap_from_last_event_id() {
+        // Issue #134: a dropped or lagged /stream consumer reconnects with its
+        // Last-Event-ID and replays the events it missed, narrowed by the same
+        // filter, so it resumes without a separate /history call.
+        let state = AppState::new(Config::default());
+        let backend = json!({ "kind": "role", "id": "backend" });
+        let frontend = json!({ "kind": "role", "id": "frontend" });
+        let note = |from: &Value, body: &str| json!({ "from": from, "kind": "note", "body": body });
+
+        // A mix of senders lands on the log at seq 0..=3.
+        post(&state, "all-units", note(&backend, "b0")).await; // seq 0
+        post(&state, "all-units", note(&frontend, "f1")).await; // seq 1
+        post(&state, "all-units", note(&backend, "b2")).await; // seq 2
+        post(&state, "all-units", note(&frontend, "f3")).await; // seq 3
+
+        // Reconnect filtering role=backend, last having seen seq 0: replay only
+        // backend events after the cursor, so seq 2 alone, skipping the frontend
+        // events (1, 3) and the already-seen seq 0.
+        let response = open_stream(&state, "role=backend", Some("0")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = read_sse(response.into_body(), 1).await;
+        let ids: Vec<u64> = events.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![2],
+            "resumes after the cursor, replaying only the filtered events",
+        );
+        assert_eq!(events[0].1["kind"]["data"]["body"], "b2");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_stream_connection_starts_at_the_live_tail() {
+        // Without a Last-Event-ID a fresh connection does not replay the backlog:
+        // it starts at the live tail, exactly as /inbox does.
+        let state = AppState::new(Config::default());
+        let backend = json!({ "kind": "role", "id": "backend" });
+        post(
+            &state,
+            "all-units",
+            json!({ "from": backend, "kind": "note", "body": "before" }),
+        )
+        .await;
+
+        let response = open_stream(&state, "", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = read_sse(response.into_body(), 1).await;
+        assert!(
+            events.is_empty(),
+            "a fresh connection replays nothing, starting at the live tail: {events:?}",
+        );
     }
 
     #[tokio::test]

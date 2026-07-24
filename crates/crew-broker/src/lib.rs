@@ -41,6 +41,7 @@ mod roster;
 mod router;
 mod secrets;
 mod serve;
+mod sse;
 mod stall;
 mod state;
 mod stats;
