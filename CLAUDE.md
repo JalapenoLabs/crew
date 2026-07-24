@@ -240,7 +240,10 @@ crates never pull a subscriber. `crew-core` holds the domain types and event
 model (issue #6). `crew-client` holds the thin synchronous broker client
 (`Broker`, `InboxItem`, `RoleEntry`, and the view types) both agent-facing
 front-ends send and read their inbox through, so neither the MCP server nor the
-CLI shim owns it and the shim needs no dependency on `crew-mcp` (issue #129).
+CLI shim owns it and the shim needs no dependency on `crew-mcp` (issue #129). It
+also exposes the shared broker HTTP agent builder (`broker_agent`), so
+`crew-supervisor`'s `RosterClient` tunes the localhost transport (the connect and
+read timeouts) through the same place rather than duplicating it (issue #200).
 `crew-substrate` is the umbrella (issue #34): it re-exports the
 five substrate crates (`crew-core`, `crew-broker`, `crew-client`, `crew-supervisor`, `crew-mcp`) as
 the modules `core` / `broker` / `client` / `supervisor` / `mcp`, so a front-end takes one

@@ -49,8 +49,27 @@ pub use error::Error;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to wait for a broker response before giving up, so a stuck broker
-/// surfaces as a tool error rather than hanging the agent.
+/// surfaces as an error rather than hanging the caller.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds the synchronous HTTP agent a crew broker client talks to the
+/// localhost broker through, with the crew's standard connect and read timeouts
+/// (issue #200).
+///
+/// Both the agent-facing [`Broker`] and the supervisor's roster client
+/// ([`crew_supervisor::RosterClient`]) share this, so the one bit of transport
+/// tuning, a stuck or unreachable broker surfacing as an error rather than
+/// hanging the caller, lives in a single place. The returned [`ureq::Agent`] is
+/// cheap to clone: it shares its connection pool.
+///
+/// [`crew_supervisor::RosterClient`]: https://docs.rs/crew-supervisor
+#[must_use]
+pub fn broker_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(READ_TIMEOUT)
+        .build()
+}
 
 /// How long the inbox stream waits before retrying a dropped connection.
 ///
@@ -95,15 +114,11 @@ impl Broker {
     /// the crew's commander.
     #[must_use]
     pub fn new(base: impl Into<String>, role: RoleId, commander: RoleId) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(CONNECT_TIMEOUT)
-            .timeout_read(READ_TIMEOUT)
-            .build();
         Self {
             base: base.into(),
             role,
             commander,
-            agent,
+            agent: broker_agent(),
             cursor: None,
             inbox_stream: None,
             task: None,
