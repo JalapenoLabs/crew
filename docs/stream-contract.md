@@ -37,14 +37,16 @@ envelope carries what every projection needs; the `kind` carries the payload:
   Always present.
 - **`task`** is the task the event belongs to, a UUID, when a task context applies. It
   is **omitted** when there is none, so a consumer treats a missing `task` as "no task".
-- **`kind`** is the typed payload, tagged: `{ "kind": "<message|lifecycle|activity>",
-  "data": <payload> }`.
+- **`kind`** is the typed payload, tagged: `{ "kind": "<discriminant>", "data": <payload>
+  }`. The discriminant is one of `message`, `lifecycle`, `activity`, `ledger`,
+  `boundary`, `verification`, `board`, `budget`, `telemetry`, `usage`, `stall`, or
+  `mission`; each payload is documented below.
 
 These four envelope fields (`ts`, `from`, `channel`, `kind`) are guaranteed present and
 non-blank on every event, enforced at the broker's single publish choke point (issue
 #29). A consumer can rely on them without null checks.
 
-## The three kinds and their payloads
+## The event kinds and their payloads
 
 ### `message` (inter-agent communication)
 
@@ -107,6 +109,157 @@ Items: `{ "kind": "turn_started" }`, `{ "kind": "turn_ended" }`,
 The activity vocabulary is stable; the supervisor begins producing these once the
 stream-json parser lands, so a consumer that handles them today needs no change then.
 
+### `ledger` (a work-ledger change)
+
+`kind.data` is a change to the shared work ledger: a role claiming a work item or moving
+its claim forward (issue #45). The envelope's `from` is the owner role and `channel` is
+`all-units`.
+
+```json
+{ "kind": "ledger", "data": {
+  "task": "login-endpoint",
+  "owner": "backend",
+  "state": "in_progress",
+  "title": "Build the login endpoint"
+} }
+```
+
+- `task` is the work item's stable key (a path, a feature name, or an order's title); two
+  roles must not hold the same key at once.
+- `owner` is the role that holds the claim (it also names the envelope's `from`).
+- `state` is `claimed`, `in_progress`, `blocked`, or `done`; `done` releases the claim.
+- `title` is a short human title for the ledger view; may be empty.
+
+### `boundary` (a lane crossing)
+
+`kind.data` is a role reaching outside its owned lane (issue #46). The envelope's `from`
+is the role and `channel` is `all-units`.
+
+```json
+{ "kind": "boundary", "data": {
+  "role": "backend",
+  "path": "frontend/app.tsx",
+  "blocked": true
+} }
+```
+
+- `role` is the role that reached out of lane (it also names the envelope's `from`).
+- `path` is the out-of-lane path it reached for.
+- `blocked` is `true` when the crew's policy refused the edit, `false` when it only
+  warned and let the role proceed.
+
+### `verification` (a done-gate step)
+
+`kind.data` is a step through the adversarial done-gate: a submission or a verdict (issue
+#47). The envelope's `from` is the acting role (the owner on a submission, the verifier on
+a verdict) and `channel` is `all-units`.
+
+```json
+{ "kind": "verification", "data": {
+  "task": "Build the login endpoint",
+  "owner": "backend",
+  "verifier": "qa",
+  "verdict": "passed",
+  "detail": ""
+} }
+```
+
+- `task` is the task under the gate, named by its (order) title.
+- `owner` is the role whose work is under verification: the one that submitted it.
+- `verifier` is the independent role that returned the verdict; **omitted** on the
+  submission itself.
+- `verdict` is `submitted` (awaiting a verifier), `passed` (an independent role could not
+  break it, so it is done), or `failed` (a verifier broke it; the work returns to the
+  owner).
+- `detail` is the acceptance criteria claimed on a submission, or the specific failure on
+  a failed verdict; empty when there is none.
+
+### `board` (a situation-board change)
+
+`kind.data` is a change to the shared situation board: an entry recorded or retracted
+(issue #49). The envelope's `from` is the author role and `channel` is `all-units`.
+
+```json
+{ "kind": "board", "data": {
+  "key": "auth-strategy",
+  "section": "decision",
+  "author": "commander",
+  "body": "JWT with 15-minute access tokens; refresh via httpOnly cookie",
+  "retracted": false
+} }
+```
+
+- `key` is the entry's stable topic; recording the same key again updates the entry.
+- `section` is `decision`, `interface`, or `gotcha`.
+- `author` is the role that recorded or retracted it (it also names the envelope's
+  `from`).
+- `body` is the entry's content; empty on a retraction.
+- `retracted` is `true` when this change removes the entry from the board.
+
+### `budget` (a token-spend report)
+
+`kind.data` is a token-spend report against the crew budget, and any cap it hit (issue
+#54). The envelope's `from` is the role the spend is about and `channel` is `all-units`.
+
+```json
+{ "kind": "budget", "data": {
+  "role": "backend",
+  "role_spent": 82000,
+  "role_cap": 100000,
+  "crew_spent": 240000,
+  "crew_budget": 500000
+} }
+```
+
+- `role` is the role whose spend this reports.
+- `role_spent` and `crew_spent` are cumulative token totals for the role and the whole
+  crew.
+- `role_cap` and `crew_budget` are the role's and the crew's caps; each is **omitted**
+  when there is no cap (unbounded).
+- `breach` is added only when the spend hits a ceiling: `role` when the role hit its cap
+  (it idle-stops) or `crew` when the crew hit its budget (the whole crew idle-stops). It
+  is **omitted** when the spend is still within budget.
+
+### `telemetry` (a per-turn usage report)
+
+`kind.data` is a per-turn token-and-cost report (issue #55): the tokens and cost a role
+spent on one turn, emitted every turn whether or not a budget is set. The envelope's
+`from` is the role and `channel` is `all-units`.
+
+```json
+{ "kind": "telemetry", "data": {
+  "role": "backend",
+  "tokens": 3200,
+  "cost_micro_usd": 48000
+} }
+```
+
+- `role` is the role whose turn this usage belongs to.
+- `tokens` is the tokens the turn spent.
+- `cost_micro_usd` is the turn's cost in micro-USD (millionths of a US dollar).
+
+### `usage` (a shared-subscription reading)
+
+`kind.data` is a shared-subscription usage reading and its auto-pause (issue #56): how
+full the shared window is and whether the crew is paused on it. The envelope's `from` is
+`general` and `channel` is `all-units`, since the gauge is crew-wide, not one role's
+action.
+
+```json
+{ "kind": "usage", "data": {
+  "percent": 92,
+  "window_reset": "2026-07-23T09:00:00Z",
+  "paused": true
+} }
+```
+
+- `percent` is the window's fill against the shared subscription limit, a percent in
+  `0..=100`.
+- `paused` is `true` when this reading engaged the auto-pause (new work halts), `false`
+  when it lifted (the window reset, or the operator resumed early).
+- `window_reset` is when the window resets and the pause lifts, an RFC 3339 instant;
+  present on a pause and **omitted** when the pause lifts.
+
 ### `stall` (a coordination stall)
 
 `kind.data` is a coordination stall the fleet-wide monitor detected or resolved (issue
@@ -145,9 +298,8 @@ finish, it does not halt the crew.
 - `summary` is a short account of what the mission shipped, rendered in the completion
   notification. It is an empty string when the reporter gave none.
 
-Other supervisor and broker kinds ride the same envelope and are filterable by `kind`:
-`ledger` (issue #45), `boundary` (issue #46), `verification` (issue #47), `board` (issue
-#49), `budget` (issue #54), `telemetry` (issue #55), and `usage` (issue #56).
+Every kind above rides the same envelope and, except `mission`, is filterable by `kind`
+on `GET /history` and `GET /stream` (see the filter list under Endpoints).
 
 ## Endpoints
 
