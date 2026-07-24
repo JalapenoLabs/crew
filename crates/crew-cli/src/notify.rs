@@ -36,12 +36,15 @@
 //! This mirrors the stall monitor's rule (issue #48): a directed question to a
 //! live teammate is a wait on the crew, not a wait on the General.
 //!
-//! To tell the two apart the notifier tracks roster liveness from the
-//! `lifecycle` events on the same stream ([`Roster`]): a role is live while it
-//! is working or idle, and drops out when it stops or dies. The firehose is
-//! live-only, so the roster reflects the events seen since `crew notify`
-//! connected; an addressee not yet known to be live is treated as
-//! General-facing, so a real question is never silently dropped.
+//! To tell the two apart the notifier tracks roster liveness ([`Roster`]): a
+//! role is live while it is working or idle, and drops out when it stops or
+//! dies. It **seeds** the roster once from `GET /roster` on connect (the
+//! canonical read-once-then-fold pattern, issue #32, #170), so an
+//! already-registered but quiet role is known to be live on attaching to a
+//! running crew, then keeps it current by folding the `lifecycle` events on the
+//! same stream. A role still not known to be live (absent from the seed and
+//! unseen on the stream) is treated as General-facing, so a real question is
+//! never silently dropped.
 //!
 //! Everything else (status, notes, orders, answers, artifacts, ordinary
 //! lifecycle such as `started` or `idle`, activity, board, boundary, and
@@ -78,6 +81,7 @@ use crew_substrate::core::{
     Channel, Event, EventKind, Lifecycle, MessageKind, RoleId, Sender, StallStatus,
 };
 use eyre::Result;
+use serde::Deserialize;
 
 use crate::broker;
 
@@ -161,7 +165,11 @@ struct Notification {
 /// cannot be reached or refuses the stream.
 pub(crate) fn notify(broker: Option<&str>, policy: &NotifyPolicy) -> Result<()> {
     let base = broker::resolve_base(broker)?;
-    let mut roster = Roster::default();
+    // Seed liveness once from `GET /roster` (issue #32, #170) so an already-running
+    // crew's quiet, registered roles are known to be live before any lifecycle
+    // event arrives on the live-only firehose; the stream then keeps the roster
+    // current.
+    let mut roster = Roster::seeded_from(&base);
     broker::tail_events(&base, "/stream", |event| {
         // Fold each lifecycle event first, so a question is classified against
         // the crew's liveness as of this event.
@@ -172,7 +180,8 @@ pub(crate) fn notify(broker: Option<&str>, policy: &NotifyPolicy) -> Result<()> 
     })
 }
 
-/// The crew's live roster, folded from the `lifecycle` events on the stream.
+/// The crew's live roster: seeded once from `GET /roster`, then folded from the
+/// `lifecycle` events on the stream.
 ///
 /// The notifier tracks who is currently a live agent so it can tell a peer
 /// coordination question (a role asking a live teammate, which the General
@@ -180,6 +189,11 @@ pub(crate) fn notify(broker: Option<&str>, policy: &NotifyPolicy) -> Result<()> 
 /// role that is not up to answer). Liveness is the roster's own model (issue
 /// #32): a role counts as live while it is working or idle, present and up or
 /// resumable.
+///
+/// It is seeded once from `GET /roster` on connect (issue #170), so an
+/// already-registered but quiet role is known to be live on attaching to a
+/// running crew, rather than waiting for a fresh `lifecycle` event on the
+/// live-only firehose.
 #[derive(Debug, Default)]
 struct Roster {
     /// The roles currently known to be live agents.
@@ -187,6 +201,31 @@ struct Roster {
 }
 
 impl Roster {
+    /// Seeds the roster from the broker's `GET /roster` snapshot, degrading to
+    /// an empty roster if the fetch or parse fails (issue #32, #170).
+    ///
+    /// This is the canonical read-once-then-fold pattern: seed the current
+    /// membership on connect, then keep it current from the `lifecycle` events
+    /// on the stream. An empty roster over-notifies (a General-facing push a
+    /// live peer could have answered) rather than under-notifies (a real
+    /// question silently dropped), so a missing snapshot never takes the
+    /// watcher down.
+    fn seeded_from(base: &str) -> Self {
+        fetch_roster(base).map_or_else(Self::default, |snapshot| Self::from_snapshot(&snapshot))
+    }
+
+    /// Builds a roster from a parsed `/roster` snapshot, marking every
+    /// `working` or `idle` role live.
+    fn from_snapshot(snapshot: &RosterSnapshot) -> Self {
+        let live = snapshot
+            .roles
+            .iter()
+            .filter(|entry| label_is_live(&entry.liveness))
+            .map(|entry| RoleId::new(entry.role.clone()))
+            .collect();
+        Self { live }
+    }
+
     /// Folds a `lifecycle` event into the roster, updating the sender's
     /// liveness.
     ///
@@ -249,6 +288,50 @@ fn liveness_after(lifecycle: Lifecycle) -> Option<bool> {
         // working/idle liveness.
         Lifecycle::Paused | Lifecycle::Resumed | Lifecycle::StoodDown => None,
     }
+}
+
+/// Whether a `/roster` wire liveness label marks a role as a live agent.
+///
+/// A role is live while it is `working` or `idle` (present and up or
+/// resumable); `stopped`, `dead`, and any unknown label read as not live, so an
+/// uncertain role is treated as unable to answer and its question stays
+/// General-facing. Mirrors [`liveness_after`], which folds the stream's
+/// `lifecycle` transitions.
+fn label_is_live(liveness: &str) -> bool {
+    matches!(liveness, "working" | "idle")
+}
+
+/// Fetches and parses the broker's `GET /roster` snapshot, or `None` on any
+/// failure.
+///
+/// Best-effort by design (issue #170): an unreachable or malformed roster
+/// leaves the notifier seeding an empty roster and catching liveness up from
+/// the stream, so it never takes the watcher down. The stream connection,
+/// opened next, is what fails fast when the broker is down.
+fn fetch_roster(base: &str) -> Option<RosterSnapshot> {
+    ureq::get(&format!("{base}/roster"))
+        .call()
+        .ok()
+        .and_then(|response| response.into_string().ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// The `GET /roster` snapshot, reduced to the roles and their liveness the
+/// notifier seeds from (issue #32). Other fields (`count`, owned paths) are
+/// ignored.
+#[derive(Debug, Deserialize)]
+struct RosterSnapshot {
+    /// The registered roles, each with its current liveness.
+    roles: Vec<RosterEntry>,
+}
+
+/// One role in the `/roster` snapshot: its name and current liveness.
+#[derive(Debug, Deserialize)]
+struct RosterEntry {
+    /// The role's id.
+    role: String,
+    /// The role's current liveness (`working` / `idle` / `stopped` / `dead`).
+    liveness: String,
 }
 
 /// The single agent a question is addressed to, if any.
@@ -448,7 +531,9 @@ mod tests {
         MissionEvent, RoleId, Sender, StallEvent, StallKind, StallStatus, Timestamp,
     };
 
-    use super::{moment_of, notification_for, Moment, NotifyPolicy, Roster};
+    use super::{
+        label_is_live, moment_of, notification_for, Moment, NotifyPolicy, Roster, RosterSnapshot,
+    };
 
     /// A roster with `roles` folded in as live agents, via their `started`
     /// lifecycle events.
@@ -882,6 +967,74 @@ mod tests {
             )
             .is_none(),
             "a muted completion does not notify"
+        );
+    }
+
+    /// Parses a `/roster`-shaped snapshot, with the extra wire fields the
+    /// notifier ignores, into the seed struct.
+    fn snapshot(roles: &[(&str, &str)]) -> RosterSnapshot {
+        let roles: Vec<_> = roles
+            .iter()
+            .map(|(role, liveness)| {
+                serde_json::json!({ "role": role, "owned_paths": [], "liveness": liveness })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "count": { "live": 0, "working": 0, "idle": 0, "stopped": 0, "dead": 0 },
+            "roles": roles,
+        }))
+        .expect("the roster snapshot parses")
+    }
+
+    #[test]
+    fn label_is_live_marks_only_working_and_idle() {
+        assert!(label_is_live("working"), "a working role is live");
+        assert!(label_is_live("idle"), "an idle role is live");
+        assert!(!label_is_live("stopped"), "a stopped role is not live");
+        assert!(!label_is_live("dead"), "a dead role is not live");
+        assert!(
+            !label_is_live("paused"),
+            "an unknown label is not live, so its question stays General-facing"
+        );
+    }
+
+    #[test]
+    fn seeding_from_the_roster_marks_working_and_idle_roles_live() {
+        let roster = Roster::from_snapshot(&snapshot(&[
+            ("backend", "working"),
+            ("frontend", "idle"),
+            ("qa", "stopped"),
+            ("docs", "dead"),
+        ]));
+        assert!(roster.is_live(&RoleId::new("backend")), "working is live");
+        assert!(roster.is_live(&RoleId::new("frontend")), "idle is live");
+        assert!(!roster.is_live(&RoleId::new("qa")), "stopped is not live");
+        assert!(!roster.is_live(&RoleId::new("docs")), "dead is not live");
+    }
+
+    #[test]
+    fn a_seeded_live_peer_keeps_its_question_quiet_on_fresh_attach() {
+        // The fresh-attach window this closes (issue #170): a peer question to an
+        // already-registered, quiet role must not over-notify. Seeding from /roster
+        // makes frontend known-live before any lifecycle event arrives on the stream.
+        let roster = Roster::from_snapshot(&snapshot(&[("frontend", "working")]));
+        assert_eq!(
+            moment_of(&question("backend", "@frontend", "which lib?"), &roster),
+            None,
+            "a seeded-live peer's question stays quiet without a fresh lifecycle event",
+        );
+    }
+
+    #[test]
+    fn an_unreachable_broker_seeds_an_empty_roster() {
+        // Port 1 has nothing listening, so the seed fetch fails; the notifier degrades
+        // to an empty roster rather than failing (issue #170). An empty roster
+        // over-notifies (never drops a question) rather than under-notifies.
+        let roster = Roster::seeded_from("http://127.0.0.1:1");
+        assert_eq!(
+            moment_of(&question("backend", "@frontend", "which lib?"), &roster),
+            Some(Moment::QuestionAsked),
+            "with no seed, an addressee not known to be live is General-facing",
         );
     }
 }

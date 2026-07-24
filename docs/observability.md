@@ -326,11 +326,13 @@ General in chatter that is not theirs to answer. A question is **General-facing*
 it is broadcast to `all-units`, or addressed to a role that is not a live agent (stopped,
 dead, or never in the unit); a directed question to a live teammate stays quiet. This
 mirrors the stall monitor's rule (issue #48): a directed question to a live teammate is a
-wait on the crew, not on the General. The notifier tracks roster liveness by folding the
-`lifecycle` events on the same stream (a role is live while it is working or idle, and
-drops out when it stops or dies); since the firehose is live-only, an addressee not yet
-known to be live is treated as General-facing, so a real question is never silently
-dropped.
+wait on the crew, not on the General. The notifier tracks roster liveness: it seeds the
+roster once from `GET /roster` on connect (the canonical read-once-then-fold pattern, issue
+#32, #170), so an already-registered but quiet role is known to be live on attaching to a
+running crew, then keeps it current by folding the `lifecycle` events on the same stream (a
+role is live while it is working or idle, and drops out when it stops or dies). A role
+still not known to be live (absent from the seed and unseen on the stream) is treated as
+General-facing, so a real question is never silently dropped.
 
 Everything else, status and notes, orders, answers and artifacts, ordinary lifecycle such
 as `started` or `idle`, activity, board, boundary, and verification events, is routine and
