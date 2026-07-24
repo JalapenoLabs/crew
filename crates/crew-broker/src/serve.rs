@@ -23,6 +23,17 @@ use crate::{
 /// surfacing the resume promptly.
 const USAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long graceful shutdown waits for in-flight connections to finish before
+/// forcing a stop (issue #204).
+///
+/// A request/response connection drains well within this, so it finishes
+/// cleanly. An SSE subscriber (`/inbox`, `/stream`) holds its connection open
+/// indefinitely and never would, so without a bound crewd would not exit while
+/// any `crew watch` or inbox subscriber stays connected. Short enough that
+/// `crew down` feels prompt, long enough not to cut off a genuine in-flight
+/// response.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
 /// Runs the broker until a shutdown signal (Ctrl-C or, on Unix, `SIGTERM`).
 ///
 /// This is [`run_until`] wired to the process signal handler; the `crewd`
@@ -41,7 +52,8 @@ pub async fn run(config: Config) -> Result<(), ServeError> {
 /// Refuses a non-loopback bind unless [`Config::allow_non_local`] is set,
 /// ensures the state directory exists, opens the durable log, binds the
 /// configured address, and serves the HTTP surface, draining gracefully when
-/// `shutdown` resolves.
+/// `shutdown` resolves but bounded by a short grace so an open SSE subscriber
+/// cannot stall the exit (issue #204).
 ///
 /// # Errors
 /// Returns an error if the configured address is non-loopback and not opted in,
@@ -80,9 +92,16 @@ pub async fn run_until(
 /// serve on an ephemeral port or over a specific [`Storage`](crate::Storage)
 /// backend, and drives shutdown with its own future.
 ///
+/// When `shutdown` resolves it drains in-flight connections, but bounded: an
+/// SSE subscriber (`/inbox`, `/stream`) holds its connection open indefinitely,
+/// so a fully graceful drain would never complete while a watcher is connected.
+/// After a short grace period any still-open connection is forced closed, so
+/// crewd always exits promptly (issue #204).
+///
 /// # Errors
 /// Returns an error if the listener has no local address or the server exits
-/// with an error.
+/// with an error while running. A forced stop after the shutdown grace is not
+/// an error.
 pub async fn serve(
     listener: TcpListener,
     state: AppState,
@@ -105,16 +124,63 @@ pub async fn serve(
     // A durable backend persists in the background (issue #206); keep a handle so
     // its writer can be drained once the server stops, before returning.
     let storage = Arc::clone(&state.storage);
-    let result = axum::serve(listener, api::build(state))
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(ServeError::serve);
+
+    // Serve on a task so the caller's `shutdown` is awaited alongside it and the
+    // graceful drain can then be bounded. The `drain` trigger starts axum's
+    // graceful shutdown; `SHUTDOWN_GRACE` bounds it so a long-lived SSE stream
+    // cannot stall the exit (issue #204). The task is wrapped so that cancelling
+    // `serve` itself stops the server rather than detaching it.
+    let (drain, drained) = tokio::sync::oneshot::channel::<()>();
+    let mut server = AbortOnDrop(tokio::spawn(async move {
+        axum::serve(listener, api::build(state))
+            .with_graceful_shutdown(async move {
+                let _ = drained.await;
+            })
+            .await
+    }));
+
+    // Serve until the caller signals shutdown, then start the bounded drain.
+    shutdown.await;
+    let _ = drain.send(());
+
+    let result = match tokio::time::timeout(SHUTDOWN_GRACE, &mut server.0).await {
+        // Drained (or errored) within the grace: a real serve error surfaces; a
+        // task that was cancelled or panicked at shutdown counts as stopped.
+        Ok(joined) => {
+            joined.map_or_else(|_join| Ok(()), |served| served.map_err(ServeError::serve))
+        }
+        // A long-lived stream outlasted the grace: force the stop so crewd exits.
+        // `server` dropping aborts the task; log why the drain was cut short.
+        Err(_elapsed) => {
+            event!(
+                name: "broker.serve.forced_shutdown",
+                Level::WARN,
+                server.address = %local,
+                crew.grace_secs = SHUTDOWN_GRACE.as_secs(),
+                "shut down after the {{crew.grace_secs}}s grace with connections still open \
+                 (an SSE subscriber); forcing the stop",
+            );
+            Ok(())
+        }
+    };
 
     sweeper.abort();
     // Flush events still in the writer's queue so a shutdown mid-burst reaches
     // disk before the process exits. A no-op for a synchronous backend.
     storage.flush();
     result
+}
+
+/// A server task that is aborted when dropped, so cancelling [`serve`] stops
+/// the server rather than detaching it (a plain
+/// [`JoinHandle`](tokio::task::JoinHandle) drop only detaches, leaving the
+/// task, and its bound port, running).
+struct AbortOnDrop(tokio::task::JoinHandle<std::io::Result<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Sweeps for an expired usage auto-pause on a timer, announcing each lift.

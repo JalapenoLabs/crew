@@ -262,7 +262,11 @@ model, all serde round-tripping, plus the `Channel` model (issue #11) that parse
 the three channel names (`all-units`, direct `@role`, `a+b` pair), canonicalizes a
 pair regardless of member order, and resolves which roles a channel reaches; and
 `crewd` (the broker, issues #7, #8, #9, #10, #11, #12, #13 and #14)
-starts on loopback, serves `GET /health`, and shuts down gracefully. It keeps state
+starts on loopback, serves `GET /health`, and shuts down gracefully but bounded: the
+graceful drain waits for in-flight connections, yet an SSE subscriber (`/inbox`,
+`/stream`) holds its connection open indefinitely, so after a short grace any still-open
+stream is forced closed and crewd exits promptly rather than hanging on a live watcher
+(issue #204). It keeps state
 behind a swappable `Storage` trait (append, flush, query, roster read/write; issue
 #13): the daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus
 an in-memory index, rooted at the state dir), so a restart replays the full log;
