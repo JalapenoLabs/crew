@@ -39,6 +39,18 @@ pub fn start_broker() -> String {
     format!("http://{addr}")
 }
 
+/// A stream-json `init` line, the activity parser's `TurnStarted` (issue #24).
+///
+/// A stub that echoes it opens a turn, so the supervisor sees the process as
+/// working mid-turn: silence after it is a hang, not idleness.
+pub const TURN_OPEN: &str = r#"{"type":"system","subtype":"init","session_id":"t","model":"opus"}"#;
+
+/// A stream-json `result` line, the activity parser's `TurnEnded` (issue #24).
+///
+/// A stub that echoes it closes its turn, so the supervisor sees the process as
+/// idle between turns: silence after it is idleness, not a hang.
+pub const TURN_CLOSE: &str = r#"{"type":"result","subtype":"success","result":"done"}"#;
+
 /// A stub agent process for `role`: run `script` under a shell.
 pub fn stub(role: &str, script: &str) -> PreparedAgent {
     PreparedAgent {
