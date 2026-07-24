@@ -4,6 +4,7 @@ use std::{
     env,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    time::Duration,
 };
 
 use crew_core::RoleId;
@@ -22,6 +23,16 @@ pub const DEFAULT_STATE_DIR: &str = ".crew";
 /// is spent, mirroring Seraphim's usage auto-pause. A crew retunes it with
 /// `CREW_BROKER_USAGE_THRESHOLD`.
 pub const DEFAULT_USAGE_THRESHOLD: u8 = 90;
+
+/// The default retention window: prunable events older than this are pruned
+/// (issue #201).
+///
+/// Seven days keeps recent history readable while bounding the broker's memory
+/// and log on a long-running unit. Only ephemeral kinds (`message`, `activity`,
+/// `boundary`, `usage`, `stall`) age out; state-bearing kinds a boot projection
+/// rebuilds are kept regardless. A crew retunes it with
+/// `CREW_BROKER_RETENTION_HOURS`, or sets it to `0` to retain everything.
+pub const DEFAULT_RETENTION_HOURS: u64 = 24 * 7;
 
 /// The default crew commander, when none is configured (issue #180).
 ///
@@ -70,6 +81,12 @@ pub struct Config {
     /// [`DEFAULT_COMMANDER`](crate::DEFAULT_COMMANDER); `crew up` sets it from
     /// the crew config so the real commander is enforced.
     pub commander: RoleId,
+    /// How long a prunable event is kept before retention drops it (issue
+    /// #201). `Some(window)` prunes ephemeral events older than `window` from
+    /// memory and disk on a periodic sweep, bounding the broker's footprint on
+    /// a long-running unit; `None` retains everything. Defaults to
+    /// [`DEFAULT_RETENTION_HOURS`](crate::DEFAULT_RETENTION_HOURS).
+    pub retention_window: Option<Duration>,
 }
 
 impl Default for Config {
@@ -82,6 +99,7 @@ impl Default for Config {
             secrets: Vec::new(),
             usage_threshold: DEFAULT_USAGE_THRESHOLD,
             commander: RoleId::new(DEFAULT_COMMANDER),
+            retention_window: Some(Duration::from_secs(DEFAULT_RETENTION_HOURS * 3600)),
         }
     }
 }
@@ -93,13 +111,15 @@ impl Config {
     /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it),
     /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to
     /// mask), `CREW_BROKER_USAGE_THRESHOLD` (the usage percent at which new
-    /// work auto-pauses), and `CREW_BROKER_COMMANDER` (the role that may
-    /// curate the board, issue #180).
+    /// work auto-pauses), `CREW_BROKER_COMMANDER` (the role that may curate the
+    /// board, issue #180), and `CREW_BROKER_RETENTION_HOURS` (how long a
+    /// prunable event is kept, `0` to retain everything, issue #201).
     ///
     /// # Errors
     /// Returns an error if `CREW_BROKER_HOST` is not a valid IP address,
-    /// `CREW_BROKER_PORT` is not a valid port number, or
-    /// `CREW_BROKER_USAGE_THRESHOLD` is not a percent.
+    /// `CREW_BROKER_PORT` is not a valid port number,
+    /// `CREW_BROKER_USAGE_THRESHOLD` is not a percent, or
+    /// `CREW_BROKER_RETENTION_HOURS` is not a whole number of hours.
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
         if let Ok(host) = env::var("CREW_BROKER_HOST") {
@@ -135,6 +155,13 @@ impl Config {
             if !commander.is_empty() {
                 config.commander = RoleId::new(commander);
             }
+        }
+        if let Ok(hours) = env::var("CREW_BROKER_RETENTION_HOURS") {
+            let hours: u64 = hours
+                .parse()
+                .wrap_err("CREW_BROKER_RETENTION_HOURS is not a whole number of hours")?;
+            // Zero disables retention: keep every event, at the cost of unbounded growth.
+            config.retention_window = (hours != 0).then(|| Duration::from_secs(hours * 3600));
         }
         Ok(config)
     }

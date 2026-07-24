@@ -30,7 +30,10 @@ use tokio_stream::{
     Stream, StreamExt,
 };
 
-use crate::state::{AppState, Sequenced};
+use crate::{
+    state::{AppState, Sequenced},
+    store::StoredEvent,
+};
 
 /// Subscribes, replays the matching backlog after the `Last-Event-ID` cursor,
 /// then streams the matching live events.
@@ -59,18 +62,16 @@ pub(crate) fn resume_stream(
     let resume_from = last_event_id(headers).map_or(live_from, |id| id + 1);
 
     // Read only the gap after the cursor, not the whole log (issue #225): a
-    // reconnecting client that missed the last few events replays only those. The
-    // slice starts at `resume_from`, so event `index` there has sequence
-    // `resume_from + index`.
+    // reconnecting client that missed the last few events replays only those.
+    // Each event carries its stable stored sequence, so a resume stays correct
+    // across a prune of the events between (issue #201).
     let backlog = state.storage.events_since(resume_from);
 
     // Replay is materialized eagerly, so `keep` is only borrowed here before it is
     // moved into the live filter below.
     let replay: Vec<Result<SseEvent, Infallible>> = backlog
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, event)| {
-            let seq = resume_from + index as u64;
+        .filter_map(|StoredEvent { seq, event }| {
             if seq < live_from && keep(&event) {
                 to_sse(seq, &event).map(Ok)
             } else {

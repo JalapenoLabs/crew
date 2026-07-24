@@ -290,7 +290,18 @@ the writer counts failed writes and keeps the last error via `Storage::durabilit
 operator instead of hiding until a restart replays a short log. The log flushes each line to
 the OS but does not `fsync`, so a clean restart loses nothing while a power loss can drop the
 unsynced tail; periodic `fsync` is a deliberate non-goal, deferred to the Postgres backend.
-It stores the
+Every event carries a stable absolute sequence assigned on append (monotonic, persisted in
+the log, never reused or renumbered), and a background retention sweep prunes aged-out
+events so the broker's memory and log stay bounded on a long-running unit (issue #201): the
+ephemeral kinds no projection rebuilds (`message`, `activity`, `boundary`, `usage`, `stall`)
+older than the retention window are dropped from memory and disk, while the state-bearing
+kinds a boot projection rebuilds (`lifecycle`, `verification`, `board`, `ledger`, `telemetry`,
+`budget`, `mission`) are kept regardless, and the newest event is always kept as the sequence
+high-water mark so a restart never reuses a pruned sequence. The keep-set is derived from
+`EventKind` itself by an exhaustive match, so a new kind fails to compile until it is
+classified, and the window defaults to seven days (`CREW_BROKER_RETENTION_HOURS`, `0` to
+disable). Because the sequence is stable, both the SSE `Last-Event-ID` and the `/history`
+cursor resolve correctly across a prune. It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
 reads the log over `GET /history` (the single bounded read path: filtered, ordered, and
 cursor-paginated with a ceiling, so there is no unpaginated full-log dump, issue #209),
@@ -311,9 +322,11 @@ filtered by `channel`, `role` (sent by), `agent` (a role's activity timeline), `
 `kind=message,ledger,verification`, issue #125),
 `task`, and `since`, ordered by `ts` then a per-event
 sequence, and paged with an opaque cursor (`after`/`next_cursor`) that stays stable
-under concurrent writes and a future log trim: it carries a prune-stable `(ts, seq)`
-key, not a log index, so compaction or pruning never leaves a cursor pointing at the
-wrong event (issues #12, #208); `summary=true` returns the rolling-summary
+under concurrent writes and a log prune: it carries a prune-stable `(ts, seq)`
+key on a stable absolute sequence (assigned on append, persisted in the log, never reused
+or renumbered), not a log index, so pruning never leaves a cursor pointing at the
+wrong event and a lossless SSE resume stays correct across it (issues #12, #208, #201);
+`summary=true` returns the rolling-summary
 compaction instead (issue #19): the older events folded into bounded aggregates
 (counts by sender, message kind, and lifecycle state, plus a capped digest of recent
 orders and artifacts and a one-line headline) plus the recent raw `tail` sized by
@@ -937,8 +950,10 @@ default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
 out of every message before storing or streaming it), `CREW_BROKER_USAGE_THRESHOLD`
 (the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56),
-and `CREW_BROKER_COMMANDER` (the role that may curate the board alongside each entry's author,
-default `commander`; issue #180). Binding a non-loopback address is refused unless the
+`CREW_BROKER_COMMANDER` (the role that may curate the board alongside each entry's author,
+default `commander`; issue #180), and `CREW_BROKER_RETENTION_HOURS` (how long a prunable
+event is kept before retention drops it, default 168 (seven days), `0` to retain
+everything; issue #201). Binding a non-loopback address is refused unless the
 non-local flag is set, so the broker never exposes itself to the network by accident.
 
 **Running the crew:** `cargo run --bin crew -- up` brings the unit online (add

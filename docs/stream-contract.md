@@ -316,8 +316,10 @@ data: {"ts":"…","from":{"kind":"role","id":"backend"},"channel":"all-units","k
 ```
 
 - The `data` line is the event JSON above.
-- The `id` line is the event's **log sequence**, a monotonic integer and its position in
-  the durable log. It is the cursor that bridges the live stream to history (below).
+- The `id` line is the event's **log sequence**, a monotonic integer assigned on append,
+  never reused, and never renumbered, so it stays stable even after aged events are pruned
+  from the log (issue #201). It is the cursor that bridges the live stream to history
+  (below).
 - A fresh connection starts at the **live tail**: it delivers events from the moment it
   connects, not the backlog. A consumer backfills the past through `/history`.
 - **Reconnect resumes losslessly** (issue #134): send the last `id` you saw as a
@@ -345,7 +347,7 @@ stable cursor:
   (e.g. `kind=message,ledger,verification`), so a consumer narrows to a subset
   server-side rather than fetching everything and filtering client-side. The same
   filters narrow `GET /stream`.
-- Ordering is deterministic: by `ts`, then log position.
+- Ordering is deterministic: by `ts`, then the event's stable sequence.
 - Pagination: pass `limit` (default 100, max 1000) and `after=<cursor>`. `next_cursor`
   is the position to resume from; it is **omitted** on the last page.
 - The cursor space is the **same** as the stream's `id`: a consumer that last saw
@@ -359,6 +361,14 @@ stable cursor:
 paginates with a ceiling (`limit` default 100, max 1000), so a read is always bounded
 even as the log grows. An unpaginated full-log dump is intentionally not offered (issue
 #209): page with `after=<cursor>`, or use `summary=true` (below) for bounded catch-up.
+
+The broker prunes aged-out events so its memory and log stay bounded on a long-running
+unit (issue #201). Only ephemeral kinds age out (`message`, `activity`, `boundary`,
+`usage`, `stall`); the state-bearing kinds a projection rebuilds (`lifecycle`,
+`verification`, `board`, `ledger`, `telemetry`, `budget`, `mission`) are kept regardless.
+Because sequences are never reused, a reconnect whose `Last-Event-ID` names a pruned event
+still resumes without gap or duplicate among the surviving events; the pruned events
+themselves are simply older than the retention window and no longer replayable.
 
 ### Bounded catch-up: `GET /history?summary=true`
 

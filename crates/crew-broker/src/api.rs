@@ -92,13 +92,13 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{extract::State, http::StatusCode};
-    use crew_core::{Event, RoleId};
+    use crew_core::{Event, RoleId, Timestamp};
 
     use super::health;
     use crate::{
         config::Config,
         state::AppState,
-        store::{Durability, RoleStatus, Roster, Storage},
+        store::{Durability, RoleStatus, Roster, Storage, StoredEvent},
     };
 
     /// A storage double with a fixed durability snapshot, for the health probe.
@@ -112,12 +112,17 @@ mod tests {
         fn next_seq(&self) -> u64 {
             0
         }
-        fn append(&self, _event: Event) {}
+        fn append(&self, _event: Event) -> u64 {
+            0
+        }
         fn durability(&self) -> Durability {
             self.0.clone()
         }
-        fn events(&self) -> Vec<Event> {
+        fn stored_events(&self) -> Vec<StoredEvent> {
             Vec::new()
+        }
+        fn retain(&self, _before: Timestamp) -> usize {
+            0
         }
         fn roster(&self) -> Roster {
             Roster::new()
