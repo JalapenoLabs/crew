@@ -58,7 +58,11 @@ it shows only what arrived since the last call (issue #130). The cursor is one s
 file per role under the broker state dir (`<state_dir>/shim-cursors/<role>.cursor`),
 holding the count of inbox messages already seen; `crew inbox` seeds the client from it
 and writes the advanced position back. A first call, or a role with no saved cursor,
-shows the whole inbox. These gaps remain, by the nature of a stateless CLI:
+shows the whole inbox. The task a role adopts from an order persists the same way, one
+file per role (`<state_dir>/shim-cursors/<role>.task`, issue #132): `crew inbox` saves
+the task an order assigned, and a later `crew send` / `crew order` restores it and
+stamps it, so a shim role's work correlates to its task exactly as the long-lived MCP
+client's does. These gaps remain, by the nature of a stateless CLI:
 
 - **No push.** The MCP roadmap subscribes to the broker's per-role SSE stream for
   native notifications. The shim polls with `crew inbox`; it does not hold a stream

@@ -37,7 +37,7 @@ use std::{
 
 use crew_core::{
     path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind, RoleId,
-    Sender,
+    Sender, TaskId,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -73,6 +73,11 @@ pub struct Broker {
     /// drains its buffer; when `None`, it falls back to the pull-based
     /// read.
     inbox_stream: Option<InboxStream>,
+    /// The task this role is working, so the messages it sends correlate to it
+    /// (issue #132). Set when [`order`](Broker::order) mints one, and adopted
+    /// by [`inbox`](Broker::inbox) from an order addressed to the role;
+    /// `None` outside any task.
+    task: Option<TaskId>,
 }
 
 impl Broker {
@@ -96,6 +101,7 @@ impl Broker {
             agent,
             read_through: 0,
             inbox_stream: None,
+            task: None,
         }
     }
 
@@ -115,10 +121,34 @@ impl Broker {
         self
     }
 
+    /// Seeds the task context, so the messages this client sends correlate to
+    /// `task` until [`inbox`](Broker::inbox) adopts a newer one (issue #132).
+    ///
+    /// The MCP server holds this in memory across its session; a short-lived
+    /// caller such as the CLI shim persists the task a prior read adopted and
+    /// seeds a fresh client with it, so `crew send` after `crew inbox` stamps
+    /// the same task the long-lived path would.
+    #[must_use]
+    pub fn with_task(mut self, task: TaskId) -> Self {
+        self.task = Some(task);
+        self
+    }
+
     /// The role this client acts as.
     #[must_use]
     pub fn role(&self) -> &RoleId {
         &self.role
+    }
+
+    /// The task this role is currently working, if any (issue #132).
+    ///
+    /// Set by [`order`](Broker::order) minting one, or adopted by
+    /// [`inbox`](Broker::inbox) from an order addressed to the role. A
+    /// stateless caller persists it after a read and restores it with
+    /// [`with_task`](Broker::with_task) on the next client.
+    #[must_use]
+    pub fn task(&self) -> Option<TaskId> {
+        self.task
     }
 
     /// The number of inbox messages the pull-based read has delivered, a stable
@@ -153,12 +183,25 @@ impl Broker {
             "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
                 .to_owned()
         })?;
-        let payload = json!({
+        let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": "note",
             "body": body,
-        });
+        }));
         self.post_message(target.name().as_str(), &payload)
+    }
+
+    /// Adds this role's task context to an outbound message `payload` when set,
+    /// so the event correlates to the task the role is working (issue #132).
+    ///
+    /// A role outside any task stamps nothing, which serializes to an omitted
+    /// field, so an untasked message carries no id. This is the send-side of
+    /// the same envelope [`inbox`](Broker::inbox) adopts a task from.
+    fn stamp_task(&self, mut payload: Value) -> Value {
+        if let Some(task) = self.task {
+            payload["task"] = json!(task);
+        }
+        payload
     }
 
     /// Asks a typed `question` as this role, to a role, a channel, or the
@@ -184,12 +227,12 @@ impl Broker {
             "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
                 .to_owned()
         })?;
-        let payload = json!({
+        let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": "question",
             "options": options,
             "body": body,
-        });
+        }));
         self.post_message(target.name().as_str(), &payload)
     }
 
@@ -216,12 +259,12 @@ impl Broker {
             "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
                 .to_owned()
         })?;
-        let payload = json!({
+        let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": "answer",
             "in_reply_to": in_reply_to,
             "body": body,
-        });
+        }));
         self.post_message(target.name().as_str(), &payload)
     }
 
@@ -232,6 +275,13 @@ impl Broker {
     /// (title, scope, owned paths, acceptance) on the specialist's direct
     /// channel, so the specialist reads a task it can act on rather than
     /// freeform prose.
+    ///
+    /// This is the task's mint point (issue #132): the order carries a
+    /// [`TaskId`], so every event worked under it correlates. The commander is
+    /// outside any task, so its order mints a fresh one; a specialist that
+    /// already adopted a task (from an order in its inbox) threads that task
+    /// onto a sub-order, so the whole chain shares one id. The assigned role
+    /// adopts the task when it reads the order (see [`inbox`](Broker::inbox)).
     ///
     /// # Errors
     /// Returns a message if `to` is not a plain role name, or the broker
@@ -248,9 +298,14 @@ impl Broker {
         let target = Channel::resolve(Some(to), None, &self.commander)
             .filter(|channel| matches!(channel, Channel::Direct(_)))
             .ok_or_else(|| format!("`{to}` is not a role to order; name a single specialist"))?;
+        // The commander mints a fresh task; a specialist already working one threads
+        // it. `TaskId::default` mints a fresh random id (there is no fixed
+        // default).
+        let task = self.task.unwrap_or_default();
         let payload = json!({
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": "order",
+            "task": task,
             "title": title,
             "scope": scope,
             "owned_paths": owned_paths,
@@ -393,24 +448,54 @@ impl Broker {
     /// response is malformed. The push path never fails: it drains an
     /// in-memory buffer.
     pub fn inbox(&mut self) -> Result<Vec<InboxItem>, String> {
-        // Push path: drain the buffered batch the background stream has delivered.
-        if let Some(events) = self.inbox_stream.as_ref().map(InboxStream::drain) {
-            return Ok(events
-                .iter()
-                .filter_map(|event| self.addressed(event))
-                .collect());
+        // Gather the events new since the last read: drain the live buffer on the push
+        // path (issue #76), else read history and slice from the pull cursor.
+        let events = if let Some(drained) = self.inbox_stream.as_ref().map(InboxStream::drain) {
+            drained
+        } else {
+            let messages = self.message_log()?;
+            let start = self.read_through.min(messages.len());
+            self.read_through = messages.len();
+            messages[start..].to_vec()
+        };
+
+        // Adopt the task of the newest order addressed to this role, so the messages
+        // this agent sends next correlate to the work just assigned (issue #132).
+        if let Some(task) = self.latest_assigned_task(&events) {
+            self.task = Some(task);
         }
 
-        // Pull fallback (a runtime without streaming): read history, slice from the
-        // cursor.
-        let messages = self.message_log()?;
-        let start = self.read_through.min(messages.len());
-        let new = messages[start..]
+        Ok(events
             .iter()
             .filter_map(|event| self.addressed(event))
-            .collect();
-        self.read_through = messages.len();
-        Ok(new)
+            .collect())
+    }
+
+    /// The task assigned by the newest order addressed to this role in
+    /// `events`, if any (issue #132).
+    ///
+    /// Only an order (not a note or a question) assigns work, and only one
+    /// addressed to this role and not sent by it; the newest such order wins,
+    /// so a re-tasking supersedes an earlier assignment. An order carrying
+    /// no task assigns none.
+    fn latest_assigned_task(&self, events: &[Event]) -> Option<TaskId> {
+        events.iter().rev().find_map(|event| {
+            let EventKind::Message(message) = &event.kind else {
+                return None;
+            };
+            if !matches!(message.kind, MessageKind::Order { .. }) {
+                return None;
+            }
+            if event.from == Sender::Role(self.role.clone()) {
+                return None;
+            }
+            if !Channel::parse(event.channel.as_str())
+                .is_some_and(|channel| channel.addresses(&self.role))
+            {
+                return None;
+            }
+            event.task
+        })
     }
 
     /// Registers this role on the roster with the lane it owns, so the unit
