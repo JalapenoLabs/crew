@@ -89,7 +89,10 @@ not a reimplementation of the agent.
   General orders a role itself, bypassing the commander, and the commander is informed
   rather than bypassed silently), and reassign an in-flight task from one role to another
   against the work ledger, informing both roles and the commander (`crew reassign`, issue
-  #42's second half, done).
+  #42's second half, done). Order-issuing is a commander act, enforced (issue #194): the
+  broker refuses an `order` from any role but the crew's commander or the General (403),
+  so tracked assignments fan out from the hub rather than a free-for-all, and a specialist
+  delegates through the escape valves (`crew_send` / `crew_ask`) or asks the commander.
 - **Coordination robustness.** Parallel roles work in isolated git worktrees
   (`worktrees` in the crew config, issue #43) and integrate through a deliberate step
   (`crew integrate`, issue #44: merge each role's `crew/<role>` branch into one branch,
@@ -354,7 +357,9 @@ touches the store. It exposes twenty
 tools with self-documenting schemas: `crew_send` (post a note as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
-fan-out handle, issue #27), the steering pair `crew_redirect` / `crew_belay` (steer a
+fan-out handle, issue #27, and commander-only: the broker refuses an order from any role
+but the commander or the General, so tracked work fans out from the hub, issue #194), the
+steering pair `crew_redirect` / `crew_belay` (steer a
 specialist mid-task as the role, a typed `redirect` that nudges without stopping or a
 `belay` that halts and re-tasks, so the commander interjects in-band through its own
 tools, not only the General over the CLI; the specialist honors it at its next tool
