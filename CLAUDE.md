@@ -280,7 +280,9 @@ flushes each line to the OS but does not `fsync`, so a clean restart loses nothi
 a power loss can drop the unsynced tail; periodic `fsync` is a deliberate non-goal,
 deferred to the Postgres backend. It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
-reads the log over `GET /events`, and accepts messages over `POST
+reads the log over `GET /history` (the single bounded read path: filtered, ordered, and
+cursor-paginated with a ceiling, so there is no unpaginated full-log dump, issue #209),
+and accepts messages over `POST
 /channels/{channel}/messages`: the channel comes from the path, the broker stamps
 `ts` and `id` server-side (rejecting any client-supplied `ts`, `id`, or `channel`),
 masks configured secret values out of the event, persists it, and fans it to every

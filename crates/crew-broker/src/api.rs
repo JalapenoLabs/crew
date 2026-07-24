@@ -11,7 +11,7 @@ use crate::{
 /// Builds the broker's axum [`Router`], wired to the shared [`AppState`].
 ///
 /// Serves `GET /health`, `POST /channels/{channel}/messages` (post a message),
-/// `GET /events` (read the log), `GET /stream` (the whole live feed),
+/// `GET /stream` (the whole live feed),
 /// `GET /inbox?role=<role>` (a role's live, self-filtered SSE stream),
 /// `GET /activity?agent=<role>` (a role's live activity timeline over SSE),
 /// `GET /history` (read past events, filtered and paginated, or `summary=true`
