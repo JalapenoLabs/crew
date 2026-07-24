@@ -385,9 +385,16 @@ captured stdout (issues #24, #177). The parser reads the `result` line's `usage`
 fields summed) and `total_cost_usd`, and the activity forwarder calls `record_usage(role,
 tokens, cost_micro_usd)` per turn, so budget enforcement charges against real spend rather
 than a directly poked seam. An unbounded crew (no budget and no caps) records nothing, so a
-crew that opts out pays no overhead. A live `GET /budget` snapshot for the cockpit is a
-natural next step once the cockpit (issue #51) lands; the spend already rides the stream in
-the meantime.
+crew that opts out pays no overhead.
+
+Beyond the stream, the broker folds the `budget` events into a **snapshot** and serves it at
+**`GET /budget`** (issue #176): current spend against budget per role (its cumulative spend
+and cap) and crew-wide (the crew total and budget). Each `budget` event carries the running
+totals the supervisor computed, so the projection is latest-wins, the newest report for a
+role carries its current spend and the newest overall the crew total. Like the situation
+board (issue #49) and the `GET /stats` rollup, it is a projection of the durable log, rebuilt
+by folding the `budget` events on a restart, so the cockpit (issue #51) reads current spend
+from one snapshot rather than replaying the stream.
 
 ## Cost, tokens, and time telemetry
 

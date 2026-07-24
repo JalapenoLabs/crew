@@ -424,6 +424,116 @@ impl Stats {
     }
 }
 
+/// One role's line in the `GET /budget` snapshot: its cumulative spend and cap
+/// (issues #54, #176).
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleBudgetView {
+    /// The role.
+    pub role: RoleId,
+    /// The role's cumulative token spend, from its latest `budget` event.
+    pub spent: u64,
+    /// The role's own cap, if it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<u64>,
+}
+
+/// The crew-wide line in the `GET /budget` snapshot: total spend against the
+/// crew budget (issues #54, #176).
+#[derive(Debug, Clone, Serialize)]
+pub struct CrewBudgetView {
+    /// The crew's cumulative token spend across every role.
+    pub spent: u64,
+    /// The crew-wide budget, if the crew has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u64>,
+}
+
+/// The `GET /budget` snapshot: spend against budget per role and crew-wide
+/// (issue #176).
+#[derive(Debug, Clone, Serialize)]
+pub struct BudgetView {
+    /// One line per role that has reported spend, sorted by role.
+    pub roles: Vec<RoleBudgetView>,
+    /// The crew total across every role.
+    pub crew: CrewBudgetView,
+}
+
+/// One role's budget standing: its latest cumulative spend and cap.
+#[derive(Debug, Clone, Default)]
+struct RoleBudget {
+    /// The role's cumulative token spend, from its latest `budget` event.
+    spent: u64,
+    /// The role's own cap, if it has one.
+    cap: Option<u64>,
+}
+
+/// The budget projection: cumulative spend against budget per role and
+/// crew-wide (issues #54, #176).
+///
+/// A projection of the `budget` events in the durable log, so it is rebuilt on
+/// a restart like the situation board (issue #49) rather than kept in a
+/// separate persistence path. Each `budget` event carries the running totals
+/// the supervisor computed from the crew's [`Budget`](crew_core::Budget), so
+/// the fold is latest-wins: the newest event for a role carries its current
+/// spend and cap, and the newest event overall carries the crew total and
+/// budget. It backs `GET /budget`, so the cockpit (issue #51) reads a snapshot
+/// rather than replaying events (issue #176).
+#[derive(Debug, Default)]
+struct Budgets {
+    roles: BTreeMap<RoleId, RoleBudget>,
+    crew_spent: u64,
+    crew_budget: Option<u64>,
+}
+
+impl Budgets {
+    /// Rebuilds the projection by folding every `budget` event, oldest first.
+    fn rebuild(events: &[Event]) -> Self {
+        let mut budgets = Self::default();
+        for event in events {
+            budgets.apply(event);
+        }
+        budgets
+    }
+
+    /// Folds one event into the projection: a `budget` report advances the
+    /// role's spend and the crew total to the running totals it carries. Every
+    /// other kind is ignored.
+    fn apply(&mut self, event: &Event) {
+        let EventKind::Budget(report) = &event.kind else {
+            return;
+        };
+        // Each report is a snapshot of running totals, so latest wins: the newest
+        // report for the role carries its current spend, and the newest overall the
+        // crew total.
+        let entry = self.roles.entry(report.role.clone()).or_default();
+        entry.spent = report.role_spent;
+        entry.cap = report.role_cap;
+        self.crew_spent = report.crew_spent;
+        self.crew_budget = report.crew_budget;
+    }
+
+    /// The snapshot for `GET /budget`: the per-role spend sorted by role, and
+    /// the crew total.
+    fn snapshot(&self) -> BudgetView {
+        let roles = self
+            .roles
+            .iter()
+            .map(|(role, budget)| RoleBudgetView {
+                role: role.clone(),
+                spent: budget.spent,
+                cap: budget.cap,
+            })
+            .collect();
+        BudgetView {
+            roles,
+            crew: CrewBudgetView {
+                spent: self.crew_spent,
+                budget: self.crew_budget,
+            },
+        }
+    }
+}
+
 /// How many events a subscriber may fall behind before the broker drops the
 /// oldest for it. Large enough to absorb a burst while a slow reader catches
 /// up; a lagged subscriber reconnects with its `Last-Event-ID` and replays the
@@ -492,6 +602,10 @@ pub struct AppState {
     /// projection of the `telemetry` and `lifecycle` events in the log,
     /// rebuilt from it on a restart.
     stats: Arc<Mutex<Stats>>,
+    /// The budget projection: spend against budget per role and crew-wide
+    /// (issues #54, #176). A projection of the `budget` events in the log,
+    /// rebuilt from it on a restart, backing `GET /budget`.
+    budgets: Arc<Mutex<Budgets>>,
     /// The shared-subscription usage gauge and auto-pause (issue #56). In
     /// memory like the pause control: the broker is the live authority,
     /// distinct from the manual pause.
@@ -524,6 +638,7 @@ impl AppState {
         let events = storage.events();
         let board = Board::rebuild(&events);
         let stats = Stats::rebuild(&events);
+        let budgets = Budgets::rebuild(&events);
         let usage = Usage::new(config.usage_threshold);
         Self {
             config: Arc::new(config),
@@ -537,6 +652,7 @@ impl AppState {
             gate: Arc::new(Mutex::new(Gate::default())),
             board: Arc::new(Mutex::new(board)),
             stats: Arc::new(Mutex::new(stats)),
+            budgets: Arc::new(Mutex::new(budgets)),
             usage: Arc::new(Mutex::new(usage)),
         }
     }
@@ -809,6 +925,23 @@ impl AppState {
         self.stats.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The budget snapshot for `GET /budget`: spend against budget per role and
+    /// crew-wide (issue #176).
+    ///
+    /// A projection of the `budget` events, rebuilt from the durable log on a
+    /// restart like the situation board, so the cockpit (issue #51) reads a
+    /// snapshot rather than replaying events.
+    #[must_use]
+    pub fn budget_snapshot(&self) -> BudgetView {
+        self.budgets().snapshot()
+    }
+
+    /// The budget projection behind its lock, recovering from a poisoned mutex
+    /// (a panic in another handler must not wedge the snapshot).
+    fn budgets(&self) -> std::sync::MutexGuard<'_, Budgets> {
+        self.budgets.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Scrubs an event of secrets, appends it to the log, and fans it to
     /// subscribers.
     ///
@@ -848,6 +981,9 @@ impl AppState {
         // Advance the usage rollup at the one choke point every event flows through, so
         // telemetry and lifecycle events from any handler are folded in (issue #55).
         self.stats().apply(&event);
+        // Fold the same way for the budget projection, so a spend report from any
+        // handler advances the snapshot `GET /budget` serves (issue #176).
+        self.budgets().apply(&event);
         let sequenced = Sequenced { seq, event };
         // Err(_) only means no subscribers are listening right now, which is fine.
         let _ = self.broadcast.send(sequenced.clone());
