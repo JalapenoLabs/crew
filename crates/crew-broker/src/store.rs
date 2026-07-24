@@ -30,7 +30,7 @@
 //! duplicate a lossless SSE resume; the stored sequence does not.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -41,7 +41,9 @@ use std::{
     thread::JoinHandle,
 };
 
-use crew_core::{Channel, ChannelId, Event, EventKind, RoleId, Sender, TaskId, Timestamp};
+use crew_core::{
+    Channel, ChannelId, Event, EventKind, Message, MessageId, RoleId, Sender, TaskId, Timestamp,
+};
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
@@ -190,6 +192,57 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// the end simply yields an empty page.
     fn query(&self, query: &EventQuery) -> EventPage {
         query_events(&self.stored_events(), query)
+    }
+
+    /// Returns the stored [`Message`] with `id`, or `None` if none is stored.
+    ///
+    /// A by-id lookup (issue #273), so a caller can confirm a reference without
+    /// cloning and scanning the whole log: validating that an answer's
+    /// `in_reply_to` names a question (issue #211) is the first use. The
+    /// in-memory backends override this with an id-to-position index, so the
+    /// lookup is O(1) and never clones more than the matched message; the
+    /// default scans [`stored_events`](Storage::stored_events) so any backend
+    /// works without an index (newest match wins, mirroring the override).
+    fn message(&self, id: &MessageId) -> Option<Message> {
+        self.stored_events()
+            .into_iter()
+            .rev()
+            .find_map(|stored| match stored.event.kind {
+                EventKind::Message(message) if message.id == *id => Some(message),
+                _ => None,
+            })
+    }
+}
+
+/// Builds the id-to-position index over the message events in `events` (issue
+/// #273), so a by-id lookup is O(1). Non-message events carry no message id to
+/// index. Ids are minted unique, so an id maps to a single position.
+fn index_messages(events: &[StoredEvent]) -> HashMap<MessageId, usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stored)| match &stored.event.kind {
+            EventKind::Message(message) => Some((message.id, index)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Looks a message up through the id-to-position index, returning a clone of
+/// the matching [`Message`] or `None`.
+///
+/// The index is verified against `events` on read (the position must still hold
+/// a message with that id), so a stale entry yields `None` rather than the
+/// wrong message; the backends keep it consistent, so this is defence in depth.
+fn indexed_message(
+    by_id: &HashMap<MessageId, usize>,
+    events: &[StoredEvent],
+    id: &MessageId,
+) -> Option<Message> {
+    let index = *by_id.get(id)?;
+    match events.get(index).map(|stored| &stored.event.kind) {
+        Some(EventKind::Message(message)) if message.id == *id => Some(message.clone()),
+        _ => None,
     }
 }
 
@@ -654,6 +707,10 @@ struct MemLog {
     events: Vec<StoredEvent>,
     /// The sequence the next appended event will take.
     next_seq: u64,
+    /// Message id to its position in `events`, for an O(1) by-id lookup (issue
+    /// #273). Maintained on append and rebuilt on a prune, so it always tracks
+    /// the message events in `events`.
+    by_id: HashMap<MessageId, usize>,
 }
 
 impl Storage for MemoryStore {
@@ -672,6 +729,12 @@ impl Storage for MemoryStore {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         let seq = log.next_seq;
         log.next_seq += 1;
+        // Index the message before the event moves into the log, so a later
+        // `message` lookup is O(1) (issue #273).
+        let index = log.events.len();
+        if let EventKind::Message(message) = &event.kind {
+            log.by_id.insert(message.id, index);
+        }
         log.events.push(StoredEvent { seq, event });
         seq
     }
@@ -690,6 +753,11 @@ impl Storage for MemoryStore {
         log.events[start..].to_vec()
     }
 
+    fn message(&self, id: &MessageId) -> Option<Message> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        indexed_message(&log.by_id, &log.events, id)
+    }
+
     fn retain(&self, before: Timestamp) -> usize {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(newest_seq) = log.events.last().map(|stored| stored.seq) else {
@@ -698,7 +766,12 @@ impl Storage for MemoryStore {
         let before_len = log.events.len();
         log.events
             .retain(|stored| survives_retention(stored, before, newest_seq));
-        before_len - log.events.len()
+        let pruned = before_len - log.events.len();
+        if pruned > 0 {
+            // Surviving positions shifted, so rebuild the by-id index (issue #273).
+            log.by_id = index_messages(&log.events);
+        }
+        pruned
     }
 
     fn roster(&self) -> Roster {
@@ -754,6 +827,10 @@ struct Log {
     /// never rewound by a prune, so a sequence is never reused; reconstructed
     /// on [`open`](LogStore::open) from the highest sequence on disk.
     next_seq: u64,
+    /// Message id to its position in `events`, for an O(1) by-id lookup (issue
+    /// #273). Maintained on append, rebuilt on a prune, and reconstructed from
+    /// the replayed events on [`open`](LogStore::open).
+    by_id: HashMap<MessageId, usize>,
     /// Enqueues lines to the background writer thread.
     writer: Option<mpsc::Sender<LogWrite>>,
 }
@@ -873,10 +950,14 @@ impl LogStore {
             "replayed {{crew.events}} events from the log",
         );
 
+        // Reconstruct the by-id index from the replayed events, so a by-id lookup
+        // is O(1) after a restart too (issue #273).
+        let by_id = index_messages(&events);
         Ok(Self {
             log: Mutex::new(Log {
                 events,
                 next_seq,
+                by_id,
                 writer: Some(writer),
             }),
             writer_thread: Some(writer_thread),
@@ -948,6 +1029,12 @@ impl Storage for LogStore {
                 self.durability.record(&err);
             }
         }
+        // Index the message before it moves into the log, so a later `message`
+        // lookup is O(1) (issue #273).
+        let index = log.events.len();
+        if let EventKind::Message(message) = &stored.event.kind {
+            log.by_id.insert(message.id, index);
+        }
         log.events.push(stored);
         seq
     }
@@ -974,6 +1061,11 @@ impl Storage for LogStore {
         log.events[start..].to_vec()
     }
 
+    fn message(&self, id: &MessageId) -> Option<Message> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        indexed_message(&log.by_id, &log.events, id)
+    }
+
     fn next_seq(&self) -> u64 {
         self.log
             .lock()
@@ -995,6 +1087,8 @@ impl Storage for LogStore {
             // on a sweep that finds everything still worth keeping.
             return 0;
         }
+        // Surviving positions shifted, so rebuild the by-id index (issue #273).
+        log.by_id = index_messages(&log.events);
         // Rewrite the file to the survivors on the writer thread, which owns the
         // file handle. `next_seq` is untouched, and the newest event is always a
         // survivor, so the highest sequence stays on disk and a restart
@@ -2020,6 +2114,98 @@ mod tests {
             reopened.append(of_kind(message_kind(), ts(9))),
             3,
             "no sequence is reused"
+        );
+    }
+
+    /// A message event of `kind` at `at`, returning its minted id so a test can
+    /// look it up by id (issue #273).
+    fn message_event(kind: MessageKind, at: Timestamp) -> (MessageId, Event) {
+        let id = MessageId::new();
+        let event = Event {
+            ts: at,
+            from: Sender::Role(RoleId::new("commander")),
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind: EventKind::Message(Message {
+                id,
+                kind,
+                body: String::new(),
+            }),
+        };
+        (id, event)
+    }
+
+    #[test]
+    fn message_looks_up_a_stored_message_by_id() {
+        let store = MemoryStore::default();
+        let (question_id, question) =
+            message_event(MessageKind::Question { options: vec![] }, ts(1));
+        let (note_id, note) = message_event(MessageKind::Note, ts(3));
+        store.append(question);
+        // A non-message event between them must not disturb the by-id positions.
+        store.append(of_kind(EventKind::Lifecycle(Lifecycle::Started), ts(2)));
+        store.append(note);
+
+        let found = store.message(&question_id).expect("the question is stored");
+        assert_eq!(
+            found.id, question_id,
+            "the lookup returns the right message"
+        );
+        assert!(
+            matches!(found.kind, MessageKind::Question { .. }),
+            "with its kind intact, so a caller can check it is a question",
+        );
+        assert!(matches!(
+            store.message(&note_id).map(|message| message.kind),
+            Some(MessageKind::Note),
+        ));
+        assert!(
+            store.message(&MessageId::new()).is_none(),
+            "an unknown id resolves to None, not a wrong message",
+        );
+    }
+
+    #[test]
+    fn message_index_is_rebuilt_after_a_prune() {
+        // A pruned message's id stops resolving and a survivor still does, proving
+        // the by-id index tracks the log across a retention prune (issue #273).
+        let store = MemoryStore::default();
+        let (aged_id, aged) = message_event(MessageKind::Note, ts(1));
+        let (newest_id, newest) = message_event(MessageKind::Note, ts(1));
+        store.append(aged);
+        store.append(newest);
+
+        // Cutoff after both: both are aged and prunable, so only the newest
+        // survives (the sequence high-water anchor).
+        assert_eq!(store.retain(ts(5)), 1, "the older message is pruned");
+        assert!(
+            store.message(&aged_id).is_none(),
+            "the pruned message no longer resolves",
+        );
+        assert!(
+            store.message(&newest_id).is_some(),
+            "the surviving message still resolves after the index rebuild",
+        );
+    }
+
+    #[test]
+    fn log_store_message_lookup_survives_a_restart() {
+        let dir = TempDir::new();
+        let store = LogStore::open(dir.path()).unwrap();
+        let (id, event) = message_event(MessageKind::Question { options: vec![] }, ts(1));
+        store.append(event);
+        store.flush();
+        drop(store);
+
+        // The by-id index is reconstructed from the replayed log, so the lookup is
+        // O(1) after a restart too (issue #273).
+        let reopened = LogStore::open(dir.path()).unwrap();
+        assert!(
+            matches!(
+                reopened.message(&id).map(|message| message.kind),
+                Some(MessageKind::Question { .. }),
+            ),
+            "the reopened store resolves the message from the reconstructed index",
         );
     }
 }
