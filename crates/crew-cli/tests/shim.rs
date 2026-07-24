@@ -489,21 +489,58 @@ fn the_shim_boots_from_a_role_card_with_its_lane() {
 }
 
 #[test]
-fn the_shim_errors_without_a_role_context() {
-    // No role card and no CREW_ROLE: the shim cannot know who it acts as.
+fn a_role_requiring_shim_command_errors_without_a_role_context() {
+    // No role card and no CREW_ROLE: a role-requiring shim command (here
+    // `register`) cannot know who it acts as, so it errors. `crew send` is the
+    // exception, posting as the General instead (issue #192, below).
     let output = Command::new(env!("CARGO_BIN_EXE_crew"))
-        .args(["send", "hello"])
+        .args(["register"])
         .env_remove("CREW_ROLE")
         .env_remove("CREW_ROLE_CARD")
         .output()
         .expect("the crew binary runs");
     assert!(
         !output.status.success(),
-        "a shim command needs a role context"
+        "a role-requiring shim command needs a role context"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("CREW_ROLE"),
         "the error names the missing environment: {stderr}",
+    );
+}
+
+#[test]
+fn a_role_less_send_posts_as_the_general() {
+    let port = start_broker();
+
+    // No CREW_ROLE and no role card: `crew send` posts as the General to the
+    // commander by default, so an operator at a terminal injects a message
+    // without a role card (issue #192).
+    let output = Command::new(env!("CARGO_BIN_EXE_crew"))
+        .args(["send", "the unit is go"])
+        .env("CREW_BROKER_HOST", "127.0.0.1")
+        .env("CREW_BROKER_PORT", port.to_string())
+        .env_remove("CREW_ROLE")
+        .env_remove("CREW_ROLE_CARD")
+        .output()
+        .expect("the crew binary runs");
+    let confirmation = stdout_of(output, "role-less send");
+    assert!(
+        confirmation.contains("general"),
+        "the confirmation says it posted as the General: {confirmation}",
+    );
+
+    // It lands on the broker as a General `note` to the commander, not as a role.
+    let history = get_json(port, "/history?kind=message");
+    let posted = history["events"].as_array().unwrap().iter().any(|event| {
+        event["from"]["kind"] == "general"
+            && event["channel"] == "@commander"
+            && event["kind"]["data"]["kind"] == "note"
+            && event["kind"]["data"]["body"] == "the unit is go"
+    });
+    assert!(
+        posted,
+        "a role-less send is a General note to the commander: {history}",
     );
 }

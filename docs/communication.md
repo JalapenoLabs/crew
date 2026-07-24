@@ -129,13 +129,17 @@ issue #11.
 ### Briefing the crew
 
 `crew brief "<message>"` is the General's plain send (issue #118): a free-form `note` posted
-as the General, the operator-facing counterpart to an agent's `crew send`. It obeys the one
-addressing rule above (`Channel::resolve`): `--to <role>` messages a role, `--channel <name>`
-posts to `all-units` or a pair, and neither reaches the commander (`--commander` names it,
-default `commander`). So `crew brief "..."` is the default brief that sets the unit to work,
-and `crew brief --channel all-units "..."` is the General's broadcast. Like the directives
-below it posts as the General, so it needs no role card, only the broker address (`--broker`,
-else the `CREW_BROKER_*` environment).
+as the General. It obeys the one addressing rule above (`Channel::resolve`): `--to <role>`
+messages a role, `--channel <name>` posts to `all-units` or a pair, and neither reaches the
+commander (`--commander` names it, default `commander`). So `crew brief "..."` is the default
+brief that sets the unit to work, and `crew brief --channel all-units "..."` is the General's
+broadcast. Like the directives below it posts as the General, so it needs no role card, only
+the broker address (`--broker`, else the `CREW_BROKER_*` environment).
+
+`crew send` is the same General send when no role names the sender (issue #192): the one
+`crew send` posts as `CREW_ROLE` when set (what a coworker agent uses) and as the General
+otherwise, so an operator at a terminal need not know a separate command to inject a message.
+`crew brief` remains the explicit General send that also carries `--broker` and `--commander`.
 
 ### Steering a running agent
 

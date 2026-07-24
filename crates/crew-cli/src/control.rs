@@ -55,12 +55,35 @@ pub fn brief(
     commander: Option<&str>,
     body: &str,
 ) -> Result<()> {
-    let target = brief_target(to, channel, commander)?;
-    let base = resolve_base(broker)?;
-    let payload = json!({ "from": { "kind": "general" }, "kind": "note", "body": body });
-    post_message(&base, target.name().as_str(), &payload, "brief")?;
+    let target = post_general_note(broker, to, channel, commander, body, "brief")?;
     println!("briefed {}", target.name());
     Ok(())
+}
+
+/// Posts a free-form `note` as the General to the resolved target, returning
+/// that target so the caller can confirm it.
+///
+/// The shared core of the General's plain send: `crew brief` (issue #118), and
+/// the role-less `crew send` (issue #192), which posts as the General when no
+/// `CREW_ROLE` names an agent. The target follows the crew's one addressing
+/// rule ([`Channel::resolve`]); `what` labels a broker refusal for the caller
+/// (`brief` or `send`).
+///
+/// # Errors
+/// Returns an error if the target is not routable, the broker configuration is
+/// invalid, or the broker cannot be reached or rejects the message.
+pub(crate) fn post_general_note(
+    broker: Option<&str>,
+    to: Option<&str>,
+    channel: Option<&str>,
+    commander: Option<&str>,
+    body: &str,
+    what: &str,
+) -> Result<Channel> {
+    let target = brief_target(to, channel, commander)?;
+    let base = resolve_base(broker)?;
+    post_message(&base, target.name().as_str(), &general_note(body), what)?;
+    Ok(target)
 }
 
 /// Resolves a brief's target: `to` a role, else `channel` a name, else the

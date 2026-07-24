@@ -18,10 +18,13 @@
 //!   monitor with it (see `docs/communication.md`).
 //! - The General drives the unit with `crew brief` (issue #118): a free-form
 //!   note posted as the General to the commander by default, a role, or a
-//!   channel, distinct from the agent shim's `crew send`. The General also
-//!   steers a running agent with `crew redirect` and `crew belay` (issue #38):
-//!   each posts a directive to a role's inbox that the role honors at once,
-//!   without tearing the crew down (see `docs/communication.md`).
+//!   channel. `crew send` unifies with this (issue #192): with no role context
+//!   it too posts as the General, so an operator injects a message without a
+//!   role card; `crew brief` adds the explicit `--broker` and `--commander`
+//!   controls. The General also steers a running agent with `crew redirect` and
+//!   `crew belay` (issue #38): each posts a directive to a role's inbox that
+//!   the role honors at once, without tearing the crew down (see
+//!   `docs/communication.md`).
 //!
 //! `main` establishes the application conventions (issue #4): eyre errors, the
 //! mimalloc allocator, and the shared structured-logging init, then dispatches
@@ -74,8 +77,8 @@ enum Command {
     Down,
     /// Register this agent's role on the roster (a runtime without MCP).
     Register,
-    /// Send a message as this agent's role to a teammate, a channel, or the
-    /// commander.
+    /// Send a message to a teammate, a channel, or the commander: as your role
+    /// when `CREW_ROLE` (or a role card) is set, else as the General.
     Send {
         /// Direct-message one role (its `@role` channel).
         #[arg(long, value_name = "ROLE")]

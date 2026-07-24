@@ -290,6 +290,10 @@ subcommand tree.
   shim (issue #28): they act as the role the environment names (`CREW_ROLE_CARD`, or
   `CREW_ROLE` plus the broker config) and reach the broker through the same client the
   MCP tools use, so a runtime without MCP coordinates the same way. See `docs/codex.md`.
+  `crew send` is unified (issue #192): with a role context it posts as that role, and
+  with none it posts as the General, so the same command an agent coordinates with also
+  lets an operator at a terminal inject a message (the fuller-flagged `crew brief`
+  below is the explicit General send).
 - `crew redirect <role> "..."` and `crew belay <role> "..."` are the General's
   command-and-control directives (issue #38): they post from the General to a role's
   direct channel a `redirect` (steer, keep the task) or a `belay` (halt and re-task),
