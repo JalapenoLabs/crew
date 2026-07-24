@@ -12,8 +12,10 @@
 //!
 //! The trait covers the whole persisted surface: [`append`](Storage::append) an
 //! event, [`flush`](Storage::flush) pending writes, [`query`](Storage::query)
-//! the log with filters and a stable page cursor, read every event, and read or
-//! write the [`Roster`]. `query` has a default that scans the in-memory index;
+//! the log with filters and a stable page cursor, read every event or only
+//! those after a cursor ([`events_since`](Storage::events_since), so an SSE
+//! replay is O(gap), issue #225), and read or write the [`Roster`]. `query` has
+//! a default that scans the in-memory index;
 //! a backend with a real index (a database) overrides it to push the filter
 //! down, which is why the query types here stay backend-neutral.
 
@@ -91,6 +93,24 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
 
     /// Returns every stored event, oldest first.
     fn events(&self) -> Vec<Event>;
+
+    /// Returns the events at position `after` and later (sequence `>= after`),
+    /// oldest first.
+    ///
+    /// This bounds a replay to the gap after a cursor rather than the whole log
+    /// (issue #225): the SSE resume engine reads only what a reconnecting
+    /// client missed, so a connect is O(gap) instead of O(log).
+    /// The default clones the full log via [`events`](Storage::events) and
+    /// slices, so it is correct for any backend; a backend with an index
+    /// (the in-memory stores below, a database later) overrides it to seek.
+    /// `after` past the end yields an empty slice.
+    fn events_since(&self, after: u64) -> Vec<Event> {
+        let events = self.events();
+        let start = usize::try_from(after)
+            .unwrap_or(usize::MAX)
+            .min(events.len());
+        events[start..].to_vec()
+    }
 
     /// Returns the current roster.
     fn roster(&self) -> Roster;
@@ -541,6 +561,14 @@ impl Storage for MemoryStore {
             .clone()
     }
 
+    fn events_since(&self, after: u64) -> Vec<Event> {
+        let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        let start = usize::try_from(after)
+            .unwrap_or(usize::MAX)
+            .min(events.len());
+        events[start..].to_vec()
+    }
+
     fn roster(&self) -> Roster {
         self.roster
             .lock()
@@ -787,6 +815,14 @@ impl Storage for LogStore {
             .unwrap_or_else(PoisonError::into_inner)
             .events
             .clone()
+    }
+
+    fn events_since(&self, after: u64) -> Vec<Event> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let start = usize::try_from(after)
+            .unwrap_or(usize::MAX)
+            .min(log.events.len());
+        log.events[start..].to_vec()
     }
 
     fn next_seq(&self) -> u64 {
@@ -1315,6 +1351,49 @@ mod tests {
             2,
             "flush persists every prior append without dropping the store",
         );
+    }
+
+    #[test]
+    fn events_since_returns_only_the_gap_after_the_cursor() {
+        // Both the memory and the durable store slice to the events at or after a
+        // sequence, so an SSE replay reads O(gap) rather than the whole log (issue
+        // #225). The slice matches the full log's tail, so replay is unchanged.
+        let dir = TempDir::new();
+        let stores: [Box<dyn Storage>; 2] = [
+            Box::new(MemoryStore::default()),
+            Box::new(LogStore::open(dir.path()).unwrap()),
+        ];
+        for store in stores {
+            store.append(message("backend", "all-units", ts(1)));
+            store.append(message("frontend", "@backend", ts(2)));
+            store.append(message("qa", "all-units", ts(3)));
+
+            // From 0, the whole log; from a mid-point, only the tail after it.
+            assert_eq!(
+                store.events_since(0),
+                store.events(),
+                "since 0 is the whole log"
+            );
+            let tail = store.events_since(1);
+            assert_eq!(tail.len(), 2, "since 1 skips the first event");
+            assert_eq!(tail[0].ts, ts(2), "the slice starts at the cursor position");
+            assert_eq!(
+                store.events_since(1),
+                store.events()[1..].to_vec(),
+                "the gap matches the full log's tail, so replay is behavior-preserving",
+            );
+
+            // At the tail, empty (a fresh connection replays nothing); a cursor past
+            // the end (a stale, ahead one) yields nothing rather than a panic.
+            assert!(
+                store.events_since(3).is_empty(),
+                "since the live tail is empty"
+            );
+            assert!(
+                store.events_since(99).is_empty(),
+                "a cursor past the end yields nothing, not an out-of-bounds slice",
+            );
+        }
     }
 
     #[test]

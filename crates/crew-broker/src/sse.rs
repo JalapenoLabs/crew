@@ -48,12 +48,21 @@ pub(crate) fn resume_stream(
     on_lag: impl Fn(u64) + Send + 'static,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = state.broadcast.subscribe();
-    let backlog = state.storage.events();
-    let live_from = backlog.len() as u64;
+    // The live tail: the sequence the next appended event will take. Read before
+    // the backlog so any event that lands between the two reads has a sequence at
+    // or above it, and is delivered live rather than duplicated in the replay
+    // (the `seq < live_from` bound below).
+    let live_from = state.storage.next_seq();
 
     // A reconnect resumes right after its last delivered event; a fresh connection
     // (no cursor) starts at the live tail.
     let resume_from = last_event_id(headers).map_or(live_from, |id| id + 1);
+
+    // Read only the gap after the cursor, not the whole log (issue #225): a
+    // reconnecting client that missed the last few events replays only those. The
+    // slice starts at `resume_from`, so event `index` there has sequence
+    // `resume_from + index`.
+    let backlog = state.storage.events_since(resume_from);
 
     // Replay is materialized eagerly, so `keep` is only borrowed here before it is
     // moved into the live filter below.
@@ -61,8 +70,8 @@ pub(crate) fn resume_stream(
         .into_iter()
         .enumerate()
         .filter_map(|(index, event)| {
-            let seq = index as u64;
-            if seq >= resume_from && keep(&event) {
+            let seq = resume_from + index as u64;
+            if seq < live_from && keep(&event) {
                 to_sse(seq, &event).map(Ok)
             } else {
                 None
