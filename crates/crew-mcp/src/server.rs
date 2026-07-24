@@ -70,9 +70,10 @@ impl Server {
         // never interleave on the JSON-RPC channel (issue #174).
         let output = Arc::new(Mutex::new(output));
 
-        // Subscribe to the live inbox, nudging the agent with a notification each time a
-        // message addressed to it is buffered. Best-effort: without streaming the
-        // pull-based `crew_inbox` read still works, so a failure is logged, not fatal.
+        // Subscribe to the live inbox, nudging the agent with a notification each time
+        // a message addressed to it is buffered. Best-effort: without streaming
+        // the pull-based `crew_inbox` read still works, so a failure is logged,
+        // not fatal.
         let notify_output = Arc::clone(&output);
         if let Err(reason) = self
             .broker

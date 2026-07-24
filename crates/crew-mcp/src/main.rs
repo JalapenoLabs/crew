@@ -49,7 +49,8 @@ fn main() -> Result<()> {
     }
 
     // The live inbox subscription is opened by `Server::serve`, which wires each
-    // buffered message to an MCP notification nudging the agent to read (issue #174).
+    // buffered message to an MCP notification nudging the agent to read (issue
+    // #174).
     let mut server = Server::new(broker, card.owned_paths.clone(), card.lane_enforcement);
     // `stdout()` (not a held `StdoutLock`) so the handle is `Send`: the inbox
     // thread shares it with the serve loop (issue #174), and the server's own lock

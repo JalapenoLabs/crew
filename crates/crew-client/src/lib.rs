@@ -477,12 +477,12 @@ impl Broker {
     /// Behaves like [`subscribe`](Broker::subscribe), and additionally invokes
     /// `on_message` each time the background stream buffers a message addressed
     /// to this role, so a caller can nudge its agent to read without polling
-    /// (issue #174). The backlog seeded at subscribe time does not fire it; only
-    /// messages the background thread buffers live do.
+    /// (issue #174). The backlog seeded at subscribe time does not fire it;
+    /// only messages the background thread buffers live do.
     ///
-    /// The callback runs on the background inbox thread, after the message is in
-    /// the buffer a later [`inbox`](Broker::inbox) drains, so keep it quick and
-    /// non-blocking.
+    /// The callback runs on the background inbox thread, after the message is
+    /// in the buffer a later [`inbox`](Broker::inbox) drains, so keep it
+    /// quick and non-blocking.
     ///
     /// # Errors
     /// Returns a message if the broker's inbox stream cannot be opened, or the
@@ -494,7 +494,8 @@ impl Broker {
         self.subscribe_with(Arc::new(on_message))
     }
 
-    /// Opens the live inbox stream, seeding the backlog and spawning the reader.
+    /// Opens the live inbox stream, seeding the backlog and spawning the
+    /// reader.
     ///
     /// The shared work behind [`subscribe`](Broker::subscribe) and
     /// [`subscribe_notifying`](Broker::subscribe_notifying); `on_message` fires
