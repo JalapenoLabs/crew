@@ -107,9 +107,7 @@ pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
         *senders.entry(sender_label(&event.from)).or_default() += 1;
         match &event.kind {
             EventKind::Message(message) => {
-                *message_kinds
-                    .entry(message_kind_label(&message.kind))
-                    .or_default() += 1;
+                *message_kinds.entry(message.kind.label()).or_default() += 1;
                 match &message.kind {
                     MessageKind::Order { title, .. } => orders.push(OrderDigest {
                         title: title.clone(),
@@ -244,20 +242,6 @@ fn sender_label(from: &Sender) -> String {
     match from {
         Sender::Role(role) => role.as_str().to_owned(),
         Sender::General => "general".to_owned(),
-    }
-}
-
-/// The wire label for a message's typed intent (matching its serde name).
-fn message_kind_label(kind: &MessageKind) -> &'static str {
-    match kind {
-        MessageKind::Order { .. } => "order",
-        MessageKind::Question { .. } => "question",
-        MessageKind::Answer { .. } => "answer",
-        MessageKind::Status => "status",
-        MessageKind::Artifact { .. } => "artifact",
-        MessageKind::Note => "note",
-        MessageKind::Redirect => "redirect",
-        MessageKind::Belay => "belay",
     }
 }
 
