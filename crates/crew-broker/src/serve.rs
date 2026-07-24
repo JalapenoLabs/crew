@@ -2,13 +2,13 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use eyre::{eyre, Result, WrapErr};
 use tokio::net::TcpListener;
 use tracing::{event, Level};
 
 use crate::{
     api,
     config::{is_bind_allowed, Config},
+    serve_error::ServeError,
     state::AppState,
     store::LogStore,
     usage::usage_event,
@@ -32,7 +32,7 @@ const USAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 ///
 /// # Errors
 /// See [`run_until`].
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config) -> Result<(), ServeError> {
     run_until(config, shutdown_signal()).await
 }
 
@@ -51,26 +51,23 @@ pub async fn run(config: Config) -> Result<()> {
 pub async fn run_until(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
-) -> Result<()> {
+) -> Result<(), ServeError> {
     let addr = config.bind_addr();
     if !is_bind_allowed(addr.ip(), config.allow_non_local) {
-        return Err(eyre!(
-            "refusing to bind non-loopback address {addr}; \
-             set CREW_BROKER_ALLOW_NON_LOCAL=1 to allow it"
-        ));
+        return Err(ServeError::non_local_bind(addr));
     }
 
     tokio::fs::create_dir_all(&config.state_dir)
         .await
-        .wrap_err_with(|| format!("could not create state dir {}", config.state_dir.display()))?;
+        .map_err(|source| ServeError::state_dir(config.state_dir.clone(), source))?;
 
     // Open the durable log rooted at the state directory, replaying any prior
     // events.
-    let storage = Arc::new(LogStore::open(&config.state_dir)?);
+    let storage = Arc::new(LogStore::open(&config.state_dir).map_err(ServeError::log)?);
 
     let listener = TcpListener::bind(addr)
         .await
-        .wrap_err_with(|| format!("could not bind {addr}"))?;
+        .map_err(|source| ServeError::bind(addr, source))?;
 
     let state = AppState::with_storage(config, storage);
     serve(listener, state, shutdown).await
@@ -90,10 +87,8 @@ pub async fn serve(
     listener: TcpListener,
     state: AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,
-) -> Result<()> {
-    let local = listener
-        .local_addr()
-        .wrap_err("the listener has no local address")?;
+) -> Result<(), ServeError> {
+    let local = listener.local_addr().map_err(ServeError::local_addr)?;
     event!(
         name: "broker.serve.listening",
         Level::INFO,
@@ -110,7 +105,7 @@ pub async fn serve(
     let result = axum::serve(listener, api::build(state))
         .with_graceful_shutdown(shutdown)
         .await
-        .wrap_err("the crewd server exited with an error");
+        .map_err(ServeError::serve);
 
     sweeper.abort();
     result

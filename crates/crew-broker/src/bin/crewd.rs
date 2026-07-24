@@ -15,5 +15,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 async fn main() -> Result<()> {
     crew_telemetry::init();
     let config = crew_broker::Config::from_env()?;
-    crew_broker::run(config).await
+    // `ServeError` is a canonical library error (issue #193); eyre absorbs it here
+    // at the application boundary.
+    crew_broker::run(config).await?;
+    Ok(())
 }

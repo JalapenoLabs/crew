@@ -142,6 +142,11 @@ impl Server {
     }
 
     /// Executes a tool against the broker.
+    ///
+    /// A broker client [`Error`](crew_client::Error) is rendered to the
+    /// agent-readable tool-error text with [`tool_error`] (issue #193), so the
+    /// dispatch returns the same `Result<String, String>` the JSON-RPC layer
+    /// turns into an `isError` result.
     #[expect(
         clippy::too_many_lines,
         reason = "a flat tool-dispatch match grows one self-contained arm per tool"
@@ -151,49 +156,55 @@ impl Server {
             "crew_send" => {
                 let body =
                     str_arg(arguments, "body").ok_or("crew_send requires a non-empty `body`")?;
-                self.broker.send(
-                    str_arg(arguments, "to"),
-                    str_arg(arguments, "channel"),
-                    body,
-                )
+                self.broker
+                    .send(
+                        str_arg(arguments, "to"),
+                        str_arg(arguments, "channel"),
+                        body,
+                    )
+                    .map_err(tool_error)
             }
             "crew_order" => {
                 let to =
                     str_arg(arguments, "to").ok_or("crew_order requires a `to` role to order")?;
                 let title = str_arg(arguments, "title")
                     .ok_or("crew_order requires a `title` for the task")?;
-                self.broker.order(
-                    to,
-                    title,
-                    str_arg(arguments, "scope").unwrap_or_default(),
-                    &str_list_arg(arguments, "owned_paths"),
-                    str_arg(arguments, "acceptance").unwrap_or_default(),
-                    str_arg(arguments, "body").unwrap_or_default(),
-                )
+                self.broker
+                    .order(
+                        to,
+                        title,
+                        str_arg(arguments, "scope").unwrap_or_default(),
+                        &str_list_arg(arguments, "owned_paths"),
+                        str_arg(arguments, "acceptance").unwrap_or_default(),
+                        str_arg(arguments, "body").unwrap_or_default(),
+                    )
+                    .map_err(tool_error)
             }
             "crew_redirect" => {
                 let to = str_arg(arguments, "to")
                     .ok_or("crew_redirect requires a `to` role to steer")?;
                 let body = str_arg(arguments, "body")
                     .ok_or("crew_redirect requires a `body` (the new direction)")?;
-                self.broker.redirect(to, body)
+                self.broker.redirect(to, body).map_err(tool_error)
             }
             "crew_belay" => {
                 let to =
                     str_arg(arguments, "to").ok_or("crew_belay requires a `to` role to halt")?;
                 let body = str_arg(arguments, "body")
                     .ok_or("crew_belay requires a `body` (the new order)")?;
-                self.broker.belay(to, body)
+                self.broker.belay(to, body).map_err(tool_error)
             }
             "crew_ask" => {
                 let body =
                     str_arg(arguments, "body").ok_or("crew_ask requires a non-empty `body`")?;
-                self.broker.ask(
-                    str_arg(arguments, "to"),
-                    str_arg(arguments, "channel"),
-                    body,
-                    &str_list_arg(arguments, "options"),
-                )
+                self.broker
+                    .ask(
+                        str_arg(arguments, "to"),
+                        str_arg(arguments, "channel"),
+                        body,
+                        &str_list_arg(arguments, "options"),
+                    )
+                    .map_err(tool_error)
             }
             "crew_answer" => {
                 let body =
@@ -201,21 +212,25 @@ impl Server {
                 let in_reply_to = str_arg(arguments, "in_reply_to").ok_or(
                     "crew_answer requires the `in_reply_to` id of the question it answers",
                 )?;
-                self.broker.answer(
-                    str_arg(arguments, "to"),
-                    str_arg(arguments, "channel"),
-                    body,
-                    in_reply_to,
-                )
+                self.broker
+                    .answer(
+                        str_arg(arguments, "to"),
+                        str_arg(arguments, "channel"),
+                        body,
+                        in_reply_to,
+                    )
+                    .map_err(tool_error)
             }
             "crew_status" => {
                 let body =
                     str_arg(arguments, "body").ok_or("crew_status requires a non-empty `body`")?;
-                self.broker.status(
-                    str_arg(arguments, "to"),
-                    str_arg(arguments, "channel"),
-                    body,
-                )
+                self.broker
+                    .status(
+                        str_arg(arguments, "to"),
+                        str_arg(arguments, "channel"),
+                        body,
+                    )
+                    .map_err(tool_error)
             }
             "crew_artifact" => {
                 let reference = str_arg(arguments, "reference")
@@ -224,64 +239,77 @@ impl Server {
                     "crew_artifact requires an `artifact_kind` (branch, pull_request, file, or \
                      route)",
                 )?;
-                self.broker.artifact(
-                    str_arg(arguments, "to"),
-                    str_arg(arguments, "channel"),
-                    str_arg(arguments, "body").unwrap_or_default(),
-                    reference,
-                    artifact_kind,
-                )
+                self.broker
+                    .artifact(
+                        str_arg(arguments, "to"),
+                        str_arg(arguments, "channel"),
+                        str_arg(arguments, "body").unwrap_or_default(),
+                        reference,
+                        artifact_kind,
+                    )
+                    .map_err(tool_error)
             }
-            "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
-            "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
+            "crew_inbox" => Ok(render_inbox(&self.broker.inbox().map_err(tool_error)?)),
+            "crew_roster" => Ok(render_roster(&self.broker.roster().map_err(tool_error)?)),
             "crew_lane" => {
                 let path =
                     str_arg(arguments, "path").ok_or("crew_lane requires a `path` to check")?;
                 self.broker
                     .check_lane(&self.owned_paths, self.lane_enforcement, path)
+                    .map_err(tool_error)
             }
             "crew_claim" => {
                 let task =
                     str_arg(arguments, "task").ok_or("crew_claim requires a `task` to claim")?;
-                self.broker.claim(
-                    task,
-                    str_arg(arguments, "state").unwrap_or("claimed"),
-                    str_arg(arguments, "title").unwrap_or_default(),
-                )
+                self.broker
+                    .claim(
+                        task,
+                        str_arg(arguments, "state").unwrap_or("claimed"),
+                        str_arg(arguments, "title").unwrap_or_default(),
+                    )
+                    .map_err(tool_error)
             }
-            "crew_ledger" => Ok(render_ledger(&self.broker.ledger()?)),
+            "crew_ledger" => Ok(render_ledger(&self.broker.ledger().map_err(tool_error)?)),
             "crew_submit" => {
                 let task =
                     str_arg(arguments, "task").ok_or("crew_submit requires a `task` to submit")?;
-                self.broker.submit(
-                    task,
-                    str_arg(arguments, "acceptance").unwrap_or_default(),
-                    str_arg(arguments, "to"),
-                )
+                self.broker
+                    .submit(
+                        task,
+                        str_arg(arguments, "acceptance").unwrap_or_default(),
+                        str_arg(arguments, "to"),
+                    )
+                    .map_err(tool_error)
             }
             "crew_verdict" => {
                 let task =
                     str_arg(arguments, "task").ok_or("crew_verdict requires a `task` to judge")?;
                 let pass = bool_arg(arguments, "pass")
                     .ok_or("crew_verdict requires a boolean `pass` (true if it holds)")?;
-                self.broker.verdict(
-                    task,
-                    pass,
-                    str_arg(arguments, "failure").unwrap_or_default(),
-                )
+                self.broker
+                    .verdict(
+                        task,
+                        pass,
+                        str_arg(arguments, "failure").unwrap_or_default(),
+                    )
+                    .map_err(tool_error)
             }
-            "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
+            "crew_gate" => Ok(render_gate(&self.broker.gate().map_err(tool_error)?)),
             "crew_complete" => self
                 .broker
-                .complete(str_arg(arguments, "summary").unwrap_or_default()),
+                .complete(str_arg(arguments, "summary").unwrap_or_default())
+                .map_err(tool_error),
             "crew_board" => Ok(render_board(
-                &self.broker.board(str_arg(arguments, "section"))?,
+                &self
+                    .broker
+                    .board(str_arg(arguments, "section"))
+                    .map_err(tool_error)?,
             )),
             "crew_record" => {
                 let key = str_arg(arguments, "key")
                     .ok_or("crew_record requires a `key` (the entry's topic)")?;
                 if bool_arg(arguments, "retract").unwrap_or(false) {
-                    self.broker.retract(key)
+                    self.broker.retract(key).map_err(tool_error)
                 } else {
                     let section = str_arg(arguments, "section").ok_or(
                         "crew_record requires a `section` (decision, interface, or gotcha) \
@@ -289,17 +317,28 @@ impl Server {
                     )?;
                     let body = str_arg(arguments, "body")
                         .ok_or("crew_record requires a `body` (the content) unless retracting")?;
-                    self.broker.record(key, section, body)
+                    self.broker.record(key, section, body).map_err(tool_error)
                 }
             }
             "crew_briefing" => Ok(render_briefing(
                 &self
                     .broker
-                    .briefing(str_arg(arguments, "task"), usize_arg(arguments, "budget"))?,
+                    .briefing(str_arg(arguments, "task"), usize_arg(arguments, "budget"))
+                    .map_err(tool_error)?,
             )),
             other => Err(format!("unknown tool `{other}`")),
         }
     }
+}
+
+/// Renders a broker client [`Error`](crew_client::Error) as the tool-error text
+/// shown to the agent, the counterpart to a validation message (issue #193).
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands ownership; the error is rendered to text and dropped"
+)]
+fn tool_error(error: crew_client::Error) -> String {
+    error.to_string()
 }
 
 /// Writes a `notifications/message` to `output`, nudging the agent to read its

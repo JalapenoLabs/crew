@@ -24,6 +24,7 @@ use eyre::{Result, WrapErr};
 use tracing::{event, Level};
 
 use crate::{
+    error::Error,
     lifecycle::{Fleet, LifecyclePolicy},
     mcp::{
         agent_turn_argv, codex_turn_argv, locate_server, register_server, CLAUDE_BIN, CODEX_BIN,
@@ -240,7 +241,14 @@ impl Supervisor {
     /// # Errors
     /// Returns an error if the MCP server cannot be located or registered, or a
     /// card cannot be provisioned.
-    pub fn launch(&self, config: &CrewConfig, config_dir: &Path) -> Result<Fleet> {
+    pub fn launch(&self, config: &CrewConfig, config_dir: &Path) -> Result<Fleet, Error> {
+        self.launch_fleet(config, config_dir).map_err(Error::launch)
+    }
+
+    /// Brings the crew online, composing failures with `eyre`;
+    /// [`launch`](Self::launch) wraps the result into the canonical
+    /// [`Error`] at the boundary (issue #193).
+    fn launch_fleet(&self, config: &CrewConfig, config_dir: &Path) -> Result<Fleet> {
         // Claude roles load the crew tools over MCP; register the server once,
         // unit-wide, only when the crew has a Claude role. A Codex-only crew needs
         // no MCP (its roles use the CLI shim), so it must not require `claude` at

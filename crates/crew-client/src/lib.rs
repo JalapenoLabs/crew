@@ -42,6 +42,9 @@ use crew_core::{
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
+mod error;
+pub use error::Error;
+
 /// How long to wait to connect to the broker before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -174,17 +177,18 @@ impl Broker {
     /// else the commander.
     ///
     /// # Errors
-    /// Returns a message if the target is not routable, or the broker rejects
+    /// Returns an error if the target is not routable, or the broker rejects
     /// the post or cannot be reached.
     pub fn send(
         &self,
         to: Option<&str>,
         channel: Option<&str>,
         body: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
-            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
-                .to_owned()
+            Error::invalid(
+                "that is not a routable target; name a role, `all-units`, or a pair like `a+b`",
+            )
         })?;
         let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
@@ -217,7 +221,7 @@ impl Broker {
     /// rule as [`send`](Broker::send).
     ///
     /// # Errors
-    /// Returns a message if the target is not routable, or the broker rejects
+    /// Returns an error if the target is not routable, or the broker rejects
     /// the post or cannot be reached.
     pub fn ask(
         &self,
@@ -225,10 +229,11 @@ impl Broker {
         channel: Option<&str>,
         body: &str,
         options: &[String],
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
-            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
-                .to_owned()
+            Error::invalid(
+                "that is not a routable target; name a role, `all-units`, or a pair like `a+b`",
+            )
         })?;
         let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
@@ -249,7 +254,7 @@ impl Broker {
     /// [`send`](Broker::send).
     ///
     /// # Errors
-    /// Returns a message if the target is not routable, `in_reply_to` is not a
+    /// Returns an error if the target is not routable, `in_reply_to` is not a
     /// message id, or the broker rejects the post or cannot be reached.
     pub fn answer(
         &self,
@@ -257,10 +262,11 @@ impl Broker {
         channel: Option<&str>,
         body: &str,
         in_reply_to: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
-            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
-                .to_owned()
+            Error::invalid(
+                "that is not a routable target; name a role, `all-units`, or a pair like `a+b`",
+            )
         })?;
         let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
@@ -281,17 +287,18 @@ impl Broker {
     /// addressing rule as [`send`](Broker::send).
     ///
     /// # Errors
-    /// Returns a message if the target is not routable, or the broker rejects
+    /// Returns an error if the target is not routable, or the broker rejects
     /// the post or cannot be reached.
     pub fn status(
         &self,
         to: Option<&str>,
         channel: Option<&str>,
         body: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
-            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
-                .to_owned()
+            Error::invalid(
+                "that is not a routable target; name a role, `all-units`, or a pair like `a+b`",
+            )
         })?;
         let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
@@ -311,7 +318,7 @@ impl Broker {
     /// the same one addressing rule as [`send`](Broker::send).
     ///
     /// # Errors
-    /// Returns a message if `artifact_kind` is not one of the four kinds, the
+    /// Returns an error if `artifact_kind` is not one of the four kinds, the
     /// target is not routable, or the broker rejects the post or cannot be
     /// reached.
     pub fn artifact(
@@ -321,20 +328,21 @@ impl Broker {
         body: &str,
         reference: &str,
         artifact_kind: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         // Validate the kind against the source of truth (crew_core's `ArtifactKind`),
         // so a bad value is a clear local error rather than a broker 400. Serializing
         // the parsed value back single-sources the wire label.
         let kind: ArtifactKind = serde_json::from_value(Value::String(artifact_kind.to_owned()))
             .map_err(|_error| {
-                format!(
+                Error::invalid(format!(
                     "`{artifact_kind}` is not an artifact kind; use branch, pull_request, file, \
                      or route"
-                )
+                ))
             })?;
         let target = Channel::resolve(to, channel, &self.commander).ok_or_else(|| {
-            "that is not a routable target; name a role, `all-units`, or a pair like `a+b`"
-                .to_owned()
+            Error::invalid(
+                "that is not a routable target; name a role, `all-units`, or a pair like `a+b`",
+            )
         })?;
         let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
@@ -362,7 +370,7 @@ impl Broker {
     /// adopts the task when it reads the order (see [`inbox`](Broker::inbox)).
     ///
     /// # Errors
-    /// Returns a message if `to` is not a plain role name, or the broker
+    /// Returns an error if `to` is not a plain role name, or the broker
     /// rejects the post or cannot be reached.
     pub fn order(
         &self,
@@ -372,10 +380,14 @@ impl Broker {
         owned_paths: &[String],
         acceptance: &str,
         body: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         let target = Channel::resolve(Some(to), None, &self.commander)
             .filter(|channel| matches!(channel, Channel::Direct(_)))
-            .ok_or_else(|| format!("`{to}` is not a role to order; name a single specialist"))?;
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "`{to}` is not a role to order; name a single specialist"
+                ))
+            })?;
         // The commander mints a fresh task; a specialist already working one threads
         // it. `TaskId::default` mints a fresh random id (there is no fixed
         // default).
@@ -404,9 +416,9 @@ impl Broker {
     /// [`order`](Broker::order).
     ///
     /// # Errors
-    /// Returns a message if `to` is not a plain role name, or the broker
+    /// Returns an error if `to` is not a plain role name, or the broker
     /// rejects the post or cannot be reached.
-    pub fn redirect(&self, to: &str, body: &str) -> Result<String, String> {
+    pub fn redirect(&self, to: &str, body: &str) -> Result<String, Error> {
         self.steer(to, "redirect", body)
     }
 
@@ -420,9 +432,9 @@ impl Broker {
     /// [`order`](Broker::order).
     ///
     /// # Errors
-    /// Returns a message if `to` is not a plain role name, or the broker
+    /// Returns an error if `to` is not a plain role name, or the broker
     /// rejects the post or cannot be reached.
-    pub fn belay(&self, to: &str, body: &str) -> Result<String, String> {
+    pub fn belay(&self, to: &str, body: &str) -> Result<String, Error> {
         self.steer(to, "belay", body)
     }
 
@@ -433,10 +445,14 @@ impl Broker {
     /// Shared by [`redirect`](Broker::redirect) and [`belay`](Broker::belay). A
     /// directive steers one specialist, so `to` must resolve to a single role's
     /// `@role` channel, mirroring [`order`](Broker::order).
-    fn steer(&self, to: &str, kind: &str, body: &str) -> Result<String, String> {
+    fn steer(&self, to: &str, kind: &str, body: &str) -> Result<String, Error> {
         let target = Channel::resolve(Some(to), None, &self.commander)
             .filter(|channel| matches!(channel, Channel::Direct(_)))
-            .ok_or_else(|| format!("`{to}` is not a role to {kind}; name a single specialist"))?;
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "`{to}` is not a role to {kind}; name a single specialist"
+                ))
+            })?;
         let payload = self.stamp_task(json!({
             "from": { "kind": "role", "id": self.role.as_str() },
             "kind": kind,
@@ -456,9 +472,9 @@ impl Broker {
     /// current title.
     ///
     /// # Errors
-    /// Returns a message if another role holds the task, or the broker cannot
+    /// Returns an error if another role holds the task, or the broker cannot
     /// be reached.
-    pub fn claim(&self, task: &str, state: &str, title: &str) -> Result<String, String> {
+    pub fn claim(&self, task: &str, state: &str, title: &str) -> Result<String, Error> {
         let url = format!("{}/ledger", self.base);
         let payload = json!({
             "task": task,
@@ -480,16 +496,16 @@ impl Broker {
     /// Reads the work ledger: every claimed task, its owner, and its state.
     ///
     /// # Errors
-    /// Returns a message if the broker cannot be reached or its response is
+    /// Returns an error if the broker cannot be reached or its response is
     /// malformed.
-    pub fn ledger(&self) -> Result<Vec<LedgerItem>, String> {
+    pub fn ledger(&self) -> Result<Vec<LedgerItem>, Error> {
         let view: LedgerView = self.get("/ledger")?;
         Ok(view.tasks)
     }
 
     /// Posts `payload` to `channel`, returning `sent to {channel}` or a broker
     /// error.
-    fn post_message(&self, channel: &str, payload: &Value) -> Result<String, String> {
+    fn post_message(&self, channel: &str, payload: &Value) -> Result<String, Error> {
         let url = format!("{}/channels/{channel}/messages", self.base);
         match self
             .agent
@@ -517,9 +533,9 @@ impl Broker {
     /// returns an error and leaves the client on the pull-based read.
     ///
     /// # Errors
-    /// Returns a message if the broker's inbox stream cannot be opened, or the
+    /// Returns an error if the broker's inbox stream cannot be opened, or the
     /// backlog read fails.
-    pub fn subscribe(&mut self) -> Result<(), String> {
+    pub fn subscribe(&mut self) -> Result<(), Error> {
         self.subscribe_with(Arc::new(|| {}))
     }
 
@@ -537,12 +553,12 @@ impl Broker {
     /// quick and non-blocking.
     ///
     /// # Errors
-    /// Returns a message if the broker's inbox stream cannot be opened, or the
+    /// Returns an error if the broker's inbox stream cannot be opened, or the
     /// backlog read fails.
     pub fn subscribe_notifying(
         &mut self,
         on_message: impl Fn() + Send + Sync + 'static,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         self.subscribe_with(Arc::new(on_message))
     }
 
@@ -553,7 +569,7 @@ impl Broker {
     /// [`subscribe_notifying`](Broker::subscribe_notifying); `on_message` fires
     /// for each message the background thread buffers live (a no-op for the
     /// plain subscribe).
-    fn subscribe_with(&mut self, on_message: Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
+    fn subscribe_with(&mut self, on_message: Arc<dyn Fn() + Send + Sync>) -> Result<(), Error> {
         // Open the stream first, so its live-tail cursor is fixed before the backlog
         // read. Any event that lands in the overlap is deduplicated by message
         // id below.
@@ -605,10 +621,10 @@ impl Broker {
     /// sees its own messages.
     ///
     /// # Errors
-    /// Returns a message if the pull fallback cannot reach the broker or its
+    /// Returns an error if the pull fallback cannot reach the broker or its
     /// response is malformed. The push path never fails: it drains an
     /// in-memory buffer.
-    pub fn inbox(&mut self) -> Result<Vec<InboxItem>, String> {
+    pub fn inbox(&mut self) -> Result<Vec<InboxItem>, Error> {
         // Gather the events new since the last read: drain the live buffer on the push
         // path (issue #76), else read history and slice from the pull cursor.
         let events = if let Some(drained) = self.inbox_stream.as_ref().map(InboxStream::drain) {
@@ -680,9 +696,9 @@ impl Broker {
     /// working, so a restart is safe.
     ///
     /// # Errors
-    /// Returns a message if the broker rejects the registration or cannot be
+    /// Returns an error if the broker rejects the registration or cannot be
     /// reached.
-    pub fn register(&self, owned_paths: &[String]) -> Result<(), String> {
+    pub fn register(&self, owned_paths: &[String]) -> Result<(), Error> {
         let url = format!("{}/roster", self.base);
         let payload = json!({
             "role": self.role.as_str(),
@@ -710,14 +726,14 @@ impl Broker {
     /// the role may proceed after being warned.
     ///
     /// # Errors
-    /// Returns a message if the path is out of lane and enforcement is `block`,
+    /// Returns an error if the path is out of lane and enforcement is `block`,
     /// or the broker cannot be reached to record the crossing.
     pub fn check_lane(
         &self,
         owned_paths: &[String],
         enforcement: LaneEnforcement,
         path: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         if path_in_lane(owned_paths, path) {
             return Ok(format!("`{path}` is in your lane; proceed."));
         }
@@ -735,17 +751,17 @@ impl Broker {
             }
             LaneEnforcement::Block => {
                 self.report_boundary(path, true)?;
-                Err(format!(
+                Err(Error::invalid(format!(
                     "`{path}` is OUTSIDE your lane and edits there are blocked. Route the change \
                      through the commander (crew_send) instead of editing it."
-                ))
+                )))
             }
         }
     }
 
     /// Records a lane crossing on the stream, so the operator sees it (issue
     /// #46).
-    fn report_boundary(&self, path: &str, blocked: bool) -> Result<(), String> {
+    fn report_boundary(&self, path: &str, blocked: bool) -> Result<(), Error> {
         let payload = json!({
             "role": self.role.as_str(),
             "path": path,
@@ -762,9 +778,9 @@ impl Broker {
     /// role must pass it first, so confident-but-wrong work never ships.
     ///
     /// # Errors
-    /// Returns a message if the broker rejects the submission or cannot be
+    /// Returns an error if the broker rejects the submission or cannot be
     /// reached.
-    pub fn submit(&self, task: &str, acceptance: &str, to: Option<&str>) -> Result<String, String> {
+    pub fn submit(&self, task: &str, acceptance: &str, to: Option<&str>) -> Result<String, Error> {
         let mut payload = json!({
             "role": self.role.as_str(),
             "task": task,
@@ -791,8 +807,8 @@ impl Broker {
     /// pass an empty string when there is none.
     ///
     /// # Errors
-    /// Returns a message if the broker rejects the report or cannot be reached.
-    pub fn complete(&self, summary: &str) -> Result<String, String> {
+    /// Returns an error if the broker rejects the report or cannot be reached.
+    pub fn complete(&self, summary: &str) -> Result<String, Error> {
         self.post_json(
             "/complete",
             &json!({ "role": self.role.as_str(), "summary": summary }),
@@ -808,10 +824,10 @@ impl Broker {
     /// so a task passes only when an independent role could not break it.
     ///
     /// # Errors
-    /// Returns a message if the verdict is refused (the verifier is the owner,
+    /// Returns an error if the verdict is refused (the verifier is the owner,
     /// or the task is not awaiting a verdict), or the broker cannot be
     /// reached.
-    pub fn verdict(&self, task: &str, pass: bool, failure: &str) -> Result<String, String> {
+    pub fn verdict(&self, task: &str, pass: bool, failure: &str) -> Result<String, Error> {
         let payload = json!({
             "role": self.role.as_str(),
             "task": task,
@@ -830,9 +846,9 @@ impl Broker {
     /// (issue #47).
     ///
     /// # Errors
-    /// Returns a message if the broker cannot be reached or its response is
+    /// Returns an error if the broker cannot be reached or its response is
     /// malformed.
-    pub fn gate(&self) -> Result<GateSnapshot, String> {
+    pub fn gate(&self) -> Result<GateSnapshot, Error> {
         self.get("/gate")
     }
 
@@ -844,8 +860,8 @@ impl Broker {
     /// entry.
     ///
     /// # Errors
-    /// Returns a message if the broker rejects the change or cannot be reached.
-    pub fn record(&self, key: &str, section: &str, body: &str) -> Result<String, String> {
+    /// Returns an error if the broker rejects the change or cannot be reached.
+    pub fn record(&self, key: &str, section: &str, body: &str) -> Result<String, Error> {
         let payload = json!({
             "role": self.role.as_str(),
             "key": key,
@@ -859,9 +875,9 @@ impl Broker {
     /// Retracts a board entry the crew no longer holds (issue #49).
     ///
     /// # Errors
-    /// Returns a message if the entry is not on the board, or the broker cannot
+    /// Returns an error if the entry is not on the board, or the broker cannot
     /// be reached.
-    pub fn retract(&self, key: &str) -> Result<String, String> {
+    pub fn retract(&self, key: &str) -> Result<String, Error> {
         let payload = json!({
             "role": self.role.as_str(),
             "key": key,
@@ -875,9 +891,9 @@ impl Broker {
     /// (issue #49).
     ///
     /// # Errors
-    /// Returns a message if the broker cannot be reached or its response is
+    /// Returns an error if the broker cannot be reached or its response is
     /// malformed.
-    pub fn board(&self, section: Option<&str>) -> Result<BoardSnapshot, String> {
+    pub fn board(&self, section: Option<&str>) -> Result<BoardSnapshot, Error> {
         match section {
             Some(section) => self.get(&format!("/board?section={section}")),
             None => self.get("/board"),
@@ -893,13 +909,13 @@ impl Broker {
     /// byte cap.
     ///
     /// # Errors
-    /// Returns a message if the broker cannot be reached or its response is
+    /// Returns an error if the broker cannot be reached or its response is
     /// malformed.
     pub fn briefing(
         &self,
         task: Option<&str>,
         budget: Option<usize>,
-    ) -> Result<BriefingPacket, String> {
+    ) -> Result<BriefingPacket, Error> {
         let url = format!("{}/briefing", self.base);
         let mut request = self.agent.get(&url).query("role", self.role.as_str());
         if let Some(task) = task {
@@ -913,13 +929,15 @@ impl Broker {
             .call()
             .map_err(|err| self.explain(err))?
             .into_string()
-            .map_err(|err| format!("could not read the broker response: {err}"))?;
+            .map_err(|err| {
+                Error::malformed(format!("could not read the broker response: {err}"))
+            })?;
         serde_json::from_str(&text)
-            .map_err(|err| format!("could not parse the broker response: {err}"))
+            .map_err(|err| Error::malformed(format!("could not parse the broker response: {err}")))
     }
 
     /// Posts a JSON `payload` to `path`, discarding the body on success.
-    fn post_json(&self, path: &str, payload: &Value) -> Result<(), String> {
+    fn post_json(&self, path: &str, payload: &Value) -> Result<(), Error> {
         let url = format!("{}{path}", self.base);
         match self
             .agent
@@ -935,9 +953,9 @@ impl Broker {
     /// Reads the roster: the crew's control standing and every registered role.
     ///
     /// # Errors
-    /// Returns a message if the broker cannot be reached or its response is
+    /// Returns an error if the broker cannot be reached or its response is
     /// malformed.
-    pub fn roster(&self) -> Result<RosterSnapshot, String> {
+    pub fn roster(&self) -> Result<RosterSnapshot, Error> {
         let view: RosterView = self.get("/roster")?;
         Ok(RosterSnapshot {
             standing: view.standing,
@@ -947,7 +965,7 @@ impl Broker {
 
     /// Fetches the whole message log, oldest first, following the history
     /// cursor.
-    fn message_log(&self) -> Result<Vec<Event>, String> {
+    fn message_log(&self) -> Result<Vec<Event>, Error> {
         let mut events = Vec::new();
         let mut after: Option<String> = None;
         loop {
@@ -992,28 +1010,32 @@ impl Broker {
     }
 
     /// Reads a JSON endpoint into `T`.
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         let url = format!("{}{path}", self.base);
         let response = self
             .agent
             .get(&url)
             .call()
             .map_err(|err| self.explain(err))?;
-        let text = response
-            .into_string()
-            .map_err(|err| format!("could not read the broker response: {err}"))?;
+        let text = response.into_string().map_err(|err| {
+            Error::malformed(format!("could not read the broker response: {err}"))
+        })?;
         serde_json::from_str(&text)
-            .map_err(|err| format!("could not parse the broker response: {err}"))
+            .map_err(|err| Error::malformed(format!("could not parse the broker response: {err}")))
     }
 
-    /// Turns a `ureq` error into an agent-readable message.
-    fn explain(&self, err: ureq::Error) -> String {
+    /// Turns a `ureq` error into a canonical [`Error`] (issue #193).
+    fn explain(&self, err: ureq::Error) -> Error {
         match err {
-            ureq::Error::Status(code, response) => broker_message(response)
-                .unwrap_or_else(|| format!("the broker returned HTTP {code}")),
-            ureq::Error::Transport(transport) => {
-                format!("could not reach the broker at {}: {transport}", self.base)
+            ureq::Error::Status(code, response) => {
+                let message = broker_message(response)
+                    .unwrap_or_else(|| format!("the broker returned HTTP {code}"));
+                Error::rejected(Some(code), message)
             }
+            ureq::Error::Transport(transport) => Error::unreachable(format!(
+                "could not reach the broker at {}: {transport}",
+                self.base
+            )),
         }
     }
 }
@@ -1413,6 +1435,29 @@ mod tests {
     use super::{sender_label, Broker};
 
     #[test]
+    fn a_dead_broker_is_a_typed_unreachable_error() {
+        // A read against a port with no broker is a transport failure, surfaced as a
+        // canonical unreachable error rather than a bare string (issue #193).
+        let broker = Broker::new(
+            "http://127.0.0.1:1",
+            RoleId::new("backend"),
+            RoleId::new("commander"),
+        );
+        let error = broker
+            .roster()
+            .expect_err("no broker is listening on port 1");
+        assert!(
+            error.is_unreachable(),
+            "a refused connection is unreachable"
+        );
+        assert!(!error.is_rejected(), "it is not a broker rejection");
+        assert!(
+            error.status().is_none(),
+            "an unreachable error carries no status"
+        );
+    }
+
+    #[test]
     fn a_sender_labels_a_role_or_the_general() {
         assert_eq!(
             sender_label(&Sender::Role(RoleId::new("backend"))),
@@ -1434,6 +1479,11 @@ mod tests {
             .artifact(None, None, "opened it", "feature/x", "pr")
             .expect_err("an unknown artifact kind is rejected");
         assert!(
+            error.is_invalid(),
+            "a bad kind is an invalid-argument error"
+        );
+        let error = error.to_string();
+        assert!(
             error.contains("not an artifact kind") && error.contains("pull_request"),
             "the error names the valid kinds: {error}",
         );
@@ -1453,12 +1503,18 @@ mod tests {
             .redirect("frontend+backend", "focus the login flow")
             .expect_err("a redirect needs a single specialist");
         assert!(
+            redirect.is_invalid(),
+            "an unroutable target is an invalid arg"
+        );
+        let redirect = redirect.to_string();
+        assert!(
             redirect.contains("not a role to redirect"),
             "the error names the directive: {redirect}",
         );
         let belay = broker
             .belay("frontend+backend", "drop that and take this")
-            .expect_err("a belay needs a single specialist");
+            .expect_err("a belay needs a single specialist")
+            .to_string();
         assert!(
             belay.contains("not a role to belay"),
             "the error names the directive: {belay}",
