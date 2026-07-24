@@ -80,8 +80,10 @@ not a reimplementation of the agent.
   the live count can drive a Runewood visualization. See `docs/observability.md`.
 - **Command and control (the general's console).** The General can interject and
   redirect a role mid-task (`crew redirect` / `crew belay`), gate risky actions
-  (push, merge, delete, spend, external post) behind rules-of-engagement
-  approval, pause and resume per role and crew-wide plus an emergency stand-down
+  (push, merge, delete, spend above a threshold, external post) behind per-role
+  rules-of-engagement approval (issue #39: a gated action pauses the role until
+  the General grants or denies it with `crew approve`; an ungated one proceeds),
+  pause and resume per role and crew-wide plus an emergency stand-down
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
   commander to command a specialist directly (`crew command <role>`, issue #42: the
   General orders a role itself, bypassing the commander, and the commander is informed
@@ -157,17 +159,19 @@ The full design is in `docs/architecture.md`. In short:
   default, a role, or a channel, issue #118), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
   mid-task, and `crew command` to order a role directly, bypassing the commander while
-  keeping it informed, issue #42), `crew integrate` to merge the roles' branches into one
+  keeping it informed, issue #42), the rules-of-engagement gate (`crew approve` /
+  `crew approvals` to grant or deny a role's risky-action request, issue #39),
+  `crew integrate` to merge the roles' branches into one
   coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` /
   `crew order` / `crew ask` / `crew answer` / `crew inbox` /
-  `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
+  `crew roster` / `crew lane` / `crew request-approval` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
   (auto-reconnecting like `tail -F`, resuming from `Last-Event-ID` without loss, issue #117),
   `crew top` for the live terminal cockpit (issue #51: htop for the crew, every role's status,
   action, and spend plus the message flow, updating live off the stream), `crew notify` to
   push a native notification on each actionable moment (a question, a
-  death, a stand-down, a coordination stall, a mission completion) over that same stream, and
+  death, a stand-down, a coordination stall, a mission completion, an approval request) over that same stream, and
   `crew usage` to read the shared-subscription usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
@@ -335,7 +339,7 @@ speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
 agent. It boots from a role card (`CREW_ROLE_CARD`, issue #18), registers the role on
 the roster at boot, and dispatches each tool to a `crew_client::Broker`, the shared
 thin synchronous client (`ureq`) over the broker's HTTP API (issue #129); it never
-touches the store. It exposes sixteen
+touches the store. It exposes seventeen
 tools with self-documenting schemas: `crew_send` (post a note as the role to a channel or a
 teammate, defaulting to the commander), `crew_order` (issue an order, a scoped task
 with a title, scope, owned paths, and acceptance, to one specialist; the commander's
@@ -348,7 +352,10 @@ order's structured fields and each message's id so a reply can name it), `crew_r
 (list registered teammates, their owned paths, and liveness), `crew_lane` (check a path against the role's owned lane
 before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `boundary`
 event and, under a blocking policy, refuses, routing the change through the commander;
-issue #46), the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
+issue #46), `crew_request_approval` (ask the General to approve a risky action, `push` /
+`merge` / `delete` / `spend` / `external_post`, before taking it; a gated action pauses the
+role until the General grants or denies it, an ungated one proceeds, issue #39), the
+work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
 touching shared work, moving the claim through `in_progress` / `blocked` / `done`, and
 read the ledger; the broker refuses a claim another role holds, issue #45), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
@@ -435,6 +442,27 @@ stream to `all-units`, and under `block` the edit is refused so a cross-lane cha
 through the commander instead of a silent edit. The event is filterable with
 `GET /history?kind=boundary`. See `docs/roles.md` (lane enforcement) and
 `docs/observability.md` (the `boundary` event).
+
+Rules of engagement gate risky actions behind the General's sign-off, so a crew is safe to
+leave running (issue #39, `crew_core::approval`). Each role carries a `RulesOfEngagement`:
+the `ActionKind`s (`push` / `merge` / `delete` / `spend` / `external_post`) it needs
+approval for, plus a spend threshold. `default_roe_for` sets sensible defaults, the
+commander integrates work so it may push, merge, and spend but is gated on `delete` and
+`external_post`, and a specialist is gated on all five; a crew overrides them per role with
+a `[roles.roe]` config table (`gated`, `spend_threshold`), resolved by `roe_for` and
+stamped onto each `RoleCard` by `to_cards` (the briefing lists the gates). The check is the
+pure, matrix-tested `RulesOfEngagement::requires_approval(action, amount)`. Before a gated
+action a role calls the `crew_request_approval` MCP tool (or `crew request-approval` on the
+shim): if the action is not gated it returns at once (proceed); if it is, the client posts
+an `approval_request` message on the role's own channel and **blocks** polling the stream
+for the General's decision, up to `APPROVAL_TIMEOUT` (ten minutes, below the heartbeat), and
+returns granted / denied / timed-out (silence fails closed). The approval flow rides the
+message stream, not a new broker endpoint: two new `MessageKind`s, `ApprovalRequest { action }`
+and `ApprovalDecision { in_reply_to, granted }`. The General answers with `crew approve <id>`
+(`--deny`, `--reason`), which looks the request up to find the requester and posts the
+decision back to it, and `crew approvals` lists what is pending; `crew notify` fires an
+"approval needed" push carrying the id. See `docs/communication.md` (rules of engagement),
+`docs/config.md` (`[roles.roe]`), and `docs/roles.md`.
 
 The adversarial done-gate makes "done" mean verified, not asserted (issue #47), so
 confident-but-wrong work never ships. A role does not report its own task done: it submits
@@ -738,12 +766,13 @@ treated as General-facing, and a real question is never dropped. Other routine c
 (status, notes, orders, answers, artifacts, ordinary lifecycle, activity, board, boundary,
 verification) stays quiet by default. The classifier, `notification_for` over the
 liveness-tracking `Roster`, decides per event, so the policy is fully unit-tested; `--mute
-<moments>` (`question,died,stood-down,stalled,complete`) narrows the set and `--no-sound`
+<moments>` (`question,died,stood-down,stalled,complete,approval`) narrows the set and `--no-sound`
 drops the terminal bell. Each push prints a log line (the durable record), sounds the bell
 (mirroring Seraphim's notification sound), and calls the platform desktop notifier
 (`notify-send` on Linux, `osascript` on macOS), degrading quietly when no notifier is
-present. An approval pending (issue #40) plugs into the same classifier when its event
-lands, exactly as the stall moment did once the monitor began surfacing stalls. See
+present. An approval-pending moment (issue #39) plugs into the same classifier: a role
+blocked on a rules-of-engagement gate fires the "approval needed" push with the request id
+to answer, exactly as the stall moment plugged in once the monitor surfaced stalls. See
 `docs/observability.md` (push notifications).
 
 `crew top` is the live terminal cockpit, htop for the crew (issue #51, `src/top/`). It shows

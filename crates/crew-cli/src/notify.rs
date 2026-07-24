@@ -24,6 +24,9 @@
 //! - **The mission completes** ([`Lifecycle::MissionComplete`]): the crew
 //!   gracefully finished its work (issue #121). This is the true completion,
 //!   distinct from the stand-down that used to stand in for it.
+//! - **A role needs approval** ([`MessageKind::ApprovalRequest`]): a role is
+//!   blocked on a rules-of-engagement gate and needs the General to grant or
+//!   deny a risky action before it proceeds (issue #39).
 //!
 //! ## Which questions reach the General
 //!
@@ -44,10 +47,10 @@
 //!
 //! Everything else (status, notes, orders, answers, artifacts, ordinary
 //! lifecycle such as `started` or `idle`, activity, board, boundary, and
-//! verification events) is routine and stays quiet by default. One further
-//! moment in the issue's scope, an approval pending (issue #40), lights up here
-//! for free once its event reaches the stream: extend [`moment_of`] and
-//! [`Moment`] and the rest of the pipeline carries it.
+//! verification events) is routine and stays quiet by default. A new moment
+//! lights up here for free once its event reaches the stream: extend
+//! [`moment_of`] and [`Moment`] and the rest of the pipeline carries it, as the
+//! approval-pending moment (issue #39) does.
 //!
 //! ## Configurable, quiet by default
 //!
@@ -111,6 +114,10 @@ pub(crate) enum Moment {
     /// #121), distinct from a stand-down.
     #[value(name = "complete")]
     MissionComplete,
+    /// A role is blocked awaiting the General's approval for a risky action
+    /// (issue #39): it needs a grant or a denial to proceed.
+    #[value(name = "approval")]
+    ApprovalRequested,
 }
 
 /// Which moments push a notification, and whether a push sounds the bell.
@@ -285,6 +292,9 @@ fn moment_of(event: &Event, roster: &Roster) -> Option<Moment> {
             MessageKind::Question { .. } if roster.is_general_facing(event) => {
                 Some(Moment::QuestionAsked)
             }
+            // An approval request is always for the General: a role is blocked
+            // until it is answered (issue #39).
+            MessageKind::ApprovalRequest { .. } => Some(Moment::ApprovalRequested),
             _ => None,
         },
         EventKind::Lifecycle(Lifecycle::Died) => Some(Moment::RoleDied),
@@ -333,6 +343,29 @@ fn render(event: &Event, moment: Moment) -> Notification {
             title: "crew: mission complete".to_owned(),
             body: format!("{who} reports the mission gracefully finished"),
         },
+        Moment::ApprovalRequested => {
+            let (action, id) = match &event.kind {
+                EventKind::Message(message) => {
+                    (approval_action(&message.kind), message.id.to_string())
+                }
+                _ => ("an action", String::new()),
+            };
+            let detail =
+                message_body(event).map_or_else(String::new, |body| format!(": {}", elide(body)));
+            Notification {
+                title: "crew: approval needed".to_owned(),
+                body: format!("{who} wants to {action}{detail} (crew approve {id})"),
+            }
+        }
+    }
+}
+
+/// The human phrase for an approval request's action, for the notification
+/// body.
+fn approval_action(kind: &MessageKind) -> &'static str {
+    match kind {
+        MessageKind::ApprovalRequest { action } => action.phrase(),
+        _ => "take an action",
     }
 }
 

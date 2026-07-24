@@ -168,6 +168,30 @@ above) is unchanged, and `crew command` is the explicit way to reach past it. Re
 in-flight task from one role to another, updating the work ledger, is the override's other
 half; it lands once the work ledger (issue #46) exists to reassign against.
 
+### Rules of engagement
+
+The crew is safe to leave running because the dangerous, hard-to-undo actions wait for the
+General's sign-off (issue #39). Each role carries **rules of engagement**: the actions it
+must get approval for before it takes them, `push`, `merge`, `delete`, `spend` above a
+threshold, and `external_post`. The defaults follow the chain of command: the commander
+integrates the crew's work, so it may push, merge, and spend without sign-off and is gated
+only on `delete` and `external_post`; a specialist is gated on all five. A crew overrides
+them per role in its config (`[roles.roe]`, see `docs/config.md`), and the resolved rules
+ride each role card, so the briefing tells a role exactly what it must ask for.
+
+Before a gated action a role calls **`crew_request_approval`** (or `crew request-approval`
+on the shim), naming the action and, for a spend, the amount. If the action is not gated it
+returns at once and the role proceeds; if it is, the role posts an `approval_request` on its
+own channel and **blocks** until the General answers, so a gated action never happens behind
+the General's back. The request rides the ordinary message stream, so `crew watch` and `crew
+notify` surface it (the notification carries the request id), the same way every other event
+travels. The General answers with **`crew approve <id>`** (`--deny` to refuse, `--reason` to
+explain), and **`crew approvals`** lists what is still pending. A grant lets the role
+proceed; a denial or a timeout (the wait is bounded, below the supervisor's heartbeat) fails
+closed, so silence never becomes a yes. The two decisions are `MessageKind` variants,
+`ApprovalRequest` and `ApprovalDecision`, so the whole flow is a projection of the one event
+stream.
+
 ## Secret scrubbing
 
 A crew agent may echo a token it was handed into a message. The broker masks a

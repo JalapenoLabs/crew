@@ -239,6 +239,28 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Grant or deny a role's approval request for a risky action (issue #39).
+    Approve {
+        /// The approval request id to answer (see `crew approvals`).
+        id: String,
+        /// Deny the request instead of granting it.
+        #[arg(long)]
+        deny: bool,
+        /// The reason for the decision, shown to the role.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// List the approval requests still awaiting a decision.
+    Approvals {
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// Pause a role, or the whole crew: it pulls no new work until resumed.
     Pause {
         /// The role to pause; omit to pause the whole crew.
@@ -297,6 +319,18 @@ enum Command {
     Lane {
         /// The repo-relative file path to check against this role's owned lane.
         path: String,
+    },
+    /// Request the General's approval for a risky action before you take it
+    /// (issue #39); blocks until it is granted or denied.
+    RequestApproval {
+        /// The action: push, merge, delete, spend, or `external_post`.
+        action: String,
+        /// For a spend, the number of tokens.
+        #[arg(long)]
+        amount: Option<u64>,
+        /// What specifically you are about to do, for the General to judge.
+        #[arg(long)]
+        detail: Option<String>,
     },
     /// Claim a task on the work ledger, or move this role's claim to a new
     /// state.
@@ -466,6 +500,13 @@ fn main() -> Result<()> {
             acceptance.as_deref(),
             commander.as_deref(),
         ),
+        Command::Approve {
+            id,
+            deny,
+            reason,
+            broker,
+        } => control::approve(broker.as_deref(), &id, deny, reason.as_deref()),
+        Command::Approvals { broker } => control::approvals(broker.as_deref()),
         Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
         Command::Resume { role, broker } => pause::resume(broker.as_deref(), role.as_deref()),
         Command::Standdown { broker } => pause::standdown(broker.as_deref()),
@@ -478,6 +519,11 @@ fn main() -> Result<()> {
         } => integrate::integrate(&repo, &base, &branch, check.as_deref()),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
+        Command::RequestApproval {
+            action,
+            amount,
+            detail,
+        } => shim::request_approval(&action, amount, detail.as_deref()),
         Command::Claim { task, state, title } => {
             shim::claim(&task, &state, title.as_deref().unwrap_or_default())
         }

@@ -37,6 +37,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    approval::RulesOfEngagement,
     config::{LaneEnforcement, Runtime},
     id::RoleId,
     lane::path_in_lane,
@@ -102,6 +103,12 @@ pub struct RoleCard {
     /// rather than the MCP tools. Defaults to [`Claude`](Runtime::Claude).
     #[serde(default)]
     pub runtime: Runtime,
+    /// The role's rules of engagement: the risky actions it needs the General's
+    /// approval for before taking them (issue #39). Defaults to the specialist
+    /// gates (every action); the supervisor stamps the role's resolved rules
+    /// from the crew config.
+    #[serde(default)]
+    pub roe: RulesOfEngagement,
     /// How to reach the unit: the broker's address.
     pub broker: BrokerEndpoint,
 }
@@ -128,6 +135,7 @@ impl RoleCard {
             commander: default_commander(),
             lane_enforcement: LaneEnforcement::default(),
             runtime: Runtime::default(),
+            roe: RulesOfEngagement::default(),
             broker,
         }
     }
@@ -145,6 +153,18 @@ impl RoleCard {
     #[must_use]
     pub fn with_runtime(mut self, runtime: Runtime) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Sets the role's rules of engagement (issue #39), returning the card so
+    /// calls chain.
+    ///
+    /// The supervisor builds cards from the crew config, which resolves each
+    /// role's gates (see [`roe_for`](crate::CrewConfig::roe_for)); a bare
+    /// [`new`](RoleCard::new) card keeps the specialist default.
+    #[must_use]
+    pub fn with_roe(mut self, roe: RulesOfEngagement) -> Self {
+        self.roe = roe;
         self
     }
 
@@ -328,9 +348,42 @@ impl RoleCard {
              for it to lift. A stand-down means stop now and leave your work recoverable.\n",
         );
 
+        if let Some(gates) = self.rules_of_engagement_line() {
+            out.push('\n');
+            out.push_str(&gates);
+        }
+
         out.push('\n');
         out.push_str(&self.topology_briefing());
         out
+    }
+
+    /// The rules-of-engagement paragraph: the risky actions this role needs the
+    /// General's approval for, and how to ask (issue #39).
+    ///
+    /// `None` when the role gates nothing, so an unrestricted role's briefing
+    /// carries no approval note.
+    fn rules_of_engagement_line(&self) -> Option<String> {
+        if self.roe.is_unrestricted() {
+            return None;
+        }
+        let gates: Vec<String> = self
+            .roe
+            .gated_actions()
+            .map(|action| match action {
+                crate::ActionKind::Spend => {
+                    format!("spend above {} tokens", self.roe.spend_threshold())
+                }
+                other => other.phrase().to_owned(),
+            })
+            .collect();
+        Some(format!(
+            "Rules of engagement: some actions need the General's sign-off before you take \
+             them: {}. Before you do one, call crew_request_approval naming the action (and the \
+             amount for a spend); it pauses you until the General grants or denies it, and you \
+             proceed only on a grant. Any other action needs no approval.\n",
+            join_with_or(&gates),
+        ))
     }
 
     /// The role's place in the hub-and-spoke topology: commander duties or how
@@ -355,6 +408,17 @@ impl RoleCard {
              broadcast.",
             commander = self.commander,
         )
+    }
+}
+
+/// Joins items into a human list with an Oxford `or`: `a`, `a or b`, `a, b, or
+/// c`.
+fn join_with_or(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
     }
 }
 
@@ -613,6 +677,40 @@ mod tests {
         assert!(
             briefing.contains("crew_claim") && briefing.contains("before you touch it"),
             "tells the role to claim work before starting"
+        );
+    }
+
+    #[test]
+    fn the_briefing_lists_the_rules_of_engagement_and_the_card_round_trips() {
+        use crate::{ActionKind, RulesOfEngagement};
+
+        // A role gated on push and delete is told to ask before them.
+        let card = sample().with_roe(RulesOfEngagement::new(
+            [ActionKind::Push, ActionKind::Delete],
+            1_000,
+        ));
+        let briefing = card.briefing();
+        assert!(
+            briefing.contains("Rules of engagement") && briefing.contains("crew_request_approval"),
+            "the briefing names the gate and how to ask: {briefing}",
+        );
+        assert!(
+            briefing.contains("push to a remote") && briefing.contains("delete"),
+            "it lists the gated actions: {briefing}",
+        );
+
+        // The rules survive a TOML round trip.
+        let parsed = RoleCard::from_toml(&card.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            parsed, card,
+            "the rules of engagement survive serialization"
+        );
+
+        // An unrestricted role's briefing carries no approval note.
+        let free = sample().with_roe(RulesOfEngagement::new([], 1_000));
+        assert!(
+            !free.briefing().contains("Rules of engagement"),
+            "a role that gates nothing gets no approval note",
         );
     }
 

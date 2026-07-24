@@ -560,6 +560,8 @@ fn message_kind_label(kind: &MessageKind) -> &'static str {
         MessageKind::Note => "note",
         MessageKind::Redirect => "redirect",
         MessageKind::Belay => "belay",
+        MessageKind::ApprovalRequest { .. } => "approval_request",
+        MessageKind::ApprovalDecision { .. } => "approval_decision",
     }
 }
 

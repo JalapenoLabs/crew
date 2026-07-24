@@ -22,6 +22,11 @@
 //! intact. The default (brief the commander) is unchanged; the override is
 //! explicit.
 //!
+//! `crew approve` and `crew approvals` are the rules-of-engagement gate (issue
+//! #39): a role blocks on `crew_request_approval` before a risky action, and the
+//! General lists the pending requests and grants or denies each, so the role
+//! proceeds only on a grant.
+//!
 //! All post as the General, so unlike the agent shim they need no role card:
 //! the broker address comes from `--broker`, else the `CREW_BROKER_*`
 //! environment.
@@ -153,6 +158,119 @@ pub fn command(
     )?;
     println!("ordered {role} directly; informed {commander}");
     Ok(())
+}
+
+/// Grants or denies a role's rules-of-engagement approval request (issue #39).
+///
+/// The General answers a `crew_request_approval` the role is blocked on: it
+/// looks the request up by id to find the role that made it, then posts an
+/// `approval_decision` back to that role. The waiting role unblocks and
+/// proceeds only on a grant; a `reason` rides along for either.
+///
+/// # Errors
+/// Returns an error if no pending request has the id, the broker configuration
+/// is invalid, or the broker cannot be reached or rejects the decision.
+pub fn approve(
+    broker: Option<&str>,
+    request_id: &str,
+    deny: bool,
+    reason: Option<&str>,
+) -> Result<()> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(eyre!(
+            "name the approval request id to answer (see `crew approvals`)"
+        ));
+    }
+    let base = resolve_base(broker)?;
+    let requester = find_request_sender(&base, request_id)?;
+    let target = role_channel(&requester, "answer")?;
+    let payload = json!({
+        "from": { "kind": "general" },
+        "kind": "approval_decision",
+        "in_reply_to": request_id,
+        "granted": !deny,
+        "body": reason.unwrap_or_default(),
+    });
+    post_message(&base, target.name().as_str(), &payload, "approval decision")?;
+    println!(
+        "{} {requester}'s request {request_id}",
+        if deny { "denied" } else { "approved" },
+    );
+    Ok(())
+}
+
+/// Lists the approval requests still awaiting a decision (issue #39).
+///
+/// A request is pending until an `approval_decision` names it, so the General
+/// sees what to answer and each request's id.
+///
+/// # Errors
+/// Returns an error if the broker configuration is invalid or the broker cannot
+/// be reached.
+pub fn approvals(broker: Option<&str>) -> Result<()> {
+    let base = resolve_base(broker)?;
+    let messages = fetch_messages(&base)?;
+
+    let decided: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|event| event["kind"]["data"]["kind"] == "approval_decision")
+        .filter_map(|event| event["kind"]["data"]["in_reply_to"].as_str())
+        .collect();
+    let pending: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|event| event["kind"]["data"]["kind"] == "approval_request")
+        .filter(|event| !decided.contains(event["kind"]["data"]["id"].as_str().unwrap_or_default()))
+        .collect();
+
+    if pending.is_empty() {
+        println!("No pending approval requests.");
+        return Ok(());
+    }
+    println!("{} pending approval request(s):", pending.len());
+    for request in pending {
+        let data = &request["kind"]["data"];
+        let id = data["id"].as_str().unwrap_or("?");
+        let role = request["from"]["id"].as_str().unwrap_or("?");
+        let action = data["action"].as_str().unwrap_or("?");
+        let detail = data["body"].as_str().unwrap_or_default();
+        println!("  {id}  {role} wants to {action}: {detail}");
+        println!("      approve: crew approve {id}   deny: crew approve {id} --deny");
+    }
+    Ok(())
+}
+
+/// The role that posted the approval request `request_id`, so its decision
+/// routes back to it.
+fn find_request_sender(base: &str, request_id: &str) -> Result<String> {
+    let request = fetch_messages(base)?
+        .into_iter()
+        .find(|event| {
+            event["kind"]["data"]["kind"] == "approval_request"
+                && event["kind"]["data"]["id"].as_str() == Some(request_id)
+        })
+        .ok_or_else(|| eyre!("no approval request has id `{request_id}`; see `crew approvals`"))?;
+    request["from"]["id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| eyre!("the approval request `{request_id}` carries no sender role"))
+}
+
+/// Fetches the broker's message events, for finding approval requests and
+/// decisions.
+fn fetch_messages(base: &str) -> Result<Vec<serde_json::Value>> {
+    let url = format!("{base}/history?kind=message");
+    let text = ureq::get(&url)
+        .call()
+        .map_err(|err| eyre!("could not reach the broker at {base}; is `crewd` running? {err}"))?
+        .into_string()
+        .wrap_err("could not read the broker response")?;
+    let history: serde_json::Value =
+        serde_json::from_str(&text).wrap_err("could not parse the broker response")?;
+    match history["events"].as_array() {
+        Some(events) => Ok(events.clone()),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Posts a General directive (`kind`, a `redirect` or `belay`) to `role`'s

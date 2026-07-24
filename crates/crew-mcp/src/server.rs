@@ -9,10 +9,10 @@
 use std::io::{BufRead, Write};
 
 use crew_client::{
-    BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot,
-    Standing,
+    ApprovalOutcome, BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem,
+    RosterSnapshot, Standing, APPROVAL_TIMEOUT,
 };
-use crew_core::LaneEnforcement;
+use crew_core::{ActionKind, LaneEnforcement, RulesOfEngagement};
 use serde_json::{json, Value};
 
 /// The MCP protocol version this server implements.
@@ -29,21 +29,26 @@ pub struct Server {
     owned_paths: Vec<String>,
     /// How the crew enforces this role's lane.
     lane_enforcement: LaneEnforcement,
+    /// The role's rules of engagement, for `crew_request_approval` (issue #39).
+    roe: RulesOfEngagement,
 }
 
 impl Server {
     /// Builds a server that dispatches tool calls to `broker`, enforcing the
-    /// role's lane (`owned_paths`, `lane_enforcement`) for `crew_lane`.
+    /// role's lane (`owned_paths`, `lane_enforcement`) for `crew_lane` and its
+    /// rules of engagement (`roe`) for `crew_request_approval`.
     #[must_use]
     pub fn new(
         broker: Broker,
         owned_paths: Vec<String>,
         lane_enforcement: LaneEnforcement,
+        roe: RulesOfEngagement,
     ) -> Self {
         Self {
             broker,
             owned_paths,
             lane_enforcement,
+            roe,
         }
     }
 
@@ -203,6 +208,29 @@ impl Server {
                 )
             }
             "crew_gate" => Ok(render_gate(&self.broker.gate()?)),
+            "crew_request_approval" => {
+                let label = str_arg(arguments, "action").ok_or(
+                    "crew_request_approval requires an `action` (push, merge, delete, spend, \
+                     or external_post)",
+                )?;
+                let action = ActionKind::parse(label).ok_or_else(|| {
+                    format!(
+                        "`{label}` is not a known action; use push, merge, delete, spend, or \
+                         external_post"
+                    )
+                })?;
+                let detail = str_arg(arguments, "detail")
+                    .or_else(|| str_arg(arguments, "body"))
+                    .unwrap_or_default();
+                let outcome = self.broker.request_approval(
+                    &self.roe,
+                    action,
+                    u64_arg(arguments, "amount"),
+                    detail,
+                    APPROVAL_TIMEOUT,
+                )?;
+                Ok(render_approval(&outcome, action))
+            }
             "crew_complete" => self.broker.complete(),
             "crew_board" => Ok(render_board(
                 &self.broker.board(str_arg(arguments, "section"))?,
@@ -382,6 +410,25 @@ fn coordination_tools() -> Vec<Value> {
                     "path": { "type": "string", "description": "The repo-relative file path you are about to edit." }
                 },
                 "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "crew_request_approval",
+            "description": "Ask the General to approve a risky action before you take it. Your \
+                rules of engagement gate some actions (push, merge, delete, spend, external_post); \
+                call this naming the `action` before you do one. If the action is gated it pauses \
+                you until the General grants or denies it, and you proceed only on a grant; if it \
+                is not gated it returns at once and you proceed. For a `spend`, pass the `amount` \
+                in tokens. Put the specifics in `detail` so the General can judge it. Never take a \
+                gated action without a grant.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "The action: push, merge, delete, spend, or external_post." },
+                    "amount": { "type": "integer", "description": "For a spend, the number of tokens; ignored for other actions." },
+                    "detail": { "type": "string", "description": "What specifically you are about to do, for the General to judge." }
+                },
+                "required": ["action"]
             }
         }),
     ]
@@ -583,6 +630,34 @@ fn usize_arg(arguments: &Value, key: &str) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+/// A non-negative integer argument as a `u64`, if present.
+fn u64_arg(arguments: &Value, key: &str) -> Option<u64> {
+    arguments.get(key).and_then(Value::as_u64)
+}
+
+/// Renders an approval outcome as the agent-facing tool result (issue #39).
+fn render_approval(outcome: &ApprovalOutcome, action: ActionKind) -> String {
+    let label = action.label();
+    match outcome {
+        ApprovalOutcome::NotGated => {
+            format!("`{label}` needs no approval for your role; proceed.")
+        }
+        ApprovalOutcome::Granted => {
+            format!("The General approved `{label}`. You may proceed.")
+        }
+        ApprovalOutcome::Denied { reason } if reason.is_empty() => {
+            format!("The General denied `{label}`. Do not proceed; find another way or ask.")
+        }
+        ApprovalOutcome::Denied { reason } => {
+            format!("The General denied `{label}`: {reason}. Do not proceed.")
+        }
+        ApprovalOutcome::TimedOut => format!(
+            "No decision on `{label}` in time. Treat it as not approved and do not proceed; \
+             ask again or check with the General."
+        ),
+    }
+}
+
 /// A string-array argument as owned strings, dropping blanks; empty if absent.
 fn str_list_arg(arguments: &Value, key: &str) -> Vec<String> {
     arguments
@@ -776,6 +851,7 @@ mod tests {
             ),
             vec!["api/".to_owned()],
             crew_core::LaneEnforcement::Warn,
+            crew_core::default_roe_for(false),
         )
     }
 
@@ -852,6 +928,7 @@ mod tests {
                 "crew_inbox",
                 "crew_roster",
                 "crew_lane",
+                "crew_request_approval",
                 "crew_claim",
                 "crew_ledger",
                 "crew_submit",

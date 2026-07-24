@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    approval::ActionKind,
     budget::{BudgetScope, Spend},
     channel::Channel,
     id::{ChannelId, MessageId, RoleId, Sender, TaskId},
@@ -278,6 +279,25 @@ pub enum MessageKind {
     /// (issue #38). The role stops what it is doing and takes the
     /// [`body`](Message::body) as its new order.
     Belay,
+    /// Asks the General to approve a risky action before the role takes it
+    /// (issue #39). A role's rules of engagement gate the action; it posts this
+    /// and blocks until the General answers with an
+    /// [`ApprovalDecision`](Self::ApprovalDecision). The
+    /// [`body`](Message::body) describes the specific action.
+    ApprovalRequest {
+        /// The kind of risky action being requested.
+        action: ActionKind,
+    },
+    /// Grants or denies an [`ApprovalRequest`](Self::ApprovalRequest): the
+    /// General's answer (issue #39). The role proceeds only on a grant; the
+    /// [`body`](Message::body) carries the reason.
+    ApprovalDecision {
+        /// The id of the [`ApprovalRequest`](Self::ApprovalRequest) this
+        /// answers, so the waiting role matches the decision to its request.
+        in_reply_to: MessageId,
+        /// Whether the action is approved: `true` grants it, `false` denies it.
+        granted: bool,
+    },
 }
 
 impl MessageKind {
@@ -785,6 +805,13 @@ mod tests {
             envelope(message(MessageKind::Note)),
             envelope(message(MessageKind::Redirect)),
             envelope(message(MessageKind::Belay)),
+            envelope(message(MessageKind::ApprovalRequest {
+                action: crate::ActionKind::Push,
+            })),
+            envelope(message(MessageKind::ApprovalDecision {
+                in_reply_to: MessageId::new(),
+                granted: true,
+            })),
             envelope(EventKind::Lifecycle(Lifecycle::Started)),
             envelope(EventKind::Lifecycle(Lifecycle::Died)),
             envelope(EventKind::Lifecycle(Lifecycle::Paused)),

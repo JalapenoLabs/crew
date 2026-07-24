@@ -32,12 +32,12 @@ use std::{
         Arc, Mutex, PoisonError,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crew_core::{
-    path_in_lane, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind, RoleId,
-    Sender,
+    path_in_lane, ActionKind, Channel, Event, EventKind, LaneEnforcement, MessageId, MessageKind,
+    RoleId, RulesOfEngagement, Sender,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -55,6 +55,36 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// enough that a genuinely down broker is not hammered. A resume carries the
 /// `Last-Event-ID` cursor, so nothing is missed across the gap.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+
+/// How long a gated action waits on the General's decision before the request
+/// times out (issue #39).
+///
+/// Ten minutes: long enough for the General to answer, but below the
+/// supervisor's heartbeat (twenty minutes), so a role blocked on approval is
+/// not mistaken for a hung turn and reaped. On a timeout the action is treated
+/// as not approved (fail closed), never proceeding on silence.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How often the requester polls the stream for the General's decision.
+const APPROVAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The result of asking the General to approve a risky action (issue #39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    /// The action is not gated for this role, so it proceeds with no wait.
+    NotGated,
+    /// The General approved the action; the role may proceed.
+    Granted,
+    /// The General denied the action; the role must not proceed. Carries the
+    /// reason, if the General gave one.
+    Denied {
+        /// The reason the General gave, or empty.
+        reason: String,
+    },
+    /// No decision arrived before the request timed out; the role must not
+    /// proceed (fail closed).
+    TimedOut,
+}
 
 /// The broker client for one agent role.
 #[derive(Debug)]
@@ -300,6 +330,106 @@ impl Broker {
     pub fn ledger(&self) -> Result<Vec<LedgerItem>, String> {
         let view: LedgerView = self.get("/ledger")?;
         Ok(view.tasks)
+    }
+
+    /// Requests the General's approval for a risky action, blocking until the
+    /// decision arrives (issue #39).
+    ///
+    /// If `roe` does not gate `action` (with `amount` for a spend), returns
+    /// [`NotGated`](ApprovalOutcome::NotGated) at once, so an ungated action
+    /// proceeds with no wait. Otherwise it posts an `approval_request` as this
+    /// role, then polls the stream for the General's `approval_decision`,
+    /// returning [`Granted`](ApprovalOutcome::Granted) or
+    /// [`Denied`](ApprovalOutcome::Denied). If no decision arrives within
+    /// `timeout` it returns [`TimedOut`](ApprovalOutcome::TimedOut); a caller
+    /// must not proceed on that, so silence fails closed. `detail` describes
+    /// the specific action for the General to judge.
+    ///
+    /// # Errors
+    /// Returns a message if the broker rejects the request, cannot be reached,
+    /// or its response is malformed.
+    pub fn request_approval(
+        &self,
+        roe: &RulesOfEngagement,
+        action: ActionKind,
+        amount: Option<u64>,
+        detail: &str,
+        timeout: Duration,
+    ) -> Result<ApprovalOutcome, String> {
+        if !roe.requires_approval(action, amount) {
+            return Ok(ApprovalOutcome::NotGated);
+        }
+        let request_id = self.post_approval_request(action, detail)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(outcome) = self.find_decision(&request_id)? {
+                return Ok(outcome);
+            }
+            if Instant::now() >= deadline {
+                return Ok(ApprovalOutcome::TimedOut);
+            }
+            thread::sleep(APPROVAL_POLL_INTERVAL);
+        }
+    }
+
+    /// Posts an `approval_request` as this role on its own channel, returning
+    /// the request's message id so the decision can be matched to it.
+    fn post_approval_request(&self, action: ActionKind, detail: &str) -> Result<String, String> {
+        let channel = Channel::Direct(self.role.clone()).name();
+        let payload = json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": "approval_request",
+            "action": action,
+            "body": detail,
+        });
+        self.post_returning_message_id(channel.as_str(), &payload)
+    }
+
+    /// Scans the message log for the General's decision on `request_id`, if one
+    /// has landed yet.
+    fn find_decision(&self, request_id: &str) -> Result<Option<ApprovalOutcome>, String> {
+        for event in self.message_log()? {
+            let EventKind::Message(message) = &event.kind else {
+                continue;
+            };
+            if let MessageKind::ApprovalDecision {
+                in_reply_to,
+                granted,
+            } = &message.kind
+            {
+                if in_reply_to.to_string() == request_id {
+                    return Ok(Some(if *granted {
+                        ApprovalOutcome::Granted
+                    } else {
+                        ApprovalOutcome::Denied {
+                            reason: message.body.clone(),
+                        }
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Posts `payload` to `channel` and reads the created message's id from the
+    /// broker's response.
+    fn post_returning_message_id(&self, channel: &str, payload: &Value) -> Result<String, String> {
+        let url = format!("{}/channels/{channel}/messages", self.base);
+        let response = self
+            .agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&payload.to_string())
+            .map_err(|err| self.explain(err))?;
+        let text = response
+            .into_string()
+            .map_err(|err| format!("could not read the broker response: {err}"))?;
+        let event: Value = serde_json::from_str(&text)
+            .map_err(|err| format!("could not parse the broker response: {err}"))?;
+        event["kind"]["data"]["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "the broker response carried no message id".to_owned())
     }
 
     /// Posts `payload` to `channel`, returning `sent to {channel}` or a broker
@@ -1089,6 +1219,8 @@ fn message_kind_label(kind: &MessageKind) -> &'static str {
         MessageKind::Note => "note",
         MessageKind::Redirect => "redirect",
         MessageKind::Belay => "belay",
+        MessageKind::ApprovalRequest { .. } => "approval_request",
+        MessageKind::ApprovalDecision { .. } => "approval_decision",
     }
 }
 
@@ -1121,6 +1253,16 @@ fn kind_detail(kind: &MessageKind) -> String {
             format!("options: {}", options.join(", "))
         }
         MessageKind::Artifact { reference, .. } => format!("artifact: {reference}"),
+        MessageKind::ApprovalRequest { action } => {
+            format!("wants approval to {}", action.phrase())
+        }
+        MessageKind::ApprovalDecision { granted, .. } => {
+            if *granted {
+                "approved".to_owned()
+            } else {
+                "denied".to_owned()
+            }
+        }
         _ => String::new(),
     }
 }

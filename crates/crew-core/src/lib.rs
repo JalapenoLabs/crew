@@ -23,6 +23,7 @@
 //! route it and any front-end can render it (see `docs/communication.md` and
 //! `docs/observability.md`).
 
+mod approval;
 mod budget;
 mod card;
 mod channel;
@@ -33,6 +34,7 @@ mod lane;
 mod model;
 mod time;
 
+pub use approval::{default_roe_for, ActionKind, RulesOfEngagement, DEFAULT_SPEND_THRESHOLD};
 pub use budget::{Budget, BudgetScope, Spend};
 pub use card::{BrokerEndpoint, CardError, RoleCard, ROLE_CARD_ENV};
 pub use channel::{Channel, ALL_UNITS};

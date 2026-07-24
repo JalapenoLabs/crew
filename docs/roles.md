@@ -105,6 +105,18 @@ event on the stream, and `crew_gate` (or `GET /gate`) reads the live gate: each 
 verification, its owner, its verifier, and whether it is submitted, passed, or failed (see
 `docs/observability.md`).
 
+### Rules of engagement
+
+A role's card also carries its **rules of engagement**: the risky, hard-to-undo actions it
+needs the General's approval for before taking them (issue #39). The gated actions are
+`push`, `merge`, `delete`, `spend` above a threshold, and `external_post`. The defaults
+follow rank: the commander integrates the crew's work, so it may push, merge, and spend and
+is gated only on `delete` and `external_post`; a specialist is gated on all five. A crew
+retunes them per role in its config (`[roles.roe]`, see `docs/config.md`). Before a gated
+action a role calls `crew_request_approval` and blocks until the General grants or denies it
+with `crew approve`; an ungated action proceeds. See `docs/communication.md` (rules of
+engagement).
+
 ### The situation board
 
 The crew keeps a shared situation board (issue #49): its durable memory, distinct from the

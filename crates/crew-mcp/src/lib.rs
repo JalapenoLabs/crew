@@ -13,6 +13,8 @@
 //! - `crew_roster` (list teammates and the lanes they own),
 //! - `crew_lane` (check a path against its owned lane before an out-of-lane
 //!   edit),
+//! - `crew_request_approval` (ask the General to approve a risky action before
+//!   taking it; a gated action pauses the role until it is granted or denied),
 //! - `crew_claim` / `crew_ledger` (the work ledger: claim a task before
 //!   touching shared work, and read who holds what),
 //! - `crew_submit` / `crew_verdict` / `crew_gate` (the adversarial done-gate:
