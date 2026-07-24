@@ -123,10 +123,25 @@ impl TestBroker {
             StatusCode::OK,
             "inbox for {role} should open"
         );
-        Inbox {
-            response,
-            buffer: String::new(),
-        }
+        Inbox::new(response)
+    }
+
+    /// Subscribes to `role`'s inbox resuming after `last_event_id`, the way a
+    /// dropped client reconnects to replay the events it missed (issue #10).
+    async fn inbox_resume(&self, role: &str, last_event_id: &str) -> Inbox {
+        let response = self
+            .client
+            .get(self.url(&format!("/inbox?role={role}")))
+            .header("Last-Event-ID", last_event_id)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the resumed inbox for {role} should open"
+        );
+        Inbox::new(response)
     }
 
     /// Subscribes to a role's activity timeline SSE stream, live from now.
@@ -142,10 +157,7 @@ impl TestBroker {
             StatusCode::OK,
             "activity for {agent} should open"
         );
-        Inbox {
-            response,
-            buffer: String::new(),
-        }
+        Inbox::new(response)
     }
 
     /// Subscribes to the aggregate live stream with a query (e.g.
@@ -158,10 +170,7 @@ impl TestBroker {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "the stream should open");
-        Inbox {
-            response,
-            buffer: String::new(),
-        }
+        Inbox::new(response)
     }
 
     /// Registers `role` on the roster (`POST /roster`) with an optional
@@ -189,9 +198,22 @@ impl TestBroker {
 struct Inbox {
     response: reqwest::Response,
     buffer: String,
+    /// The SSE `id` of the most recent event [`recv`](Inbox::recv) returned:
+    /// the `Last-Event-ID` a reconnect resumes from. `None` before the
+    /// first event.
+    last_id: Option<String>,
 }
 
 impl Inbox {
+    /// Wraps an open SSE response, ready to read events from.
+    fn new(response: reqwest::Response) -> Self {
+        Self {
+            response,
+            buffer: String::new(),
+            last_id: None,
+        }
+    }
+
     /// The next event, or `None` if none arrives within `within`.
     async fn recv(&mut self, within: Duration) -> Option<Value> {
         loop {
@@ -206,12 +228,20 @@ impl Inbox {
         }
     }
 
-    /// Drains complete lines from the buffer, returning the first `data:`
-    /// event.
+    /// The SSE `id` of the last event [`recv`](Inbox::recv) delivered, for a
+    /// reconnect to resume from as its `Last-Event-ID`.
+    fn last_id(&self) -> Option<&str> {
+        self.last_id.as_deref()
+    }
+
+    /// Drains complete lines from the buffer, tracking each event's `id:` and
+    /// returning the first `data:` event.
     fn take_event(&mut self) -> Option<Value> {
         while let Some(newline) = self.buffer.find('\n') {
             let line: String = self.buffer.drain(..=newline).collect();
-            if let Some(data) = line.strip_prefix("data:") {
+            if let Some(id) = line.strip_prefix("id:") {
+                self.last_id = Some(id.trim().to_owned());
+            } else if let Some(data) = line.strip_prefix("data:") {
                 if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
                     return Some(event);
                 }
@@ -682,6 +712,72 @@ async fn events_survive_a_broker_restart_via_log_replay() {
         "both events survived the restart"
     );
     second.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_inbox_resumes_from_last_event_id_without_loss() {
+    // The inbox reconnect-resume path (issue #10): a dropped `/inbox` reconnects
+    // with `Last-Event-ID` set to the last event it saw and the broker replays
+    // exactly the events it missed, in order, with no gap and no duplicate.
+    let broker = TestBroker::in_memory().await;
+
+    // Subscribe live, then receive the first two messages, tracking the last id.
+    let mut inbox = broker.inbox("backend").await;
+    broker.post_note("@backend", general(), "one").await;
+    broker.post_note("@backend", general(), "two").await;
+
+    let first = inbox.recv(EXPECTED).await.expect("the first arrives");
+    assert_eq!(body_of(&first), "one");
+    let second = inbox.recv(EXPECTED).await.expect("the second arrives");
+    assert_eq!(body_of(&second), "two");
+    let last_seen = inbox
+        .last_id()
+        .expect("the delivered event carried an id")
+        .to_owned();
+
+    // Drop the connection, standing in for a network blip.
+    drop(inbox);
+
+    // Two more arrive while the client is disconnected; they must not be lost.
+    broker.post_note("@backend", general(), "three").await;
+    broker.post_note("@backend", general(), "four").await;
+
+    // Reconnect from the last id: the two missed events replay first, in order.
+    // The first delivered is `three`, not `one`/`two`, so nothing already seen is
+    // re-sent (no duplicate) and nothing between is skipped (no gap).
+    let mut resumed = broker.inbox_resume("backend", &last_seen).await;
+    let replayed_three = resumed
+        .recv(EXPECTED)
+        .await
+        .expect("the first missed replays");
+    assert_eq!(
+        body_of(&replayed_three),
+        "three",
+        "resume replays the first missed event, not one already delivered",
+    );
+    let replayed_four = resumed
+        .recv(EXPECTED)
+        .await
+        .expect("the second missed replays");
+    assert_eq!(
+        body_of(&replayed_four),
+        "four",
+        "resume replays the second missed event, in order",
+    );
+
+    // After the backlog, live delivery continues seamlessly on the same stream.
+    broker.post_note("@backend", general(), "five").await;
+    let live = resumed
+        .recv(EXPECTED)
+        .await
+        .expect("live delivery resumes after the replayed backlog");
+    assert_eq!(
+        body_of(&live),
+        "five",
+        "the resumed stream carries new events with no further gap",
+    );
+
+    broker.stop().await;
 }
 
 /// Application state over a durable [`LogStore`] rooted at `dir`.
