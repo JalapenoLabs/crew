@@ -308,7 +308,11 @@ engine (`sse::resume_stream`), and a `/stream` lag logs `broker.stream.lagged`. 
 `/roster` endpoints expose who is in the unit (issue
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with
-`DELETE /roster/{role}`, and every change publishes a `lifecycle` event to
+`DELETE /roster/{role}`. Owned paths are exclusive lanes, so a register whose
+`owned_paths` overlap a lane a different live role (`working` or `idle`) already
+owns is refused with `409 CONFLICT` naming both roles and paths (issue #205); a
+role never collides with itself, and a stopped or dead role's lane may be
+reclaimed. Every change publishes a `lifecycle` event to
 `all-units`, so it rides history, `/stream`, and each inbox. `GET /roster` also
 reports the **live agent count** (issue #32): a `count` with the headline `live`
 number (roles `working` or `idle`, present and up or resumable) and the per-liveness

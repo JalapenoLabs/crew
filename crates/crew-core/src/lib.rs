@@ -43,6 +43,6 @@ pub use event::{
     TaskState, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
 pub use id::{ChannelId, MessageId, RoleId, Sender, TaskId};
-pub use lane::path_in_lane;
+pub use lane::{lanes_overlap, path_in_lane};
 pub use model::{default_tier_for, ModelTier, ModelTiers};
 pub use time::Timestamp;

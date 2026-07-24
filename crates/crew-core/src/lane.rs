@@ -53,6 +53,47 @@ pub fn path_in_lane(owned_paths: &[String], path: &str) -> bool {
     !has_lane
 }
 
+/// Whether two owned-path lanes overlap: one nested under (or equal to) the
+/// other, on whole segments (issue #205).
+///
+/// Each lane is a directory boundary (`api/`) or a specific file. They overlap
+/// when one boundary is a prefix of the other on whole segments, so `api/` and
+/// `api/routes/` collide (as do `api/` and `api/config.toml`), but `api/` and
+/// `apiv2/` do not. A blank lane owns nothing, so it never overlaps.
+///
+/// This is the one rule the crew config validates at bring-up
+/// ([`CrewConfig`](crate::CrewConfig)) and the broker enforces at registration,
+/// so two roles can never own colliding lanes.
+///
+/// # Examples
+/// ```
+/// use crew_core::lanes_overlap;
+///
+/// assert!(lanes_overlap("api/", "api/routes/")); // one nested under the other
+/// assert!(lanes_overlap("api", "api/")); // equal, trailing slash aside
+/// assert!(!lanes_overlap("api/", "apiv2/")); // a shared prefix is not a lane
+/// assert!(!lanes_overlap("api/", "")); // a blank lane owns nothing
+/// ```
+#[must_use]
+pub fn lanes_overlap(a: &str, b: &str) -> bool {
+    let a = directory_boundary(a);
+    let b = directory_boundary(b);
+    // Both boundaries end in `/`, so a prefix test is exactly the whole-segment
+    // nesting test: `api/` is a prefix of `api/routes/` but not of `apiv2/`.
+    !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
+}
+
+/// A path as a directory boundary: normalized, with a single trailing slash so
+/// a prefix test is a whole-segment nesting test. A blank path becomes empty.
+fn directory_boundary(path: &str) -> String {
+    let normalized = normalize(path);
+    if normalized.is_empty() {
+        String::new()
+    } else {
+        format!("{normalized}/")
+    }
+}
+
 /// Normalizes a path for boundary comparison: trims whitespace, a leading `./`,
 /// and any trailing slash, so `./api/` and `api` compare equal.
 fn normalize(path: &str) -> String {
@@ -64,10 +105,56 @@ fn normalize(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::path_in_lane;
+    use super::{lanes_overlap, path_in_lane};
 
     fn lane(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    fn nested_or_equal_lanes_overlap() {
+        assert!(lanes_overlap("api/", "api/"), "equal lanes overlap");
+        assert!(
+            lanes_overlap("api/", "api/routes/"),
+            "a nested lane overlaps"
+        );
+        assert!(lanes_overlap("api/routes/", "api/"), "nesting is symmetric");
+        // A file under a directory lane collides with it.
+        assert!(lanes_overlap("api/config.toml", "api/"));
+    }
+
+    #[test]
+    fn sibling_and_shared_prefix_lanes_do_not_overlap() {
+        assert!(
+            !lanes_overlap("api/", "frontend/"),
+            "disjoint lanes do not overlap"
+        );
+        assert!(
+            !lanes_overlap("api/", "apiv2/"),
+            "a shared text prefix is not a segment"
+        );
+        assert!(
+            !lanes_overlap("api/a.rs", "api/b.rs"),
+            "sibling files do not overlap"
+        );
+    }
+
+    #[test]
+    fn a_blank_lane_never_overlaps() {
+        assert!(!lanes_overlap("", "api/"), "a blank lane owns nothing");
+        assert!(
+            !lanes_overlap("api/", "  "),
+            "a whitespace lane owns nothing"
+        );
+    }
+
+    #[test]
+    fn trailing_slashes_and_dot_prefixes_do_not_change_overlap() {
+        assert!(
+            lanes_overlap("./api", "api/routes"),
+            "normalized before comparing"
+        );
+        assert!(lanes_overlap("api//", "api"), "extra slashes do not matter");
     }
 
     #[test]

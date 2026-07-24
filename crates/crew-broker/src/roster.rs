@@ -21,7 +21,8 @@ use axum::{
     Json, Router,
 };
 use crew_core::{
-    ChannelId, Event, EventKind, Lifecycle, RoleId, Sender, TaskId, Timestamp, ALL_UNITS,
+    lanes_overlap, ChannelId, Event, EventKind, Lifecycle, RoleId, Sender, TaskId, Timestamp,
+    ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -171,17 +172,22 @@ async fn list(State(state): State<AppState>) -> Json<RosterView> {
 /// and publishes the matching [`Lifecycle`] event to the stream.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] if the body is malformed or the role is empty.
+/// Returns a 400 [`ApiError`] if the body is malformed or the role is empty, or
+/// a 409 if the role's `owned_paths` overlap a lane already owned by a
+/// different live role (issue #205): owned paths are exclusive lanes, so a
+/// collision is caught here rather than surfacing as two agents editing the
+/// same files.
 async fn register(
     State(state): State<AppState>,
     JsonBody(request): JsonBody<Register>,
 ) -> Result<(StatusCode, Json<RosterView>), ApiError> {
     let role = parse_role(&request.role)?;
     let liveness = request.liveness.unwrap_or(Liveness::Working);
-    // Read the prior status once, before the update, for both the retained paths
-    // and the lifecycle transition (a `dead` role coming back is a recovery,
-    // not a restart).
-    let prior = state.storage.roster().get(&role).cloned();
+    // Read the roster once, before the update, for the prior status (retained
+    // paths and the lifecycle transition, since a `dead` role coming back is a
+    // recovery, not a restart) and the lane-overlap check.
+    let roster = state.storage.roster();
+    let prior = roster.get(&role).cloned();
     // A liveness-only update (no `owned_paths`) keeps the role's current paths.
     let owned_paths = match request.owned_paths {
         Some(paths) => paths,
@@ -190,6 +196,14 @@ async fn register(
             .map(|status| status.owned_paths.clone())
             .unwrap_or_default(),
     };
+
+    // A role may not claim a lane a different live role already owns (issue #205).
+    if let Some((other, other_path, incoming)) = lane_collision(&roster, &role, &owned_paths) {
+        return Err(ApiError::conflict(format!(
+            "role `{role}` cannot own `{incoming}`: it overlaps `{other_path}`, an exclusive \
+             lane the live role `{other}` already owns",
+        )));
+    }
 
     state.storage.register_role(
         role.clone(),
@@ -211,6 +225,35 @@ async fn register(
         StatusCode::CREATED
     };
     Ok((code, Json(RosterView::from_state(&state))))
+}
+
+/// The first lane collision between `owned_paths` and a live role other than
+/// `role`, as `(the other role, its owned lane, the incoming lane)` (issue
+/// #205).
+///
+/// Owned paths are exclusive lanes, but only a role that holds the field
+/// enforces one: a `stopped` or `dead` role is not editing, so its lane may be
+/// reclaimed, and only a `working` or `idle` role ([`Liveness::is_live`])
+/// blocks a register. A role never collides with itself, so a restart or a
+/// liveness update passes.
+fn lane_collision(
+    roster: &Roster,
+    role: &RoleId,
+    owned_paths: &[String],
+) -> Option<(RoleId, String, String)> {
+    for (other_role, status) in roster.iter() {
+        if other_role == role || !status.liveness.is_live() {
+            continue;
+        }
+        for owned in &status.owned_paths {
+            for incoming in owned_paths {
+                if lanes_overlap(incoming, owned) {
+                    return Some((other_role.clone(), owned.clone(), incoming.clone()));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `DELETE /roster/{role}`: deregister a role (on leave), publishing `stopped`.
@@ -576,5 +619,112 @@ mod tests {
         let (status, body) = send(&state, request).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn an_overlapping_lane_is_rejected_with_a_409() {
+        // Owned paths are exclusive lanes (issue #205): a second role claiming a
+        // lane that nests under a live role's lane is refused, so the collision is
+        // caught at registration rather than as two agents editing the same files.
+        let state = AppState::new(Config::default());
+        let (status, _) = register(
+            &state,
+            json!({ "role": "backend", "owned_paths": ["api/"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, body) = register(
+            &state,
+            json!({ "role": "frontend", "owned_paths": ["api/routes/"] }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an overlapping lane is refused"
+        );
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("backend") && error.contains("api/routes/") && error.contains("api/"),
+            "the error names the owner, the incoming lane, and the owned lane: {error}",
+        );
+
+        // The refused role never joined the roster.
+        let roster = get_roster(&state).await;
+        assert!(
+            entry(&roster, "frontend").is_none(),
+            "a refused register does not join the roster",
+        );
+    }
+
+    #[tokio::test]
+    async fn disjoint_lanes_register_side_by_side() {
+        let state = AppState::new(Config::default());
+        let (backend, _) = register(
+            &state,
+            json!({ "role": "backend", "owned_paths": ["api/"] }),
+        )
+        .await;
+        let (frontend, _) = register(
+            &state,
+            json!({ "role": "frontend", "owned_paths": ["frontend/"] }),
+        )
+        .await;
+        assert_eq!(
+            (backend, frontend),
+            (StatusCode::CREATED, StatusCode::CREATED),
+            "disjoint lanes coexist",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_re_registers_its_own_lane_without_a_self_collision() {
+        // A restart or a liveness update re-registers the role's own lane; it must
+        // never collide with itself (issue #205).
+        let state = AppState::new(Config::default());
+        register(
+            &state,
+            json!({ "role": "backend", "owned_paths": ["api/"] }),
+        )
+        .await;
+
+        let (status, _) = register(
+            &state,
+            json!({ "role": "backend", "owned_paths": ["api/"] }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "re-registering its own lane is an update, not a collision",
+        );
+        let (status, _) = register(&state, json!({ "role": "backend", "liveness": "idle" })).await;
+        assert_eq!(status, StatusCode::OK, "a liveness update keeps the lane");
+    }
+
+    #[tokio::test]
+    async fn a_non_live_role_does_not_hold_its_lane() {
+        // A stopped or dead role is not editing, so its lane may be reclaimed: only
+        // a working or idle role blocks a register (issue #205).
+        let state = AppState::new(Config::default());
+        register(
+            &state,
+            json!({ "role": "backend", "owned_paths": ["api/"] }),
+        )
+        .await;
+        // A liveness-only update marks it dead while keeping its `api/` lane.
+        register(&state, json!({ "role": "backend", "liveness": "dead" })).await;
+
+        let (status, _) = register(
+            &state,
+            json!({ "role": "api-owner", "owned_paths": ["api/"] }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a dead role's lane can be reclaimed by another role",
+        );
     }
 }
