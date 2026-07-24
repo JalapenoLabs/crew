@@ -181,7 +181,11 @@ The full design is in `docs/architecture.md`. In short:
   a role-card bootstrap that sends with `crew send` and watches with `crew watch`, so
   existing users get the broker's routing, no self-echo, and bounded catch-up. This is
   where the transport upgrade lands: a standalone drop-in the skill points at, using
-  the `crew` CLI, not a code dependency. See `docs/communication.md`.
+  the `crew` CLI, not a code dependency. `skills/coworker/install.sh` installs or
+  updates the canonical `SKILL.md` into a Claude Code skills directory (default
+  `~/.claude/skills/coworker`, or `--dest` for a repo's `.claude`), so an existing
+  user's installed copy tracks this one rather than drifting to the old file transport
+  (issue #191). See `docs/communication.md`.
 
 ## Roles (summary)
 

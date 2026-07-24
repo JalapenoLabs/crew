@@ -21,9 +21,22 @@ The skill needs the `crew` binary on `PATH` and a reachable broker:
 1. Install `crew` (`cargo install --path crates/crew-cli`, or build the workspace).
 2. Bring a broker up (`crew up`), or point the skill at a running one with
    `CREW_BROKER_HOST` / `CREW_BROKER_PORT`.
-3. Copy `coworker/SKILL.md` into your Claude Code skills directory
-   (`.claude/skills/coworker/SKILL.md`), and invoke it with your role, for example
-   "You are the backend worker."
+3. Install the skill into your Claude Code skills directory by running
+   `coworker/install.sh`, then invoke it with your role, for example "You are the
+   backend worker."
 
 Without a broker the skill fails gracefully: it tells you the broker is unreachable
 and asks you to start one, rather than falling back to the old file transport.
+
+### Keeping the installed copy in sync
+
+`coworker/SKILL.md` here is the canonical version; the copy an agent loads lives in a
+Claude Code skills directory (`~/.claude/skills/coworker/SKILL.md`, or a repo's
+`.claude/`). `coworker/install.sh` copies the canonical version into that directory:
+
+- `coworker/install.sh` installs into `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+- `coworker/install.sh --dest <dir>` installs into `<dir>/skills/coworker` (a
+  project's `.claude`, or an agent-config repo).
+
+Re-run it after the skill changes here, so the installed copy tracks this one rather
+than drifting to an older transport.
