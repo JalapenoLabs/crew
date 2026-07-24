@@ -285,7 +285,10 @@ subcommand tree.
 - `crew down` stands the running crew down gracefully (issue #26): it signals the
   `crew up` process (`SIGTERM` via the pidfile the two rendezvous on under the broker
   state dir), which stops every agent, deregisters it, and drains the broker it
-  started. The pidfile carries a process-identity marker (on Linux the boot id plus the
+  started. The broker's drain is bounded: a graceful drain waits for in-flight
+  connections, but an SSE subscriber (`/inbox`, `/stream`) holds its connection open
+  indefinitely, so after a short grace any still-open stream is forced closed and crewd
+  exits promptly rather than hanging on a live `crew watch` (issue #204). The pidfile carries a process-identity marker (on Linux the boot id plus the
   process start time), so `crew down` verifies the PID still names that `crew up` before
   signaling, refusing and clearing a stale pidfile whose PID was reused rather than
   signaling an unrelated process (issue #195); a marker-less pidfile falls back to
