@@ -86,7 +86,7 @@ pub struct Scrubber {
 impl Scrubber {
     /// Builds a scrubber from raw secret values.
     ///
-    /// Empty, duplicate, and too-short values (see [`MIN_SCRUB_LEN`]) are
+    /// Empty, duplicate, and too-short values (under 8 characters) are
     /// ignored, so an unset or trivial secret never corrupts unrelated
     /// text.
     #[must_use]

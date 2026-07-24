@@ -24,10 +24,10 @@
 //!   an agent whose turn died, whether it crashed or hung, with a layered
 //!   heartbeat and watchdog; it records an [`Incident`] and revives the agent
 //!   within a recovery budget, handing it to the operator once the budget is
-//!   spent. Its coordination-stall monitor (issue #48, [`stall`]) extends that
-//!   to the crew as a whole: it reads the event stream for a deadlock, an
-//!   unanswered question, or a ledger with no forward motion, and escalates the
-//!   specific [`Stall`] so silence never reads as progress.
+//!   spent. Its coordination-stall monitor (issue #48) extends that to the crew
+//!   as a whole: it reads the event stream for a deadlock, an unanswered
+//!   question, or a ledger with no forward motion, and escalates the specific
+//!   [`Stall`] so silence never reads as progress.
 
 mod activity;
 mod integrate;

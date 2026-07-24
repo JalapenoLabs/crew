@@ -706,7 +706,7 @@ impl AppState {
     /// update, so two racing verdicts cannot both win.
     ///
     /// # Errors
-    /// Returns a [`VerdictError`] if the task was never submitted, is not
+    /// Returns a `VerdictError` if the task was never submitted, is not
     /// awaiting a verdict, or the verifier is the owner.
     pub fn record_verdict(
         &self,

@@ -154,7 +154,7 @@ fn handle_key(cockpit: &mut Cockpit, key: KeyEvent) -> Flow {
 /// channel for the render loop to drain.
 ///
 /// The tail reconnects on a dropped connection (see
-/// [`broker::tail_events`](crate::broker::tail_events)), so a broker restart
+/// [`broker::tail_events`]), so a broker restart
 /// mid-session recovers on its own; the thread ends only if the very first
 /// connection fails, after the roster fetch already succeeded, which leaves the
 /// cockpit showing the seeded snapshot.

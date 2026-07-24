@@ -212,7 +212,7 @@ fn string_field(data: Option<&Value>, field: &str) -> String {
 /// `events` is the recent history, oldest first; `roster` is the set of agent
 /// roles (so a wait on anyone else is a wait for the human, not a deadlock);
 /// `now` and `timeout` set how long a wait must persist to count. Pure: the
-/// [`monitor`] supplies the inputs.
+/// `StallMonitor` supplies the inputs.
 ///
 /// # Examples
 /// ```

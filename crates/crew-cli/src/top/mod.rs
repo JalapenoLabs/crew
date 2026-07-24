@@ -11,7 +11,7 @@
 //! from the `/roster` (issue #32) and `/stats` (issue #55) snapshots and then
 //! advanced by folding each live `/stream` event (issue #31), so the display
 //! updates by push, never by polling. The pure model and the ratatui
-//! [`render`](render) are unit-tested; [`run`] is the thin terminal shell that
+//! [`render`] are unit-tested; [`run`](run()) is the thin terminal shell that
 //! ties the background stream reader and the key handler to the model.
 
 mod cockpit;
