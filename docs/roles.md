@@ -154,8 +154,10 @@ its dependents) so a stacked-PR strategy composes cleanly. See `CLAUDE.md`
   board (issue #49), the crew's durable memory of decisions, interfaces, and gotchas that
   the whole crew reads and writes (see the situation board below). When every task is
   verified done through the done-gate, it reports the mission gracefully complete with
-  `crew_complete` (or `crew complete` on the shim, issue #121), so the General is notified of
-  a true finish rather than an emergency stand-down. This is the agent the General briefs.
+  `crew_complete` (or `crew complete` on the shim, issues #121, #155), passing a short
+  summary of what shipped that the completion notification renders, so the General is
+  notified of a true finish rather than an emergency stand-down. This is the agent the
+  General briefs.
 - **backend** owns server code, the database, and migrations (for example
   `api/`).
 - **frontend** owns the UI (for example `frontend/`).

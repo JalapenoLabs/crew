@@ -170,8 +170,9 @@ impl Event {
 /// (issue #49), `budget` is a token-spend report against the crew budget (issue
 /// #54), `telemetry` is a per-turn token-and-cost usage report (issue #55), and
 /// `usage` is a shared-subscription usage reading and its auto-pause (issue
-/// #56), and `stall` is a coordination stall the monitor detected or resolved
-/// (issue #48, #120).
+/// #56), `stall` is a coordination stall the monitor detected or resolved
+/// (issue #48, #120), and `mission` is the crew's graceful mission completion,
+/// carrying a summary of what shipped (issue #155).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum EventKind {
@@ -204,6 +205,10 @@ pub enum EventKind {
     /// A coordination stall the fleet-wide monitor detected or resolved (issue
     /// #48, surfaced on the stream by issue #120).
     Stall(StallEvent),
+    /// The crew gracefully finished its mission, carrying a summary of what
+    /// shipped (issues #121, #155). A dedicated kind, not a bare `lifecycle`
+    /// marker, so the completion can carry a payload the notification renders.
+    Mission(MissionEvent),
 }
 
 /// An inter-agent message: a typed intent, its per-kind fields, and a markdown
@@ -337,12 +342,23 @@ pub enum Lifecycle {
     /// preserved so the crew is recoverable (issue #41). The General's
     /// emergency kill switch.
     StoodDown,
-    /// The crew gracefully finished its mission: the work is done, not halted
-    /// (issue #121). A role, typically the commander, reports it as the mission
-    /// completes, so `crew notify` can pull the General back on a true finish
-    /// rather than approximating it with a [`StoodDown`](Self::StoodDown)
-    /// emergency halt.
-    MissionComplete,
+}
+
+/// The crew's graceful mission completion (issues #121, #155).
+///
+/// A role, typically the commander, reports it as the mission completes, so
+/// `crew notify` pulls the General back on a true finish rather than
+/// approximating it with a [`StoodDown`](Lifecycle::StoodDown) emergency halt.
+/// It announces the finish; it does not gate the crew (issue #154). The
+/// [`summary`](MissionEvent::summary) carries a short account of what shipped,
+/// so the completion push has context instead of a bare marker; it is empty
+/// when the reporter gave none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionEvent {
+    /// A short summary of what the mission shipped, for the completion
+    /// notification. Empty when none was given.
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// An agent's own work item, parsed from its `claude -p` stream-json (issue
@@ -732,7 +748,7 @@ impl BoardSection {
 mod tests {
     use super::{
         Activity, ArtifactKind, BoardEvent, BoardSection, Event, EventKind, Lifecycle, Message,
-        MessageKind, StallEvent, StallKind, StallStatus, Verdict, VerificationEvent,
+        MessageKind, MissionEvent, StallEvent, StallKind, StallStatus, Verdict, VerificationEvent,
     };
     use crate::{
         id::{ChannelId, MessageId, RoleId, Sender, TaskId},
@@ -790,7 +806,9 @@ mod tests {
             envelope(EventKind::Lifecycle(Lifecycle::Paused)),
             envelope(EventKind::Lifecycle(Lifecycle::Resumed)),
             envelope(EventKind::Lifecycle(Lifecycle::StoodDown)),
-            envelope(EventKind::Lifecycle(Lifecycle::MissionComplete)),
+            envelope(EventKind::Mission(MissionEvent {
+                summary: "shipped the auth gateway; all tasks verified".to_owned(),
+            })),
             envelope(EventKind::Activity(Activity::TurnStarted)),
             envelope(EventKind::Activity(Activity::ToolCall {
                 tool: "cargo".to_owned(),

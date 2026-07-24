@@ -343,7 +343,11 @@ enum Command {
     /// Report the mission gracefully complete, as the crew (typically the
     /// commander). Distinct from the emergency `standdown`; it announces a
     /// finish without halting the crew.
-    Complete,
+    Complete {
+        /// A short summary of what the mission shipped, shown in the completion
+        /// notification (issue #155).
+        summary: Option<String>,
+    },
     /// Record or retract a shared situation board entry: a decision, interface,
     /// or gotcha.
     Record {
@@ -493,7 +497,7 @@ fn main() -> Result<()> {
             failure,
         } => shim::verdict(&task, pass, failure.as_deref()),
         Command::Gate => shim::gate(),
-        Command::Complete => shim::complete(),
+        Command::Complete { summary } => shim::complete(summary.as_deref().unwrap_or_default()),
         Command::Record {
             key,
             section,

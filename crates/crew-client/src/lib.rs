@@ -607,18 +607,23 @@ impl Broker {
         ))
     }
 
-    /// Reports the mission gracefully complete (`POST /complete`, issue #121).
+    /// Reports the mission gracefully complete (`POST /complete`, issues #121,
+    /// #155).
     ///
     /// The graceful counterpart to the General's stand-down: the crew,
     /// typically through the commander, declares the work done so `crew
     /// notify` fires on a true finish. It announces, it does not halt: the
-    /// broker records a `mission_complete` lifecycle event without gating
-    /// the crew.
+    /// broker records a `mission` event without gating the crew. `summary` is a
+    /// short account of what shipped, rendered in the completion notification;
+    /// pass an empty string when there is none.
     ///
     /// # Errors
     /// Returns a message if the broker rejects the report or cannot be reached.
-    pub fn complete(&self) -> Result<String, String> {
-        self.post_json("/complete", &json!({ "role": self.role.as_str() }))?;
+    pub fn complete(&self, summary: &str) -> Result<String, String> {
+        self.post_json(
+            "/complete",
+            &json!({ "role": self.role.as_str(), "summary": summary }),
+        )?;
         Ok("reported the mission complete to the unit.".to_owned())
     }
 

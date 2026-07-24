@@ -307,12 +307,14 @@ The actionable moments are the ones the stream carries today:
 - **The crew is stalled** (a `stall` event with `status` `detected`, issue #120): the crew
   is stuck waiting on itself and needs the General. A `resolved` stall is good news and
   stays quiet.
-- **The mission completes** (a `lifecycle` `mission_complete`, issue #121): the crew
-  gracefully finished its work. This is the true completion, reported by the crew (typically
-  the commander through `crew_complete`), distinct from the `stood_down` emergency halt that
-  used to stand in for it. It announces, it does not gate the crew (a deliberate decision,
-  issue #154): completion is a report, not a control, so a finished crew idle-stops on its
-  own (issue #55), and the General stops it deliberately with `crew standdown` or `crew down`.
+- **The mission completes** (a `mission` event, issues #121, #154, #155): the crew gracefully
+  finished its work. This is the true completion, reported by the crew (typically the
+  commander through `crew_complete`), distinct from the `stood_down` emergency halt that
+  used to stand in for it. The event carries a `summary` of what shipped, which the
+  completion push renders so the General reads the outcome at a glance. It announces, it does
+  not gate the crew (a deliberate decision, issue #154): completion is a report, not a
+  control, so a finished crew idle-stops on its own (issue #55), and the General stops it
+  deliberately with `crew standdown` or `crew down`.
 
 Not every question needs the General (issue #119). A peer loop (`@backend` asking a live
 `@frontend`) is coordination the crew resolves on its own, so pushing it would drown the
@@ -397,9 +399,10 @@ are projections of the one stream.
 The broker folds these into a rollup and serves it at **`GET /stats`**: per role and in
 aggregate, the cumulative tokens, cost (micro-USD), and working seconds. Working time is a
 fold of the lifecycle transitions (entering `started` / `restarted` / `recovered` /
-`resumed` opens a working interval; `idle` / `stopped` / `died` / `paused` / `stood_down` /
-`mission_complete` closes it), and a role working right now has its open interval counted through the read
-instant, so a live role's time keeps climbing. Like the situation board, the rollup is a
+`resumed` opens a working interval; `idle` / `stopped` / `died` / `paused` / `stood_down`
+closes it, as does a `mission` completion), and a role working right now has its open
+interval counted through the read instant, so a live role's time keeps climbing. Like the
+situation board, the rollup is a
 projection of the durable log, so it is rebuilt on a restart rather than kept separately.
 This is the data the `crew top` cockpit (issue #51) and the Seraphim per-role stats render,
 mirroring Seraphim's per-railway stats.

@@ -142,7 +142,10 @@ pub(crate) fn summarize(events: &[Event]) -> HistorySummary {
             | EventKind::Budget(_)
             | EventKind::Telemetry(_)
             | EventKind::Usage(_)
-            | EventKind::Stall(_) => {}
+            | EventKind::Stall(_)
+            // A mission completion is a singular marker on the raw stream (and the
+            // notify push), not a recurring transition, so the digest omits it.
+            | EventKind::Mission(_) => {}
         }
     }
 
@@ -270,7 +273,6 @@ fn lifecycle_label(state: Lifecycle) -> &'static str {
         Lifecycle::Paused => "paused",
         Lifecycle::Resumed => "resumed",
         Lifecycle::StoodDown => "stood_down",
-        Lifecycle::MissionComplete => "mission_complete",
     }
 }
 

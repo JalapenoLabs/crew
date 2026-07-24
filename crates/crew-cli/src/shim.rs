@@ -334,20 +334,21 @@ pub fn gate() -> Result<()> {
     Ok(())
 }
 
-/// Reports the mission gracefully complete (issue #121).
+/// Reports the mission gracefully complete (issues #121, #155).
 ///
 /// Mirrors `crew_complete`: the crew, typically through the commander, declares
 /// the mission done so `crew notify` fires on a true finish, distinct from the
 /// General's emergency stand-down. It announces completion; it does not halt
-/// the crew.
+/// the crew. `summary` is a short account of what shipped, rendered in the
+/// completion notification; empty when none is given.
 ///
 /// # Errors
 /// Returns an error if no role context is set, or the broker cannot be reached.
-pub fn complete() -> Result<()> {
+pub fn complete(summary: &str) -> Result<()> {
     let agent = load_agent()?;
     let confirmation = agent
         .broker()
-        .complete()
+        .complete(summary)
         .map_err(|reason| eyre!("{reason}"))?;
     println!("{confirmation}");
     Ok(())

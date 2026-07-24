@@ -364,14 +364,15 @@ read the ledger; the broker refuses a claim another role holds, issue #45), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
 work for verification instead of asserting it done, judge a teammate's work as an
 independent skeptic, and read the gate; issue #47), `crew_complete` (report the mission
-gracefully finished, typically as the commander, so `crew notify` fires on a true
-completion rather than a stand-down; issue #121; it announces, it never gates the crew:
-completion is a report the crew makes, not a control the General issues, so gating on it
-would let a role halt everyone by declaring victory and would cut in-flight work short. A
-finished mission has no work to pull, so its roles idle-stop on their own (issue #55); to
-stop the crew the General uses `crew standdown` or `crew down`. This keeps the crew
-`Standing` a three-level brake, `Running` / `Paused` / `StoodDown`, all cleared by `crew
-resume`, with no terminal `Complete` level; issue #154), the situation-board pair `crew_board`
+gracefully finished, typically as the commander, with a short `summary` of what shipped
+that the completion push renders, so `crew notify` fires on a true completion rather than a
+stand-down; it announces, it never gates the crew: completion is a report the crew makes,
+not a control the General issues, so gating on it would let a role halt everyone by
+declaring victory and would cut in-flight work short. A finished mission has no work to
+pull, so its roles idle-stop on their own (issue #55); to stop the crew the General uses
+`crew standdown` or `crew down`. This keeps the crew `Standing` a three-level brake,
+`Running` / `Paused` / `StoodDown`, all cleared by `crew resume`, with no terminal
+`Complete` level; issues #121, #154, #155), the situation-board pair `crew_board`
 / `crew_record` (read the crew's durable memory, and record or retract a decision,
 interface, or gotcha; issue #49), and `crew_briefing` (the bounded new-role briefing
 packet: the board plus a lane-scoped rolling summary, size-capped; issue #50). A tool
@@ -694,8 +695,9 @@ in-process broker's shutdown itself.
 `crew order` (issue a scoped order to a specialist, issue #27),
 `crew ask` / `crew answer` (post a typed question or answer, issue #123),
 `crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue #45), the
-done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), `crew complete`
-(report the mission gracefully finished, issue #121), the
+done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), `crew complete
+[summary]` (report the mission gracefully finished, with an optional summary of what
+shipped, issues #121, #155), the
 situation-board pair `crew board` / `crew record` (issue #49), and `crew briefing`
 (issue #50) let an agent on a runtime without MCP, such
 as Codex, coordinate through subcommands instead of tools (`crew lane <path>` is the
@@ -742,9 +744,10 @@ auto-reconnects on a dropped connection along with `crew watch`, issue #117) and
 pushes a native notification on each **actionable moment**: a General-facing question asked
 (`message`/`question`), a role dead (`lifecycle`/`died`), the crew stood down
 (`lifecycle`/`stood_down`), the crew stalled (a `stall`/`detected` event, issue #120; a
-`resolved` stall stays quiet), or the mission complete (a `lifecycle`/`mission_complete`
-event, issue #121: the crew's graceful finish, reported through `crew_complete`, distinct
-from the stand-down that used to approximate it). A question is General-facing only when it
+`resolved` stall stays quiet), or the mission complete (a `mission` event, issues #121,
+#155: the crew's graceful finish, reported through `crew_complete`, distinct from the
+stand-down that used to approximate it; its push renders the reporter's summary of what
+shipped). A question is General-facing only when it
 is broadcast to `all-units` or addressed to a role that is not a live agent (issue #119); a
 directed question to a live teammate is peer coordination the crew resolves itself and stays
 quiet, mirroring the stall monitor's rule (issue #48). To scope it, the notifier tracks
