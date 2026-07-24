@@ -12,11 +12,13 @@
 //! [`Event::in_timeline_of`], and the aggregate stream supplies
 //! [`EventFilter::matches`](crate::store::EventFilter::matches).
 //!
-//! Each event carries its log sequence as the SSE `id`, so a reconnecting
-//! client names exactly where to resume. A subscriber that lags off the
-//! broadcast skips the gap here rather than closing the stream (`on_lag`
-//! reports it); the client recovers the gap from its `Last-Event-ID` on
-//! reconnect, so nothing is lost.
+//! Each event carries its stable absolute sequence as the SSE `id` (issues
+//! #201, #274), so a reconnecting client resumes by that sequence rather than a
+//! shifting log position: a prune or compaction of the events between never
+//! gaps or duplicates the resume, since the sequence is never reused or
+//! renumbered. A subscriber that lags off the broadcast skips the gap here
+//! rather than closing the stream (`on_lag` reports it); the client recovers
+//! the gap from its `Last-Event-ID` on reconnect, so nothing is lost.
 
 use std::convert::Infallible;
 

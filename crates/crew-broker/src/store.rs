@@ -1755,6 +1755,83 @@ mod tests {
     }
 
     #[test]
+    fn events_since_resumes_by_stable_seq_after_a_prune() {
+        // The SSE `Last-Event-ID` resume reads `events_since(last_id + 1)`, so a
+        // reconnect after a prune must return exactly the surviving events after
+        // the cursor, keyed by the stable sequence and never by log position
+        // (issue #274, the invariant #201 gave the store). A prune shifts every
+        // surviving event's position, yet the resume set stays correct: no
+        // already-seen event repeats and no surviving event is skipped. Run over
+        // both backends, since both back the SSE resume.
+        let dir = TempDir::new();
+        let stores: [Box<dyn Storage>; 2] = [
+            Box::new(MemoryStore::default()),
+            Box::new(LogStore::open(dir.path()).unwrap()),
+        ];
+        for store in stores {
+            // seq 0,2,4,5 are aged ephemeral messages; 1,3 are state-bearing. All
+            // are aged, so retention keeps 1,3 (a projection folds them) and 5 (the
+            // newest anchor), pruning the ephemeral 0,2,4 from the MIDDLE.
+            for kind in [
+                message_kind(),
+                EventKind::Lifecycle(Lifecycle::Started),
+                message_kind(),
+                EventKind::Lifecycle(Lifecycle::Started),
+                message_kind(),
+                message_kind(),
+            ] {
+                store.append(of_kind(kind, ts(1)));
+            }
+
+            // A client last saw seq 2; its reconnect replays `events_since(3)`.
+            let before: Vec<u64> = store.events_since(3).iter().map(|s| s.seq).collect();
+            assert_eq!(
+                before,
+                vec![3, 4, 5],
+                "before a prune, the gap after id 2 is 3,4,5"
+            );
+
+            assert_eq!(
+                store.retain(ts(5)),
+                3,
+                "the three aged ephemeral messages are pruned from the middle",
+            );
+
+            // Survivors are now at positions 0,1,2 (seq 1,3,5), so a position-keyed
+            // resume would be wrong. The seq-keyed resume returns the events after
+            // id 2 that survived, 3 and 5, in order: no duplicate of an already-seen
+            // event, no gap among survivors (seq 4 is legitimately aged out).
+            let after: Vec<u64> = store.events_since(3).iter().map(|s| s.seq).collect();
+            assert_eq!(
+                after,
+                vec![3, 5],
+                "resume returns the surviving events after id 2 by seq, not position",
+            );
+
+            // A stale cursor at a since-pruned id (Last-Event-ID 4, whose seq was
+            // pruned) resumes at the next survivor, with no gap or duplicate.
+            let from_pruned: Vec<u64> = store.events_since(5).iter().map(|s| s.seq).collect();
+            assert_eq!(
+                from_pruned,
+                vec![5],
+                "resume past the pruned id 4 yields the anchor"
+            );
+            assert!(
+                store.events_since(6).is_empty(),
+                "a cursor at the live tail replays nothing, even after a prune",
+            );
+
+            // The live-tail bound `next_seq` never rewinds, so the replay's
+            // `seq < live_from` guard never mistakes a live event for a replayed one.
+            assert_eq!(
+                store.next_seq(),
+                6,
+                "the monotonic counter is untouched by the prune"
+            );
+        }
+    }
+
+    #[test]
     fn log_store_persists_the_roster_across_a_restart() {
         let dir = TempDir::new();
         let store = LogStore::open(dir.path()).unwrap();
