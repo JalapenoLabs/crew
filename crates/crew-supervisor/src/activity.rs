@@ -24,6 +24,7 @@ use serde_json::Value;
 use tracing::{event, Level};
 
 use crate::{
+    lifecycle::UsageRecorder,
     roster::RosterClient,
     spawn::{Captured, OutputStream},
 };
@@ -60,8 +61,9 @@ pub(crate) fn parse(line: &str) -> Vec<Activity> {
         // The terminal line of a turn.
         Some("result") => vec![Activity::TurnEnded],
         // Known shapes crew does not model as activity: tool results, the
-        // partial-message usage firehose, and rate-limit notices (whose token and
-        // usage feeds are issues #114 and #113). Drop them so the log stays clean.
+        // partial-message usage firehose (the per-turn token feed comes from the
+        // `result` line instead, issue #177), and rate-limit notices (whose
+        // subscription-usage feed is issue #113). Drop them so the log stays clean.
         Some("user" | "stream_event" | "message_start" | "message_delta" | "rate_limit_event") => {
             Vec::new()
         }
@@ -111,17 +113,93 @@ fn parse_assistant(value: &Value) -> Vec<Activity> {
     activities
 }
 
+/// A turn's token-and-cost usage, parsed from a stream-json `result` line
+/// (issue #177).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnUsage {
+    /// The turn's total tokens: input, output, and cache read and creation
+    /// summed.
+    tokens: u64,
+    /// The turn's cost in micro-USD (millionths of a dollar).
+    cost_micro_usd: u64,
+}
+
+/// Extracts a turn's usage from a stream-json line, or `None` when it is not a
+/// `result` or carries no spend to charge (issue #177).
+///
+/// Only the `result` line ends a turn with its final `usage` (the summed token
+/// fields) and `total_cost_usd`; every other line carries no turn total. A
+/// `result` with neither tokens nor cost yields `None`, so a zero charge is
+/// never reported. A non-JSON or typeless line is not a result, so it too
+/// yields `None`.
+fn parse_usage(line: &str) -> Option<TurnUsage> {
+    let value = serde_json::from_str::<Value>(line.trim()).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("result") {
+        return None;
+    }
+    let tokens = value.get("usage").map_or(0, sum_tokens);
+    let cost_micro_usd = value
+        .get("total_cost_usd")
+        .and_then(Value::as_f64)
+        .map_or(0, to_micro_usd);
+    (tokens != 0 || cost_micro_usd != 0).then_some(TurnUsage {
+        tokens,
+        cost_micro_usd,
+    })
+}
+
+/// Sums a `usage` object's token fields, each absent field counting as zero.
+///
+/// Input, output, and both cache token counts are the tokens the turn
+/// processed, so the crew budget (a token ceiling, issue #54) charges their
+/// sum.
+fn sum_tokens(usage: &Value) -> u64 {
+    [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|field| usage.get(field).and_then(Value::as_u64))
+    .fold(0, u64::saturating_add)
+}
+
+/// Converts a dollar cost to whole micro-USD (millionths of a dollar).
+///
+/// A non-finite or negative cost (never expected from the parser) is zero; the
+/// saturating float-to-int cast clamps the rounded value into `u64`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the guarded, saturating float-to-int cast clamps to 0..=u64::MAX micro-USD"
+)]
+fn to_micro_usd(dollars: f64) -> u64 {
+    if !dollars.is_finite() || dollars <= 0.0 {
+        return 0;
+    }
+    (dollars * 1_000_000.0).round() as u64
+}
+
 /// Reads the fleet's captured output and records each agent's parsed activity
-/// on the broker, keyed by role (issue #24).
+/// on the broker, keyed by role (issue #24), charging each turn's usage against
+/// the crew budget (issue #177).
 ///
 /// Spawns a detached thread that drains the merged capture channel: for each
 /// stdout line (stream-json is on stdout; stderr carries the briefing echo and
-/// diagnostics), it parses the line and emits every resulting activity through
-/// `roster`. Recording is best-effort: a broker hiccup is logged, never fatal,
-/// so a dropped activity event never takes an agent down. The thread ends when
-/// the channel disconnects, which happens once every agent has stopped and its
-/// capture readers have drained.
-pub(crate) fn forward_activity(output: Receiver<Captured>, roster: RosterClient) {
+/// diagnostics), it parses the line, emits every resulting activity through
+/// `roster`, and, when the line is a `result` carrying usage, charges the
+/// turn's tokens and cost through `recorder`, so budget enforcement runs off
+/// real spend rather than only when a caller pokes the seam. Both are
+/// best-effort: a broker hiccup or a charge failure is logged, never fatal, so
+/// a dropped event never takes an agent down. The thread ends when the channel
+/// disconnects, which happens once every agent has stopped and its capture
+/// readers have drained.
+pub(crate) fn forward_activity(
+    output: Receiver<Captured>,
+    roster: RosterClient,
+    recorder: UsageRecorder,
+) {
     thread::spawn(move || {
         for captured in output {
             if captured.stream != OutputStream::Stdout {
@@ -135,6 +213,22 @@ pub(crate) fn forward_activity(output: Receiver<Captured>, roster: RosterClient)
                         crew.role = %captured.role,
                         error = %err,
                         "could not record activity for `{{crew.role}}`: {err}",
+                    );
+                }
+            }
+            // Charge the turn's usage against the crew budget (issue #177): the `result`
+            // line carries the turn's final tokens and cost, so charging it here makes
+            // budget enforcement (issue #54) live off real spend.
+            if let Some(usage) = parse_usage(&captured.line) {
+                if let Err(err) =
+                    recorder.record_usage(&captured.role, usage.tokens, usage.cost_micro_usd)
+                {
+                    event!(
+                        name: "supervisor.usage.charge_failed",
+                        Level::WARN,
+                        crew.role = %captured.role,
+                        error = %err,
+                        "could not charge usage for `{{crew.role}}`: {err}",
                     );
                 }
             }
@@ -262,5 +356,69 @@ mod tests {
     fn a_blank_line_yields_nothing() {
         assert!(parse("   ").is_empty());
         assert!(parse("").is_empty());
+    }
+
+    #[test]
+    fn a_result_line_yields_its_summed_tokens_and_cost() {
+        use super::{parse_usage, TurnUsage};
+
+        // The `result` line carries the turn's final usage: every token field summed,
+        // and the dollar cost rendered as whole micro-USD (issue #177).
+        let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.0123,
+            "usage":{"input_tokens":200,"output_tokens":800,
+                     "cache_creation_input_tokens":50,"cache_read_input_tokens":1000}}"#;
+        assert_eq!(
+            parse_usage(line),
+            Some(TurnUsage {
+                tokens: 2_050,
+                cost_micro_usd: 12_300,
+            }),
+        );
+    }
+
+    #[test]
+    fn a_result_with_partial_usage_sums_what_is_present() {
+        use super::{parse_usage, TurnUsage};
+
+        // Absent token fields count as zero, and a missing cost is zero.
+        let line = r#"{"type":"result","usage":{"output_tokens":1500}}"#;
+        assert_eq!(
+            parse_usage(line),
+            Some(TurnUsage {
+                tokens: 1_500,
+                cost_micro_usd: 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn non_result_lines_carry_no_usage() {
+        use super::parse_usage;
+
+        // Only the `result` line ends a turn, so nothing else charges spend, and a
+        // non-JSON line is not a result either.
+        for line in [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"stream_event","event":{"usage":{"output_tokens":7}}}"#,
+            "not json at all",
+        ] {
+            assert_eq!(parse_usage(line), None, "not a turn total: {line}");
+        }
+    }
+
+    #[test]
+    fn a_result_with_no_spend_is_ignored() {
+        use super::parse_usage;
+
+        // A result carrying neither tokens nor cost is not a zero charge to report.
+        assert_eq!(
+            parse_usage(r#"{"type":"result","subtype":"success"}"#),
+            None
+        );
+        assert_eq!(
+            parse_usage(r#"{"type":"result","usage":{},"total_cost_usd":0}"#),
+            None,
+        );
     }
 }

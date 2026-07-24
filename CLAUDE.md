@@ -562,13 +562,16 @@ runs with `--output-format stream-json --verbose` (`agent_turn_argv`), so it emi
 JSON object per stdout line. `activity::parse` distills each line into `crew_core::Activity`
 items, modeled on Seraphim's parser: a session `init` is a `TurnStarted`, the `result`
 line a `TurnEnded`, an assistant `tool_use` a `ToolCall`, and assistant `text` an `Output`;
-the partial-message usage firehose, tool results, and rate-limit notices are dropped (their
-token and usage feeds are issues #114 and #113). A line the parser does not recognize
+the partial-message usage firehose, tool results, and rate-limit notices are dropped (the
+per-turn token feed comes from the `result` line, issue #177; the subscription-usage feed is
+issue #113). A line the parser does not recognize
 becomes `Activity::Other` rather than an error, so a schema drift across Claude Code
 versions is visible on the stream, never a crash. `activity::forward_activity` is the
 runtime half, started by `Fleet::launch`: a detached thread drains the fleet's captured
-output, parses each stdout line, and records every activity through
-`RosterClient::emit_activity` (`POST /activity`). The broker keys the `activity` event to
+output, parses each stdout line, records every activity through
+`RosterClient::emit_activity` (`POST /activity`), and charges each turn's parsed usage
+against the crew budget through the shared `UsageRecorder` (issue #177). The broker keys the
+`activity` event to
 the role on its own `@role` channel (via `Channel::Direct`), so it rides the aggregate
 stream and the role's per-agent timeline (`GET /activity?agent=<role>`) but never floods
 another role's inbox, and threads the supervisor's task (issue #29) for correlation.
@@ -649,12 +652,14 @@ running totals, modeled on the Workflow budget pattern), which the `Fleet` holds
 `Fleet::record_spend(role, tokens)` charges the spend, publishes a `budget` event (spend
 against budget, to `all-units`, so a cap hit is never silent), and on a breach idle-stops
 the role (its own cap) or the whole crew (the crew budget) rather than overrun; a ceiling
-fires once, and an unbounded crew records nothing. The token feed is the one deferred piece:
-`record_spend` (wrapped by `record_usage`) is the seam the stream-json activity parser (issue
-#24) drives with each turn's usage, and wiring that per-turn call is issue #114, paused until
-#24 lands; until then the accounting, enforcement, and `budget` events are exercised
-against spend fed to the seam directly (proven end to end in `tests/budget.rs`). The broker
-accepts a report at `POST /budget` and streams it as `EventKind::Budget`, filterable with
+fires once, and an unbounded crew records nothing. The token feed is live (issue #177):
+`record_spend` (wrapped by `record_usage`) is driven by each turn's usage the stream-json
+activity parser (issue #24) distills from captured stdout. The activity forwarder parses the
+`result` line's `usage` (its token fields summed) and `total_cost_usd`, then calls
+`record_usage(role, tokens, cost_micro_usd)` per turn, so budget enforcement charges against
+real spend; `UsageRecorder` is the shared handle the `Fleet` and the forwarder both hold
+(the fleet delegates its `record_usage` / `record_spend` to it). The broker accepts a report
+at `POST /budget` and streams it as `EventKind::Budget`, filterable with
 `GET /history?kind=budget`. It also folds those `budget` events into a snapshot served at
 `GET /budget` (issue #176): current spend against budget per role (cumulative spend and cap)
 and crew-wide (the crew total and budget). Like the situation board (issue #49) and the
@@ -674,9 +679,9 @@ events (working time, entering vs leaving the working state), rebuilt from the d
 a restart like the board, and serves it at `GET /stats`: per role and in aggregate, the
 cumulative tokens, cost (micro-USD), and working seconds, with a live role's open working
 interval counted through the read instant. Cost and tokens ride the same stream-json feed as
-the budget: `record_usage` awaits the activity parser (issue #24), which will read the
-stream-json `result` event's `usage` tokens and `total_cost_usd` and call `record_usage` per
-turn (issue #114, paused until #24 lands); working time needs no feed. This is the data the
+the budget (issue #177): the activity parser reads the stream-json `result` line's `usage`
+tokens (its fields summed) and `total_cost_usd`, and the forwarder calls `record_usage` per
+turn; working time needs no feed. This is the data the
 `crew top` cockpit (issue #51) and the Seraphim per-role stats render. See
 `docs/observability.md` (cost, tokens, and time telemetry).
 

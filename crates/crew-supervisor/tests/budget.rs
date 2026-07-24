@@ -139,6 +139,74 @@ fn the_crew_budget_idle_stops_the_whole_crew_and_is_surfaced() {
     );
 }
 
+/// The telemetry events on the broker log, each `(role, tokens)`.
+fn telemetry_events(base: &str) -> Vec<(String, u64)> {
+    let text = ureq::get(&format!("{base}/history?kind=telemetry"))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| {
+            let data = &event["kind"]["data"];
+            let role = data["role"].as_str().unwrap_or_default().to_owned();
+            (role, data["tokens"].as_u64().unwrap_or_default())
+        })
+        .collect()
+}
+
+#[test]
+fn a_parsed_turns_usage_charges_the_budget_and_enforces_the_cap() {
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+    let backend = RoleId::new("backend");
+
+    // Backend is capped at 1000 tokens. Its stub prints one stream-json `result`
+    // line reporting 1500 tokens (200 in + 1300 out), which the activity forwarder
+    // (issue #24) parses and charges through `record_usage` (issue #177), breaching
+    // the cap. This proves the last wiring step: budgets enforce off real, parsed
+    // spend, not only a directly poked seam.
+    let budget = Budget::new(None, BTreeMap::from([(backend.clone(), 1_000)]));
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub(
+            "backend",
+            r#"printf '%s\n' '{"type":"result","subtype":"success","total_cost_usd":0.02,"usage":{"input_tokens":200,"output_tokens":1300}}'; sleep 30"#,
+        )],
+        LifecyclePolicy::default(),
+    )
+    .with_budget(budget);
+
+    fleet.start(&backend).unwrap();
+
+    // The parsed usage charged the budget and idle-stopped the capped role.
+    assert!(
+        wait_until(|| liveness(&base, "backend").as_deref() == Some("stopped")),
+        "the parsed turn usage idle-stops the capped role"
+    );
+
+    // The spend rode the stream as telemetry (issue #55, the turn's summed tokens)
+    // and as a budget breach (issue #54).
+    let telemetry = telemetry_events(&base);
+    assert!(
+        telemetry
+            .iter()
+            .any(|(role, tokens)| role == "backend" && *tokens == 1_500),
+        "the turn's summed tokens are reported as telemetry: {telemetry:?}"
+    );
+    let events = budget_events(&base);
+    assert!(
+        events
+            .iter()
+            .any(|(role, breach)| role == "backend" && breach.as_deref() == Some("role")),
+        "the parsed spend breaches the role cap: {events:?}"
+    );
+}
+
 #[test]
 fn an_unbounded_crew_records_nothing() {
     let base = start_broker();
