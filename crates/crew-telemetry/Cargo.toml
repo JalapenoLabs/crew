@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[dev-dependencies]
-# Parse the JSON log output in tests (the `json` format from issue #213).
+# Escape the event name correctly when injecting it into the JSON log output
+# (issue #271); also parses the JSON output in tests.
 serde_json.workspace = true
