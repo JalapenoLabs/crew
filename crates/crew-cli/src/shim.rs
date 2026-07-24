@@ -28,7 +28,7 @@ use crew_substrate::{
     client::{
         BoardSnapshot, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot, Standing,
     },
-    core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, ROLE_CARD_ENV},
+    core::{BrokerEndpoint, LaneEnforcement, RoleCard, RoleId, TaskId, ROLE_CARD_ENV},
 };
 use eyre::{eyre, Result, WrapErr};
 
@@ -74,6 +74,23 @@ impl Agent {
         BrokerConfig::from_env()
             .ok()
             .map(|config| TaskContext::new(&config.state_dir, &self.role))
+    }
+
+    /// Persists the task `broker` is working, so a later shim process shares
+    /// the same id (issues #132, #183).
+    ///
+    /// Own-work flows (`crew claim`, `crew submit`) mint and adopt a task when
+    /// the role has none; saving it here means a follow-up `crew claim
+    /// in_progress` or `crew submit`, each a fresh process, reuses that id
+    /// rather than minting another.
+    ///
+    /// # Errors
+    /// Returns an error if the task file cannot be written.
+    fn persist_task(&self, broker: &Broker) -> Result<()> {
+        if let (Some(context), Some(task)) = (self.task_context(), broker.task()) {
+            context.save(task)?;
+        }
+        Ok(())
     }
 }
 
@@ -301,21 +318,26 @@ pub fn roster() -> Result<()> {
     Ok(())
 }
 
-/// Claims a task, or moves this role's claim to `state`, on the work ledger
-/// (issue #45).
+/// Claims the work this role was ordered to do, or moves its claim to `state`,
+/// on the work ledger (issues #45, #183).
 ///
-/// Mirrors `crew_claim`: the broker refuses a claim on work another role holds,
+/// Mirrors `crew_claim`: the claim keys by the task the role adopted from its
+/// order (loaded from disk since each shim call is its own process), minting
+/// and adopting a fresh id for ad-hoc work, so a claim -> `in_progress` -> done
+/// chain shares one id. The resulting task is persisted so a later `crew claim`
+/// process reuses it. The broker refuses a claim on work another role holds,
 /// and the error names the holder.
 ///
 /// # Errors
-/// Returns an error if no role context is set, another role holds the task, or
-/// the broker cannot be reached.
-pub fn claim(task: &str, state: &str, title: &str) -> Result<()> {
+/// Returns an error if no role context is set, another role holds the task, the
+/// broker cannot be reached, or the task cannot be persisted.
+pub fn claim(state: &str, title: &str) -> Result<()> {
     let agent = load_agent()?;
-    let confirmation = agent
-        .broker()
-        .claim(task, state, title)
+    let mut broker = agent.broker();
+    let confirmation = broker
+        .claim(state, title)
         .map_err(|reason| eyre!("{reason}"))?;
+    agent.persist_task(&broker)?;
     println!("{confirmation}");
     Ok(())
 }
@@ -354,34 +376,46 @@ pub fn lane(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Submits this agent's finished work for adversarial verification (issue #47).
+/// Submits this agent's finished work for adversarial verification (issues #47,
+/// #183).
 ///
-/// Mirrors `crew_submit`: the work is not done until an independent role tries
-/// to break it and passes it. `to` optionally names a reviewer role to notify.
+/// Mirrors `crew_submit`: it submits the task the role adopted from its order
+/// (loaded from disk, minting and adopting a fresh id for ad-hoc work), so the
+/// submission shares the id of the role's claim; the resulting task is
+/// persisted for a later process. `title` is the display label. The work is not
+/// done until an independent role tries to break it and passes it. `to`
+/// optionally names a reviewer role to notify.
 ///
 /// # Errors
-/// Returns an error if no role context is set, or the broker rejects the
-/// submission.
-pub fn submit(task: &str, acceptance: Option<&str>, to: Option<&str>) -> Result<()> {
+/// Returns an error if no role context is set, the broker rejects the
+/// submission, or the task cannot be persisted.
+pub fn submit(title: &str, acceptance: Option<&str>, to: Option<&str>) -> Result<()> {
     let agent = load_agent()?;
-    let confirmation = agent
-        .broker()
-        .submit(task, acceptance.unwrap_or_default(), to)
+    let mut broker = agent.broker();
+    let confirmation = broker
+        .submit(title, acceptance.unwrap_or_default(), to)
         .map_err(|reason| eyre!("{reason}"))?;
+    agent.persist_task(&broker)?;
     println!("{confirmation}");
     Ok(())
 }
 
-/// Records this agent's verdict on a task another role submitted (issue #47).
+/// Records this agent's verdict on a task another role submitted (issues #47,
+/// #183).
 ///
-/// Mirrors `crew_verdict`: a `pass` marks the task done; otherwise the work
-/// returns to its owner with the `failure`. A role cannot verify its own work.
+/// Mirrors `crew_verdict`: the verifier names the `task` by its id (read from
+/// `crew gate`), so a cross-actor verdict correlates to the id the owner
+/// submitted under. A `pass` marks the task done; otherwise the work returns to
+/// its owner with the `failure`. A role cannot verify its own work.
 ///
 /// # Errors
-/// Returns an error if no role context is set, the verdict is refused, or a
-/// failing verdict carries no failure.
+/// Returns an error if no role context is set, `task` is not a task id, the
+/// verdict is refused, or a failing verdict carries no failure.
 pub fn verdict(task: &str, pass: bool, failure: Option<&str>) -> Result<()> {
     let agent = load_agent()?;
+    let task: TaskId = task
+        .parse()
+        .wrap_err_with(|| format!("`{task}` is not a task id; pass the id `crew gate` shows"))?;
     let confirmation = agent
         .broker()
         .verdict(task, pass, failure.unwrap_or_default())
@@ -635,9 +669,16 @@ fn print_gate(snapshot: &GateSnapshot) {
         } else {
             format!(": {}", task.detail)
         };
+        // Lead with the human title (empty for ad-hoc work), then the id a
+        // verifier passes to `crew verdict` (issue #183).
+        let title = if task.title.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", task.title)
+        };
         println!(
-            "- {} owned by {} [{}{}]{}",
-            task.task, task.owner, task.verdict, verifier, detail
+            "- {}[{}] owned by {} [{}{}]{}",
+            title, task.task, task.owner, task.verdict, verifier, detail
         );
     }
 }

@@ -153,11 +153,13 @@ fn a_submitted_task_with_no_verdict_is_a_stalled_ledger() {
     // A role submits work to the done-gate; no one verifies it. The task sits with
     // no forward motion: the on-`main` shape of a stalled ledger (issue #47's
     // `verification` event; a work-ledger `ledger` event once issue #45 lands
-    // is handled the same way).
+    // is handled the same way). The gate is keyed by the task id now (issue #183),
+    // titled for display.
+    let task = "33333333-3333-3333-3333-333333333333";
     ureq::post(&format!("{base}/gate/submit"))
         .set("content-type", "application/json")
         .send_string(
-            &json!({ "role": "backend", "task": "login", "acceptance": "tokens expire" })
+            &json!({ "role": "backend", "task": task, "title": "login", "acceptance": "tokens expire" })
                 .to_string(),
         )
         .unwrap();
@@ -171,8 +173,8 @@ fn a_submitted_task_with_no_verdict_is_a_stalled_ledger() {
     assert_eq!(stalls[0].kind, StallKind::LedgerStall);
     assert_eq!(stalls[0].roles, vec![RoleId::new("backend")]);
     assert!(
-        stalls[0].detail.contains("login") && stalls[0].detail.contains("awaited verification"),
-        "names the stalled task and why: {}",
+        stalls[0].detail.contains(task) && stalls[0].detail.contains("awaited verification"),
+        "names the stalled task id and why: {}",
         stalls[0].detail,
     );
 }

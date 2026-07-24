@@ -425,15 +425,18 @@ pub enum Activity {
 /// ledger is a projection of it (see `docs/observability.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerEvent {
-    /// The work item's key: a stable identifier the crew agrees on, such as a
-    /// path, a feature name, or an order's title. Two roles must not hold
-    /// the same key at once.
-    pub task: String,
+    /// The work item's key: the structured [`TaskId`] the crew correlates work
+    /// under (issue #183). Two roles must not hold the same id at once. This is
+    /// the id, not the human title: order work shares its order's id, and
+    /// ad-hoc work mints a fresh one, so two roles naming the same path no
+    /// longer collide by accident (that is the lane system's job, issue #46).
+    pub task: TaskId,
     /// The role that owns the claim.
     pub owner: RoleId,
     /// The state the work moved to.
     pub state: TaskState,
-    /// A short human title for the ledger view; may be empty.
+    /// A short human title for the ledger view; display only, may be empty
+    /// (issue #183).
     #[serde(default)]
     pub title: String,
 }
@@ -508,8 +511,15 @@ pub struct BoundaryEvent {
 /// handback (see `docs/roles.md`, the done-gate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationEvent {
-    /// The task under the gate, named by its title (the order's title).
-    pub task: String,
+    /// The task under the gate, keyed by its structured [`TaskId`] (issue
+    /// #183). This is the id, not the human title, so two tasks that happen
+    /// to share a title never collide in the gate; the
+    /// [`title`](Self::title) carries the display label.
+    pub task: TaskId,
+    /// A short human title for the gate view; display only, may be empty (issue
+    /// #183).
+    #[serde(default)]
+    pub title: String,
     /// The role whose work is under verification: the one that submitted it.
     pub owner: RoleId,
     /// The independent role that returned the verdict; absent on the submission
@@ -839,21 +849,24 @@ mod tests {
                 raw: "rate_limit_event".to_owned(),
             })),
             envelope(EventKind::Verification(VerificationEvent {
-                task: "Scaffold the broker".to_owned(),
+                task: TaskId::new(),
+                title: "Scaffold the broker".to_owned(),
                 owner: RoleId::new("backend"),
                 verifier: None,
                 verdict: Verdict::Submitted,
                 detail: "crewd serves /health".to_owned(),
             })),
             envelope(EventKind::Verification(VerificationEvent {
-                task: "Scaffold the broker".to_owned(),
+                task: TaskId::new(),
+                title: "Scaffold the broker".to_owned(),
                 owner: RoleId::new("backend"),
                 verifier: Some(RoleId::new("qa")),
                 verdict: Verdict::Passed,
                 detail: String::new(),
             })),
             envelope(EventKind::Verification(VerificationEvent {
-                task: "Scaffold the broker".to_owned(),
+                task: TaskId::new(),
+                title: "Scaffold the broker".to_owned(),
                 owner: RoleId::new("backend"),
                 verifier: Some(RoleId::new("qa")),
                 verdict: Verdict::Failed,

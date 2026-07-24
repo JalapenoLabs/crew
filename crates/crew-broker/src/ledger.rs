@@ -22,20 +22,23 @@ use axum::{
     Json, Router,
 };
 use crew_core::{
-    Channel, ChannelId, Event, EventKind, LedgerEvent, MessageKind, RoleId, Sender, TaskState,
-    Timestamp, ALL_UNITS,
+    Channel, ChannelId, Event, EventKind, LedgerEvent, MessageKind, RoleId, Sender, TaskId,
+    TaskState, Timestamp, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ApiError, events::JsonBody, state::AppState};
 
-/// The shared work ledger: each claimed task, its owner, and its state.
+/// The shared work ledger: each claimed task, keyed by its [`TaskId`], with its
+/// owner and state (issue #183).
 ///
 /// The invariant, enforced by [`set`](Ledger::set): at most one role **holds**
-/// a task (a task in any state but [`Done`](TaskState::Done)).
+/// a task id (a task in any state but [`Done`](TaskState::Done)). Keying by the
+/// id, not a human string, means order work shares its order's id while two
+/// roles typing the same ad-hoc path no longer collide by accident.
 #[derive(Debug, Default)]
 pub(crate) struct Ledger {
-    tasks: BTreeMap<String, LedgerEntry>,
+    tasks: BTreeMap<TaskId, LedgerEntry>,
 }
 
 /// One task's record in the ledger.
@@ -106,7 +109,7 @@ impl Ledger {
     /// task's entry with the event's owner, state, and title.
     fn apply(&mut self, change: &LedgerEvent) {
         self.tasks.insert(
-            change.task.clone(),
+            change.task,
             LedgerEntry {
                 title: change.title.clone(),
                 owner: change.owner.clone(),
@@ -127,12 +130,12 @@ impl Ledger {
     /// Returns a [`Conflict`] if another role holds the task.
     fn set(
         &mut self,
-        task: &str,
+        task: TaskId,
         owner: &RoleId,
         state: TaskState,
         title: &str,
     ) -> Result<(), Conflict> {
-        if let Some(entry) = self.tasks.get(task) {
+        if let Some(entry) = self.tasks.get(&task) {
             if entry.state.is_held() && &entry.owner != owner {
                 return Err(Conflict {
                     holder: entry.owner.clone(),
@@ -140,12 +143,12 @@ impl Ledger {
                 });
             }
         }
-        let title = match self.tasks.get(task) {
+        let title = match self.tasks.get(&task) {
             Some(entry) if title.is_empty() => entry.title.clone(),
             _ => title.to_owned(),
         };
         self.tasks.insert(
-            task.to_owned(),
+            task,
             LedgerEntry {
                 title,
                 owner: owner.clone(),
@@ -157,9 +160,9 @@ impl Ledger {
 
     /// Whether `task` is currently held by some role: present and in any state
     /// but [`Done`](TaskState::Done).
-    fn is_held(&self, task: &str) -> bool {
+    fn is_held(&self, task: TaskId) -> bool {
         self.tasks
-            .get(task)
+            .get(&task)
             .is_some_and(|entry| entry.state.is_held())
     }
 
@@ -181,14 +184,14 @@ impl Ledger {
     /// it (nothing to move).
     fn reassign(
         &mut self,
-        task: &str,
+        task: TaskId,
         to: &RoleId,
         from: Option<&RoleId>,
     ) -> Result<Reassignment, ReassignError> {
         // Read the current holder and validate the move before mutating, so a
         // refused reassignment leaves the ledger untouched.
         let (previous_owner, state, title) = {
-            let entry = self.tasks.get(task).ok_or(ReassignError::NotHeld)?;
+            let entry = self.tasks.get(&task).ok_or(ReassignError::NotHeld)?;
             if !entry.state.is_held() {
                 return Err(ReassignError::NotHeld);
             }
@@ -207,7 +210,7 @@ impl Ledger {
             (entry.owner.clone(), entry.state, entry.title.clone())
         };
         self.tasks.insert(
-            task.to_owned(),
+            task,
             LedgerEntry {
                 title: title.clone(),
                 owner: to.clone(),
@@ -228,7 +231,7 @@ impl Ledger {
                 .tasks
                 .iter()
                 .map(|(task, entry)| LedgerItemView {
-                    task: task.clone(),
+                    task: *task,
                     title: entry.title.clone(),
                     owner: entry.owner.clone(),
                     state: entry.state,
@@ -256,9 +259,10 @@ struct LedgerView {
 /// One task in the ledger view.
 #[derive(Debug, Serialize)]
 struct LedgerItemView {
-    /// The task's key.
-    task: String,
-    /// A short human title, or empty.
+    /// The task's key: its [`TaskId`], serialized as a UUID string (issue
+    /// #183).
+    task: TaskId,
+    /// A short human title, or empty (display only).
     title: String,
     /// The role that owns the claim.
     owner: RoleId,
@@ -269,14 +273,15 @@ struct LedgerItemView {
 /// The `POST /ledger` body: a role claiming or updating a task.
 #[derive(Debug, Deserialize)]
 struct ClaimRequest {
-    /// The task key to claim or update.
-    task: String,
+    /// The task id to claim or update, deserialized from its UUID string (issue
+    /// #183).
+    task: TaskId,
     /// The role making the claim.
     owner: String,
     /// The state to move the task to (defaults to `claimed`).
     #[serde(default = "claimed")]
     state: TaskState,
-    /// A short human title for the ledger view; optional.
+    /// A short human title for the ledger view; display only, optional.
     #[serde(default)]
     title: String,
 }
@@ -303,10 +308,7 @@ async fn claim(
     State(state): State<AppState>,
     JsonBody(request): JsonBody<ClaimRequest>,
 ) -> Result<Json<LedgerView>, ApiError> {
-    let task = request.task.trim();
-    if task.is_empty() {
-        return Err(ApiError::bad_request("task must not be empty"));
-    }
+    let task = request.task;
     let owner = request.owner.trim();
     if owner.is_empty() {
         return Err(ApiError::bad_request("owner must not be empty"));
@@ -336,8 +338,8 @@ async fn claim(
 /// The `POST /ledger/reassign` body: the General moving a task to a new owner.
 #[derive(Debug, Deserialize)]
 struct ReassignRequest {
-    /// The task key to reassign.
-    task: String,
+    /// The task id to reassign, deserialized from its UUID string (issue #183).
+    task: TaskId,
     /// The role to move the task to.
     to: String,
     /// The role the task is expected to be held by, a guard against a stale
@@ -349,8 +351,9 @@ struct ReassignRequest {
 /// The `POST /ledger/reassign` response: the move that happened.
 #[derive(Debug, Serialize)]
 struct ReassignView {
-    /// The task reassigned.
-    task: String,
+    /// The task reassigned: its [`TaskId`], serialized as a UUID string (issue
+    /// #183).
+    task: TaskId,
     /// The role that held it before the move.
     from: RoleId,
     /// The role that owns it now.
@@ -379,10 +382,7 @@ async fn reassign(
     State(state): State<AppState>,
     JsonBody(request): JsonBody<ReassignRequest>,
 ) -> Result<Json<ReassignView>, ApiError> {
-    let task = request.task.trim();
-    if task.is_empty() {
-        return Err(ApiError::bad_request("task must not be empty"));
-    }
+    let task = request.task;
     let to = request.to.trim();
     if to.is_empty() {
         return Err(ApiError::bad_request(
@@ -410,7 +410,7 @@ async fn reassign(
         &reassignment.title,
     ));
     let view = ReassignView {
-        task: task.to_owned(),
+        task,
         from: reassignment.previous_owner,
         to,
         state: reassignment.state,
@@ -421,7 +421,7 @@ async fn reassign(
 }
 
 /// Renders a [`ReassignError`] as a 409 [`ApiError`] with a precise reason.
-fn reassign_conflict(task: &str, error: &ReassignError) -> ApiError {
+fn reassign_conflict(task: TaskId, error: &ReassignError) -> ApiError {
     let reason = match error {
         ReassignError::NotHeld => {
             format!("task `{task}` is not held by anyone; there is nothing in flight to reassign")
@@ -441,18 +441,21 @@ fn reassign_conflict(task: &str, error: &ReassignError) -> ApiError {
 ///
 /// An order (`crew_order`, and the General's `crew command`) assigns scoped
 /// work to one role on its direct channel; this claims that work for the
-/// recipient, keyed and titled by the order's title, so `crew_ledger` shows it
-/// `claimed` before the role starts. The message-publish path calls it for
-/// every message; it acts only on an order to a single role.
+/// recipient, keyed by the order's envelope [`TaskId`] and titled by the
+/// order's title, so `crew_ledger` shows it `claimed` before the role starts
+/// (issue #183). Keying by the order's id, not its title, is what threads a
+/// claim -> `in_progress` -> done chain and the done-gate to one shared id. The
+/// message-publish path calls it for every message; it acts only on a direct
+/// order that carries a task.
 ///
 /// It is non-destructive and best-effort: it seeds only when no one currently
-/// holds the task, so a re-order never regresses an in-progress claim and never
-/// steals another role's held work (the General uses `crew reassign` for that).
-/// A fresh claim publishes a `ledger` event, so the seed rides the stream like
-/// any claim.
+/// holds the task id, so a re-order never regresses an in-progress claim and
+/// never steals another role's held work (the General uses `crew reassign` for
+/// that). A fresh claim publishes a `ledger` event, so the seed rides the
+/// stream like any claim.
 pub(crate) fn seed_order_claim(state: &AppState, event: &Event) {
-    // Only an order carries a title to claim, and only a direct channel names the
-    // one recipient to own it.
+    // Only an order carries a title to display, and only a direct channel names the
+    // one recipient to own it. The order's envelope task is the key (issue #183).
     let EventKind::Message(message) = &event.kind else {
         return;
     };
@@ -462,34 +465,35 @@ pub(crate) fn seed_order_claim(state: &AppState, event: &Event) {
     let Some(Channel::Direct(owner)) = Channel::parse(event.channel.as_str()) else {
         return;
     };
-    let key = title.trim();
-    if key.is_empty() {
+    let Some(task) = event.task else {
         return;
-    }
+    };
+    let title = title.trim();
 
     // Hold the ledger lock across the check, the claim, and the publish, so the
     // seed is serialized with any concurrent claim and cannot regress or
     // clobber one (mirroring the `claim` handler).
     let mut ledger = state.ledger();
-    if ledger.is_held(key) {
+    if ledger.is_held(task) {
         return;
     }
     // The task is unheld, so the set cannot conflict; publish the seeded claim.
-    if ledger.set(key, &owner, TaskState::Claimed, key).is_ok() {
-        state.publish(ledger_event(key, &owner, TaskState::Claimed, key));
+    if ledger.set(task, &owner, TaskState::Claimed, title).is_ok() {
+        state.publish(ledger_event(task, &owner, TaskState::Claimed, title));
     }
 }
 
 /// A ledger change as a first-class stream event, from the owner to
-/// `all-units`.
-fn ledger_event(task: &str, owner: &RoleId, state: TaskState, title: &str) -> Event {
+/// `all-units`, stamping the [`TaskId`] on the envelope so a `?task=<id>`
+/// history read returns it (issue #183).
+fn ledger_event(task: TaskId, owner: &RoleId, state: TaskState, title: &str) -> Event {
     Event {
         ts: Timestamp::now(),
         from: Sender::Role(owner.clone()),
         channel: ChannelId::new(ALL_UNITS),
-        task: None,
+        task: Some(task),
         kind: EventKind::Ledger(LedgerEvent {
-            task: task.to_owned(),
+            task,
             owner: owner.clone(),
             state,
             title: title.to_owned(),
@@ -505,11 +509,17 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
-    use crew_core::{EventKind, TaskState};
+    use crew_core::{EventKind, TaskId, TaskState};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
     use crate::{api, config::Config, state::AppState, store::LogStore};
+
+    /// A fresh task id as its UUID string, the key every claim now uses (issue
+    /// #183).
+    fn tid() -> String {
+        TaskId::new().to_string()
+    }
 
     async fn request(state: &AppState, method: &str, body: Value) -> (StatusCode, Value) {
         let builder = Request::builder().method(method).uri("/ledger");
@@ -558,22 +568,23 @@ mod tests {
     async fn a_second_role_cannot_claim_a_held_task() {
         let state = AppState::new(Config::default());
         let mut stream = state.broadcast.subscribe();
+        let login = tid();
 
         // backend claims the login work.
         let (status, view) = request(
             &state,
             "POST",
-            json!({ "task": "login", "owner": "backend", "title": "login flow" }),
+            json!({ "task": login, "owner": "backend", "title": "login flow" }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(owner_of(&view, "login").as_deref(), Some("backend"));
+        assert_eq!(owner_of(&view, &login).as_deref(), Some("backend"));
 
         // frontend claiming the same task is refused, and told who holds it.
         let (status, body) = request(
             &state,
             "POST",
-            json!({ "task": "login", "owner": "frontend" }),
+            json!({ "task": login, "owner": "frontend" }),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -584,7 +595,7 @@ mod tests {
 
         // The ledger still shows backend as the owner.
         let (_, view) = request(&state, "GET", Value::Null).await;
-        assert_eq!(owner_of(&view, "login").as_deref(), Some("backend"));
+        assert_eq!(owner_of(&view, &login).as_deref(), Some("backend"));
 
         // A single `ledger` event reached the stream (the accepted claim only).
         let event = stream.try_recv().unwrap().event;
@@ -597,40 +608,45 @@ mod tests {
 
     #[tokio::test]
     async fn the_owner_moves_its_task_through_states_and_done_frees_it() {
+        // A claim -> `in_progress` -> done chain on ONE task id updates one entry
+        // (issue #183): the owner advances its own claim without minting new keys.
         let state = AppState::new(Config::default());
+        let api = tid();
 
-        request(&state, "POST", json!({ "task": "api", "owner": "backend" })).await;
+        request(&state, "POST", json!({ "task": api, "owner": "backend" })).await;
         // The owner advances its own claim.
         for next in ["in_progress", "blocked", "done"] {
-            let (status, _) = request(
+            let (status, view) = request(
                 &state,
                 "POST",
-                json!({ "task": "api", "owner": "backend", "state": next }),
+                json!({ "task": api, "owner": "backend", "state": next }),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "the owner may set {next}");
+            assert_eq!(
+                view["tasks"].as_array().unwrap().len(),
+                1,
+                "the chain updates one entry, not many: {view}",
+            );
         }
 
         // Now the task is done, so another role may claim it.
-        let (status, view) = request(
-            &state,
-            "POST",
-            json!({ "task": "api", "owner": "frontend" }),
-        )
-        .await;
+        let (status, view) =
+            request(&state, "POST", json!({ "task": api, "owner": "frontend" })).await;
         assert_eq!(status, StatusCode::OK, "a done task is free to reclaim");
-        assert_eq!(owner_of(&view, "api").as_deref(), Some("frontend"));
+        assert_eq!(owner_of(&view, &api).as_deref(), Some("frontend"));
     }
 
     #[tokio::test]
     async fn a_non_owner_cannot_move_a_held_task() {
         let state = AppState::new(Config::default());
-        request(&state, "POST", json!({ "task": "db", "owner": "backend" })).await;
+        let db = tid();
+        request(&state, "POST", json!({ "task": db, "owner": "backend" })).await;
 
         let (status, _) = request(
             &state,
             "POST",
-            json!({ "task": "db", "owner": "frontend", "state": "done" }),
+            json!({ "task": db, "owner": "frontend", "state": "done" }),
         )
         .await;
         assert_eq!(
@@ -651,25 +667,27 @@ mod tests {
     #[tokio::test]
     async fn a_reassignment_moves_a_held_task_to_a_new_owner() {
         let state = AppState::new(Config::default());
+        let login = tid();
 
         // backend claims and starts login.
         request(
             &state,
             "POST",
-            json!({ "task": "login", "owner": "backend", "state": "in_progress", "title": "login flow" }),
+            json!({ "task": login, "owner": "backend", "state": "in_progress", "title": "login flow" }),
         )
         .await;
 
         // The General reassigns the in-flight task to frontend.
         let mut stream = state.broadcast.subscribe();
         let (status, view) =
-            reassign_request(&state, json!({ "task": "login", "to": "frontend" })).await;
+            reassign_request(&state, json!({ "task": login, "to": "frontend" })).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             view["from"], "backend",
             "the response names the previous owner"
         );
         assert_eq!(view["to"], "frontend");
+        assert_eq!(view["task"], login, "the response echoes the task id");
         assert_eq!(
             view["state"], "in_progress",
             "the task keeps its state across the move"
@@ -678,7 +696,7 @@ mod tests {
 
         // The ledger now shows frontend as the owner, still in_progress.
         let (_, ledger) = request(&state, "GET", Value::Null).await;
-        assert_eq!(owner_of(&ledger, "login").as_deref(), Some("frontend"));
+        assert_eq!(owner_of(&ledger, &login).as_deref(), Some("frontend"));
 
         // A `ledger` event rode the stream with the new owner and preserved state, so a
         // consumer reconstructs the same ownership.
@@ -699,7 +717,7 @@ mod tests {
 
         // An absent task has nothing in flight to move.
         let (status, body) =
-            reassign_request(&state, json!({ "task": "ghost", "to": "frontend" })).await;
+            reassign_request(&state, json!({ "task": tid(), "to": "frontend" })).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(
             body["error"]
@@ -710,15 +728,15 @@ mod tests {
         );
 
         // A done task is likewise not in flight, so it is not reassignable.
-        request(&state, "POST", json!({ "task": "api", "owner": "backend" })).await;
+        let api = tid();
+        request(&state, "POST", json!({ "task": api, "owner": "backend" })).await;
         request(
             &state,
             "POST",
-            json!({ "task": "api", "owner": "backend", "state": "done" }),
+            json!({ "task": api, "owner": "backend", "state": "done" }),
         )
         .await;
-        let (status, _) =
-            reassign_request(&state, json!({ "task": "api", "to": "frontend" })).await;
+        let (status, _) = reassign_request(&state, json!({ "task": api, "to": "frontend" })).await;
         assert_eq!(
             status,
             StatusCode::CONFLICT,
@@ -729,12 +747,13 @@ mod tests {
     #[tokio::test]
     async fn a_from_guard_that_does_not_match_the_holder_is_refused() {
         let state = AppState::new(Config::default());
-        request(&state, "POST", json!({ "task": "db", "owner": "backend" })).await;
+        let db = tid();
+        request(&state, "POST", json!({ "task": db, "owner": "backend" })).await;
 
         // The General's view is stale: it thinks qa holds `db`, but backend does.
         let (status, body) = reassign_request(
             &state,
-            json!({ "task": "db", "to": "frontend", "from": "qa" }),
+            json!({ "task": db, "to": "frontend", "from": "qa" }),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -745,21 +764,17 @@ mod tests {
 
         // The move is refused, so the ledger is untouched.
         let (_, ledger) = request(&state, "GET", Value::Null).await;
-        assert_eq!(owner_of(&ledger, "db").as_deref(), Some("backend"));
+        assert_eq!(owner_of(&ledger, &db).as_deref(), Some("backend"));
     }
 
     #[tokio::test]
     async fn reassigning_to_the_current_owner_is_refused_as_a_no_op() {
         let state = AppState::new(Config::default());
-        request(
-            &state,
-            "POST",
-            json!({ "task": "auth", "owner": "backend" }),
-        )
-        .await;
+        let auth = tid();
+        request(&state, "POST", json!({ "task": auth, "owner": "backend" })).await;
 
         let (status, body) =
-            reassign_request(&state, json!({ "task": "auth", "to": "backend" })).await;
+            reassign_request(&state, json!({ "task": auth, "to": "backend" })).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(
             body["error"]
@@ -789,6 +804,7 @@ mod tests {
     #[tokio::test]
     async fn a_claim_survives_a_restart() {
         let dir = TempDir::new();
+        let login = tid();
 
         // First run: backend claims and starts `login` against a durable store, then
         // drop the broker with the work still in flight.
@@ -797,7 +813,7 @@ mod tests {
         request(
             &state,
             "POST",
-            json!({ "task": "login", "owner": "backend", "state": "in_progress",
+            json!({ "task": login, "owner": "backend", "state": "in_progress",
                     "title": "login flow" }),
         )
         .await;
@@ -810,8 +826,8 @@ mod tests {
 
         // The claim survived: backend still holds `login`, in progress and titled.
         let (_, view) = request(&restarted, "GET", Value::Null).await;
-        assert_eq!(owner_of(&view, "login").as_deref(), Some("backend"));
-        let entry = entry_of(&view, "login").unwrap();
+        assert_eq!(owner_of(&view, &login).as_deref(), Some("backend"));
+        let entry = entry_of(&view, &login).unwrap();
         assert_eq!(entry["state"], "in_progress");
         assert_eq!(entry["title"], "login flow");
 
@@ -819,7 +835,7 @@ mod tests {
         let (status, body) = request(
             &restarted,
             "POST",
-            json!({ "task": "login", "owner": "frontend" }),
+            json!({ "task": login, "owner": "frontend" }),
         )
         .await;
         assert_eq!(
@@ -836,15 +852,16 @@ mod tests {
     #[tokio::test]
     async fn a_done_task_rebuilds_as_free_to_reclaim() {
         let dir = TempDir::new();
+        let api = tid();
 
         // backend claims `api` and finishes it, freeing the claim.
         let store = Arc::new(LogStore::open(&dir.0).unwrap());
         let state = AppState::with_storage(Config::default(), store);
-        request(&state, "POST", json!({ "task": "api", "owner": "backend" })).await;
+        request(&state, "POST", json!({ "task": api, "owner": "backend" })).await;
         request(
             &state,
             "POST",
-            json!({ "task": "api", "owner": "backend", "state": "done" }),
+            json!({ "task": api, "owner": "backend", "state": "done" }),
         )
         .await;
         drop(state);
@@ -856,7 +873,7 @@ mod tests {
         let (status, view) = request(
             &restarted,
             "POST",
-            json!({ "task": "api", "owner": "frontend" }),
+            json!({ "task": api, "owner": "frontend" }),
         )
         .await;
         assert_eq!(
@@ -864,7 +881,7 @@ mod tests {
             StatusCode::OK,
             "a rebuilt done task is free to reclaim"
         );
-        assert_eq!(owner_of(&view, "api").as_deref(), Some("frontend"));
+        assert_eq!(owner_of(&view, &api).as_deref(), Some("frontend"));
     }
 
     /// The entry keyed by `task` in a ledger view, if present.
@@ -875,12 +892,20 @@ mod tests {
             .find(|item| item["task"] == task)
     }
 
-    /// Posts an order from `from` to `channel` with `title`, driving the ledger
-    /// auto-seed (issue #184).
-    async fn post_order_to(state: &AppState, from: &str, channel: &str, title: &str) -> StatusCode {
+    /// Posts an order from `from` to `channel`, carrying `task` on the envelope
+    /// and `title` as its display, driving the ledger auto-seed (issues #184,
+    /// #183).
+    async fn post_order_to(
+        state: &AppState,
+        from: &str,
+        channel: &str,
+        task: &str,
+        title: &str,
+    ) -> StatusCode {
         let body = json!({
             "from": { "kind": "role", "id": from },
             "kind": "order",
+            "task": task,
             "title": title,
             "scope": "",
             "owned_paths": [],
@@ -900,65 +925,87 @@ mod tests {
             .status()
     }
 
-    /// Posts an order from `from` to `role`'s direct channel with `title`.
-    async fn post_order(state: &AppState, from: &str, role: &str, title: &str) -> StatusCode {
-        post_order_to(state, from, &format!("@{role}"), title).await
+    /// Posts an order from `from` to `role`'s direct channel, carrying `task`
+    /// and `title`.
+    async fn post_order(
+        state: &AppState,
+        from: &str,
+        role: &str,
+        task: &str,
+        title: &str,
+    ) -> StatusCode {
+        post_order_to(state, from, &format!("@{role}"), task, title).await
     }
 
     #[tokio::test]
-    async fn an_order_seeds_a_claim_for_the_recipient() {
+    async fn an_order_seeds_a_claim_keyed_by_the_orders_task_id() {
         let state = AppState::new(Config::default());
+        let task = tid();
 
         // The commander orders backend, with no manual claim following (issue #184).
+        // The seeded claim is keyed by the ORDER's envelope task id, titled by the
+        // order title (issue #183).
         assert_eq!(
-            post_order(&state, "commander", "backend", "login flow").await,
+            post_order(&state, "commander", "backend", &task, "login flow").await,
             StatusCode::CREATED,
         );
 
-        // The ledger already shows backend holding the work, claimed and titled.
+        // The ledger already shows backend holding the work, keyed by the id and
+        // titled by the order.
         let (_, view) = request(&state, "GET", Value::Null).await;
-        let entry = entry_of(&view, "login flow").expect("the order seeded a ledger claim");
+        let entry = entry_of(&view, &task).expect("the order seeded a ledger claim");
         assert_eq!(entry["owner"], "backend");
         assert_eq!(entry["state"], "claimed");
         assert_eq!(entry["title"], "login flow");
     }
 
     #[tokio::test]
-    async fn a_seeded_claim_rides_the_stream() {
+    async fn a_seeded_claim_rides_the_stream_with_the_task_on_the_envelope() {
         let state = AppState::new(Config::default());
         let mut stream = state.broadcast.subscribe();
+        let task = tid();
+        let task_id: TaskId = task.parse().unwrap();
 
-        post_order(&state, "commander", "backend", "login flow").await;
+        post_order(&state, "commander", "backend", &task, "login flow").await;
 
         // The order message, then the seeded ledger claim.
         let order = stream.try_recv().unwrap().event;
         assert!(matches!(order.kind, EventKind::Message(_)));
         let seeded = stream.try_recv().unwrap().event;
+        // The envelope carries the domain id, so a `?task=<id>` history read returns
+        // it (issue #183).
+        assert_eq!(
+            seeded.task,
+            Some(task_id),
+            "the seeded claim stamps the task id on the envelope"
+        );
         let EventKind::Ledger(claim) = seeded.kind else {
             panic!("expected a seeded ledger event, got {:?}", seeded.kind);
         };
         assert_eq!(claim.owner.as_str(), "backend");
         assert_eq!(claim.state, TaskState::Claimed);
-        assert_eq!(claim.task, "login flow");
+        assert_eq!(claim.task, task_id, "the domain task is the order's id");
+        assert_eq!(claim.title, "login flow", "titled by the order");
     }
 
     #[tokio::test]
     async fn a_re_order_does_not_regress_an_in_progress_claim() {
         let state = AppState::new(Config::default());
+        let task = tid();
 
         // The recipient has already started the work.
         request(
             &state,
             "POST",
-            json!({ "task": "login flow", "owner": "backend", "state": "in_progress",
+            json!({ "task": task, "owner": "backend", "state": "in_progress",
                     "title": "login flow" }),
         )
         .await;
 
-        // Re-ordering the same title must not reset the in-flight claim to `claimed`.
-        post_order(&state, "commander", "backend", "login flow").await;
+        // Re-ordering the same task id must not reset the in-flight claim to `claimed`.
+        post_order(&state, "commander", "backend", &task, "login flow").await;
         let (_, view) = request(&state, "GET", Value::Null).await;
-        let entry = entry_of(&view, "login flow").unwrap();
+        let entry = entry_of(&view, &task).unwrap();
         assert_eq!(
             entry["state"], "in_progress",
             "a re-order leaves an in-flight claim untouched"
@@ -969,21 +1016,22 @@ mod tests {
     #[tokio::test]
     async fn an_order_does_not_steal_a_task_another_role_holds() {
         let state = AppState::new(Config::default());
+        let task = tid();
 
         // qa already holds the work.
         request(
             &state,
             "POST",
-            json!({ "task": "login flow", "owner": "qa", "state": "in_progress" }),
+            json!({ "task": task, "owner": "qa", "state": "in_progress" }),
         )
         .await;
 
-        // Ordering the same title to backend must not take it from qa; that is a
+        // Ordering the same task id to backend must not take it from qa; that is a
         // reassignment the General does explicitly.
-        post_order(&state, "commander", "backend", "login flow").await;
+        post_order(&state, "commander", "backend", &task, "login flow").await;
         let (_, view) = request(&state, "GET", Value::Null).await;
         assert_eq!(
-            owner_of(&view, "login flow").as_deref(),
+            owner_of(&view, &task).as_deref(),
             Some("qa"),
             "the seed never steals a task another role holds"
         );
@@ -994,7 +1042,7 @@ mod tests {
         let state = AppState::new(Config::default());
 
         // A broadcast order names no single recipient to own the work.
-        post_order_to(&state, "commander", "all-units", "all hands").await;
+        post_order_to(&state, "commander", "all-units", &tid(), "all hands").await;
         let (_, view) = request(&state, "GET", Value::Null).await;
         assert!(
             view["tasks"].as_array().unwrap().is_empty(),

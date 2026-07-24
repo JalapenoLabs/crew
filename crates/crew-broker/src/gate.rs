@@ -24,7 +24,7 @@ use axum::{
     Json, Router,
 };
 use crew_core::{
-    Channel, ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender,
+    Channel, ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender, TaskId,
     Timestamp, Verdict, VerificationEvent, ALL_UNITS,
 };
 use serde::{Deserialize, Serialize};
@@ -54,8 +54,13 @@ async fn read(State(state): State<AppState>) -> Json<GateView> {
 struct Submission {
     /// The role submitting the work, which owns any rework.
     role: String,
-    /// The task, named by its title (the order's title).
-    task: String,
+    /// The task id, deserialized from its UUID string (issue #183). The
+    /// submitting role reuses the task it adopted from its order, so the
+    /// submission, its verdict, and its ledger claim share one id.
+    task: TaskId,
+    /// A short human title for the gate view; display only (issue #183).
+    #[serde(default)]
+    title: String,
     /// The acceptance criteria the work claims to meet; the verifier tries to
     /// break it against these.
     #[serde(default)]
@@ -79,14 +84,17 @@ async fn submit(
     JsonBody(request): JsonBody<Submission>,
 ) -> Result<Json<GateView>, ApiError> {
     let owner = RoleId::new(non_empty(&request.role, "role")?);
-    let task = non_empty(&request.task, "task")?.to_owned();
+    let task = request.task;
+    let title = request.title.trim().to_owned();
     let acceptance = request.acceptance.trim().to_owned();
 
-    state.submit_for_verification(task.clone(), owner.clone(), acceptance.clone());
+    state.submit_for_verification(task, title.clone(), owner.clone(), acceptance.clone());
     state.publish(verification_event(
         owner.clone(),
+        task,
         VerificationEvent {
-            task: task.clone(),
+            task,
+            title: title.clone(),
             owner: owner.clone(),
             verifier: None,
             verdict: Verdict::Submitted,
@@ -95,7 +103,8 @@ async fn submit(
     ));
 
     // A named reviewer is notified in its inbox; otherwise the submission is an
-    // open call the commander or a verifier picks up off the stream.
+    // open call the commander or a verifier picks up off the stream. The note
+    // renders the human title, not the raw id.
     if let Some(reviewer) = request
         .to
         .as_deref()
@@ -103,11 +112,22 @@ async fn submit(
         .filter(|to| !to.is_empty())
     {
         if let Some(Channel::Direct(reviewer)) = Channel::resolve(Some(reviewer), None, &owner) {
-            state.publish(review_request(&owner, &reviewer, &task, &acceptance));
+            let label = display_label(&title, task);
+            state.publish(review_request(&owner, &reviewer, &label, &acceptance));
         }
     }
 
     Ok(Json(GateView::from_state(&state)))
+}
+
+/// The human label for a gate note: the display title, or the task id when
+/// there is no title (issue #183).
+fn display_label(title: &str, task: TaskId) -> String {
+    if title.is_empty() {
+        task.to_string()
+    } else {
+        title.to_owned()
+    }
 }
 
 /// The `POST /gate/verdict` body: an independent verifier's judgment on a task.
@@ -115,8 +135,9 @@ async fn submit(
 struct VerdictReport {
     /// The role returning the verdict; it must not be the task's owner.
     role: String,
-    /// The task under verification, by title.
-    task: String,
+    /// The task id under verification, deserialized from its UUID string. The
+    /// verifier reads it from `crew_gate` (issue #183).
+    task: TaskId,
     /// Whether the verifier could not break it (`true`: done) or broke it
     /// (`false`).
     pass: bool,
@@ -141,7 +162,7 @@ async fn verdict(
     JsonBody(request): JsonBody<VerdictReport>,
 ) -> Result<Json<GateView>, ApiError> {
     let verifier = RoleId::new(non_empty(&request.role, "role")?);
-    let task = non_empty(&request.task, "task")?.to_owned();
+    let task = request.task;
     let failure = request.failure.trim().to_owned();
     if !request.pass && failure.is_empty() {
         return Err(ApiError::bad_request(
@@ -150,13 +171,15 @@ async fn verdict(
     }
 
     let outcome = state
-        .record_verdict(&task, verifier, request.pass, failure)
+        .record_verdict(task, verifier, request.pass, failure)
         .map_err(map_verdict_error)?;
 
     state.publish(verification_event(
         outcome.verifier.clone(),
+        task,
         VerificationEvent {
-            task: task.clone(),
+            task,
+            title: outcome.title.clone(),
             owner: outcome.owner.clone(),
             verifier: Some(outcome.verifier.clone()),
             verdict: outcome.verdict,
@@ -165,29 +188,32 @@ async fn verdict(
     ));
 
     // A failure returns the work to the owner with the specific failure, in its
-    // inbox.
+    // inbox, named by the human title rather than the raw id.
     if outcome.verdict == Verdict::Failed {
-        state.publish(handback_note(&outcome, &task));
+        let label = display_label(&outcome.title, task);
+        state.publish(handback_note(&outcome, &label));
     }
 
     Ok(Json(GateView::from_state(&state)))
 }
 
 /// A verification step as a first-class stream event, `from` a role, to
-/// `all-units`.
-fn verification_event(from: RoleId, event: VerificationEvent) -> Event {
+/// `all-units`, stamping the [`TaskId`] on the envelope so a `?task=<id>`
+/// history read returns it (issue #183).
+fn verification_event(from: RoleId, task: TaskId, event: VerificationEvent) -> Event {
     Event {
         ts: Timestamp::now(),
         from: Sender::Role(from),
         channel: ChannelId::new(ALL_UNITS),
-        task: None,
+        task: Some(task),
         kind: EventKind::Verification(event),
     }
 }
 
-/// The review-request note a submission sends to a named reviewer's inbox.
-fn review_request(owner: &RoleId, reviewer: &RoleId, task: &str, acceptance: &str) -> Event {
-    let mut body = format!("Please verify `{task}` before it is done.");
+/// The review-request note a submission sends to a named reviewer's inbox,
+/// naming the work by its human `label`.
+fn review_request(owner: &RoleId, reviewer: &RoleId, label: &str, acceptance: &str) -> Event {
+    let mut body = format!("Please verify `{label}` before it is done.");
     if !acceptance.is_empty() {
         let _ = write!(body, " Acceptance: {acceptance}.");
     }
@@ -198,10 +224,11 @@ fn review_request(owner: &RoleId, reviewer: &RoleId, task: &str, acceptance: &st
     note(owner.clone(), reviewer.clone(), body)
 }
 
-/// The actionable handback a failed verdict returns to the owner's inbox.
-fn handback_note(outcome: &VerdictOutcome, task: &str) -> Event {
+/// The actionable handback a failed verdict returns to the owner's inbox,
+/// naming the work by its human `label`.
+fn handback_note(outcome: &VerdictOutcome, label: &str) -> Event {
     let body = format!(
-        "Verification failed for `{task}`: {failure}. Returned for rework; fix it and \
+        "Verification failed for `{label}`: {failure}. Returned for rework; fix it and \
          resubmit with crew_submit.",
         failure = outcome.detail,
     );
@@ -253,15 +280,18 @@ fn non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str, ApiError> {
 /// The `GET /gate` response: every task under verification and its standing.
 #[derive(Debug, Serialize)]
 struct GateView {
-    /// The tasks under the gate, ordered by title.
+    /// The tasks under the gate, ordered by task id.
     tasks: Vec<TaskView>,
 }
 
 /// One task's standing in the done-gate.
 #[derive(Debug, Serialize)]
 struct TaskView {
-    /// The task title.
-    task: String,
+    /// The task's key: its [`TaskId`], serialized as a UUID string. The
+    /// verifier reads this to name the task on `crew_verdict` (issue #183).
+    task: TaskId,
+    /// A short human title for display, or empty.
+    title: String,
     /// The role that submitted it and owns any rework.
     owner: RoleId,
     /// The independent role that returned the latest verdict, if any.
@@ -282,6 +312,7 @@ impl GateView {
             .into_iter()
             .map(|(task, entry)| TaskView {
                 task,
+                title: entry.title,
                 owner: entry.owner,
                 verifier: entry.verifier,
                 verdict: entry.verdict,
@@ -300,11 +331,17 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
-    use crew_core::{Channel, EventKind, RoleId};
+    use crew_core::{Channel, EventKind, RoleId, TaskId};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
     use crate::{api, config::Config, state::AppState, store::LogStore};
+
+    /// A fresh task id as its UUID string, the key the gate now uses (issue
+    /// #183).
+    fn tid() -> String {
+        TaskId::new().to_string()
+    }
 
     async fn post(state: &AppState, path: &str, body: Value) -> (StatusCode, Value) {
         send(state, "POST", path, Some(body)).await
@@ -335,36 +372,40 @@ mod tests {
         )
     }
 
-    /// The one task in a gate view, by title.
+    /// The one task in a gate view, found by its display title (issue #183: the
+    /// key is now the id, the title is display).
     fn task_in<'a>(view: &'a Value, title: &str) -> &'a Value {
         view["tasks"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|t| t["task"] == title)
-            .unwrap_or_else(|| panic!("task `{title}` not in the gate view"))
+            .find(|t| t["title"] == title)
+            .unwrap_or_else(|| panic!("task titled `{title}` not in the gate view"))
     }
 
     #[tokio::test]
     async fn a_task_is_done_only_after_an_independent_pass() {
         let state = AppState::new(Config::default());
+        let login = tid();
 
-        // The owner submits; the task is awaiting a verdict, not done.
+        // The owner submits by id, titling it for display; the task is awaiting a
+        // verdict, not done.
         let (status, view) = post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "tokens expire" }),
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "tokens expire" }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(task_in(&view, "login")["verdict"], "submitted");
         assert_eq!(task_in(&view, "login")["owner"], "backend");
+        assert_eq!(task_in(&view, "login")["task"], login, "keyed by the id");
 
-        // An independent verifier passes it: now it is done.
+        // An independent verifier passes it by id: now it is done.
         let (status, view) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "login", "pass": true }),
+            json!({ "role": "qa", "task": login, "pass": true }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -377,19 +418,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_role_cannot_verify_its_own_work() {
+    async fn two_tasks_that_share_a_title_do_not_collide() {
+        // The core bug #183 fixes: keying by id, not title, means two distinct
+        // tasks that happen to carry the same human title are two separate gate
+        // entries rather than one clobbering the other.
         let state = AppState::new(Config::default());
+        let first = tid();
+        let second = tid();
+
+        for (task, owner) in [(&first, "backend"), (&second, "frontend")] {
+            let (status, _) = post(
+                &state,
+                "/gate/submit",
+                json!({ "role": owner, "task": task, "title": "add auth", "acceptance": "a" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        let view = get(&state, "/gate").await;
+        let tasks = view["tasks"].as_array().unwrap();
+        assert_eq!(
+            tasks.len(),
+            2,
+            "two tasks sharing a title are two entries, not one: {view}",
+        );
+        // Each id maps to its own owner, so neither clobbered the other.
+        let owner_of = |id: &str| {
+            tasks
+                .iter()
+                .find(|t| t["task"] == id)
+                .map(|t| t["owner"].as_str().unwrap().to_owned())
+        };
+        assert_eq!(owner_of(&first).as_deref(), Some("backend"));
+        assert_eq!(owner_of(&second).as_deref(), Some("frontend"));
+    }
+
+    #[tokio::test]
+    async fn a_submission_stamps_the_task_on_the_envelope() {
+        // The verification event carries the domain id on the envelope too, so a
+        // `GET /history?task=<id>` returns it (issue #183).
+        let state = AppState::new(Config::default());
+        let mut stream = state.broadcast.subscribe();
+        let login = tid();
+        let task_id: TaskId = login.parse().unwrap();
+
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "a" }),
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "a" }),
+        )
+        .await;
+
+        let submitted = stream.try_recv().unwrap().event;
+        assert_eq!(
+            submitted.task,
+            Some(task_id),
+            "the submission stamps the task id on the envelope"
+        );
+        let EventKind::Verification(event) = submitted.kind else {
+            panic!("expected a verification event");
+        };
+        assert_eq!(event.task, task_id, "the domain task is the id");
+        assert_eq!(event.title, "login", "the title rides along for display");
+    }
+
+    #[tokio::test]
+    async fn a_role_cannot_verify_its_own_work() {
+        let state = AppState::new(Config::default());
+        let login = tid();
+        post(
+            &state,
+            "/gate/submit",
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "a" }),
         )
         .await;
 
         let (status, body) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "backend", "task": "login", "pass": true }),
+            json!({ "role": "backend", "task": login, "pass": true }),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "self-verification is refused");
@@ -404,10 +512,11 @@ mod tests {
     async fn a_failed_verdict_hands_the_work_back_to_the_owner() {
         let state = AppState::new(Config::default());
         let mut stream = state.broadcast.subscribe();
+        let login = tid();
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "tokens expire" }),
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "tokens expire" }),
         )
         .await;
         // Drain the submission event.
@@ -416,7 +525,7 @@ mod tests {
         let (status, view) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "login", "pass": false, "failure": "tokens never expire" }),
+            json!({ "role": "qa", "task": login, "pass": false, "failure": "tokens never expire" }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -450,16 +559,17 @@ mod tests {
     #[tokio::test]
     async fn a_failing_verdict_without_a_failure_is_rejected() {
         let state = AppState::new(Config::default());
+        let login = tid();
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login" }),
+            json!({ "role": "backend", "task": login, "title": "login" }),
         )
         .await;
         let (status, _) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "login", "pass": false }),
+            json!({ "role": "qa", "task": login, "pass": false }),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -471,7 +581,7 @@ mod tests {
         let (status, _) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "ghost", "pass": true }),
+            json!({ "role": "qa", "task": tid(), "pass": true }),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -480,16 +590,17 @@ mod tests {
     #[tokio::test]
     async fn a_verdict_on_a_done_task_is_refused_until_resubmitted() {
         let state = AppState::new(Config::default());
+        let login = tid();
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "a" }),
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "a" }),
         )
         .await;
         post(
             &state,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "login", "pass": true }),
+            json!({ "role": "qa", "task": login, "pass": true }),
         )
         .await;
 
@@ -497,22 +608,22 @@ mod tests {
         let (status, _) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "security", "task": "login", "pass": false, "failure": "x" }),
+            json!({ "role": "security", "task": login, "pass": false, "failure": "x" }),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
 
-        // Resubmitting reopens the gate, and a fresh verdict lands.
+        // Resubmitting the same id reopens the gate, and a fresh verdict lands.
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "a" }),
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "a" }),
         )
         .await;
         let (status, view) = post(
             &state,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "login", "pass": true }),
+            json!({ "role": "qa", "task": login, "pass": true }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -527,7 +638,7 @@ mod tests {
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "tokens expire", "to": "qa" }),
+            json!({ "role": "backend", "task": tid(), "title": "login", "acceptance": "tokens expire", "to": "qa" }),
         )
         .await;
 
@@ -570,6 +681,7 @@ mod tests {
     #[tokio::test]
     async fn a_task_mid_verification_survives_a_restart() {
         let dir = TempDir::new();
+        let login = tid();
 
         // First run: submit a task for verification against a durable store, then drop
         // the broker with the task still awaiting a verdict.
@@ -578,7 +690,7 @@ mod tests {
         post(
             &state,
             "/gate/submit",
-            json!({ "role": "backend", "task": "login", "acceptance": "tokens expire" }),
+            json!({ "role": "backend", "task": login, "title": "login", "acceptance": "tokens expire" }),
         )
         .await;
         drop(state);
@@ -588,17 +700,18 @@ mod tests {
         let reopened = Arc::new(LogStore::open(&dir.0).unwrap());
         let restarted = AppState::with_storage(Config::default(), reopened);
 
-        // The submission survived: still awaiting a verdict, owned by backend.
+        // The submission survived: still awaiting a verdict, owned by backend, titled.
         let view = get(&restarted, "/gate").await;
         assert_eq!(task_in(&view, "login")["verdict"], "submitted");
         assert_eq!(task_in(&view, "login")["owner"], "backend");
+        assert_eq!(task_in(&view, "login")["task"], login, "keyed by the id");
 
         // The gate still enforces on the rebuilt task: the owner cannot self-verify it,
         // proving the owner (not just the task key) was restored.
         let (self_verdict, _) = post(
             &restarted,
             "/gate/verdict",
-            json!({ "role": "backend", "task": "login", "pass": true }),
+            json!({ "role": "backend", "task": login, "pass": true }),
         )
         .await;
         assert_eq!(
@@ -612,7 +725,7 @@ mod tests {
         let (status, view) = post(
             &restarted,
             "/gate/verdict",
-            json!({ "role": "qa", "task": "login", "pass": true }),
+            json!({ "role": "qa", "task": login, "pass": true }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);

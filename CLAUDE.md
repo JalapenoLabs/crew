@@ -374,8 +374,14 @@ task-scoped). Activity events thread the task the same way through `Event.task` 
 #24). The task is minted where work is assigned (issue #132): `crew_order` mints a
 `TaskId` and stamps it on the order, and the assigned role adopts it from its inbox
 (`Broker::inbox`) so its own `crew_send` / `crew_order` stamp the same id, correlation
-on the envelope rather than a role-to-task table. The shim persists the adopted task
-per role beside the inbox cursor. The fleet threads that same task onto the assignee's
+on the envelope rather than a role-to-task table. The done-gate and work ledger key by
+this same adopted `TaskId`, not a human title (issue #183): `crew_submit` and `crew_claim`
+reuse `self.task` (minting and adopting a fresh id only for genuinely ad-hoc work), so a
+claim -> in_progress -> done chain and its submission share one id with no extra
+bookkeeping, and cross-actor flows (`crew_verdict`, `crew reassign`) name the id
+explicitly, read from `crew_gate` / `crew_ledger`. The human title rides along as display
+only. The shim persists the adopted task per role beside the inbox cursor. The fleet
+threads that same task onto the assignee's
 own supervisor events (issue #223): a fleet-wide order watcher reads the order stream
 (`RosterClient::history_since`, as the stall monitor does) and, on an order directed to
 a role it manages, stamps the order's `TaskId` onto that role's `RosterClient`
@@ -523,15 +529,21 @@ The adversarial done-gate makes "done" mean verified, not asserted (issue #47), 
 confident-but-wrong work never ships. A role does not report its own task done: it submits
 the finished work with `crew_submit` (or `crew submit`), an independent role tries to break
 it against the acceptance criteria and records a pass or a failure with `crew_verdict`, and
-`crew_gate` reads the live gate. The gate lives in `AppState` behind one lock (mirroring the
-#41 pause `control`): `POST /gate/submit` records the task awaiting verification and, when a
-reviewer is named, notifies it; `POST /gate/verdict` holds the lock across the check and the
-update, refusing a verdict from the task's own owner (409) or on a task not awaiting one, so
-a task reaches `Passed` only when a role other than the owner could not break it. A `Failed`
-verdict posts an actionable handback to the owner's inbox with the specific failure. Each
-step is a first-class `verification` event (a new `EventKind::Verification` carrying the
-task, owner, verifier, verdict, and detail) published to `all-units` and filterable with
-`GET /history?kind=verification`; `GET /gate` reads live ownership. Like the situation board
+`crew_gate` reads the live gate. The gate keys by the work's `TaskId`, not its human title
+(issue #183): `crew_submit` reuses the task the role adopted from its order (issue #132),
+passing the human title as display, and the verifier reads that id from `crew_gate` and
+names it on `crew_verdict`, so a cross-actor verdict correlates to the id the owner
+submitted under and two tasks that share a title never collide. The gate lives in `AppState`
+behind one lock (mirroring the #41 pause `control`): `POST /gate/submit` records the task
+awaiting verification and, when a reviewer is named, notifies it; `POST /gate/verdict` holds
+the lock across the check and the update, refusing a verdict from the task's own owner (409)
+or on a task not awaiting one, so a task reaches `Passed` only when a role other than the
+owner could not break it. A `Failed` verdict posts an actionable handback to the owner's
+inbox with the specific failure. Each step is a first-class `verification` event (an
+`EventKind::Verification` carrying the task id, the display title, owner, verifier, verdict,
+and detail, with the id stamped on the `Event.task` envelope too so `?task=<id>` history
+returns it) published to `all-units` and filterable with `GET /history?kind=verification`;
+`GET /gate` reads live ownership. Like the situation board
 (issue #49), the gate is a **projection of those `verification` events**: `AppState::with_storage`
 rebuilds it (`Gate::rebuild`) by folding the log the store just replayed, the latest event
 per task winning, so a task mid-verification survives a broker restart rather than being lost
