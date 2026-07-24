@@ -379,13 +379,15 @@ crew and does two things:
   the crew is bounded, not overrun. A ceiling fires its stop and its event once, not on
   every later spend.
 
-The token feed is the one deferred piece: the supervisor's `Fleet::record_spend` seam,
-wrapped by `record_usage`, is driven by each turn's usage once the stream-json activity
-parser lands (issue #24); wiring that per-turn call is issue #114. Until then the accounting,
-enforcement, and reporting are exercised against spend fed to the seam directly. An unbounded
-crew (no budget and no caps) records nothing, so a crew that opts out
-pays no overhead. A live `GET /budget` snapshot for the cockpit is a natural next step once
-the cockpit (issue #51) lands; the spend already rides the stream in the meantime.
+The token feed is live: the supervisor's `Fleet::record_spend` seam, wrapped by
+`record_usage`, is driven by each turn's usage the stream-json activity parser distills from
+captured stdout (issues #24, #177). The parser reads the `result` line's `usage` (its token
+fields summed) and `total_cost_usd`, and the activity forwarder calls `record_usage(role,
+tokens, cost_micro_usd)` per turn, so budget enforcement charges against real spend rather
+than a directly poked seam. An unbounded crew (no budget and no caps) records nothing, so a
+crew that opts out pays no overhead. A live `GET /budget` snapshot for the cockpit is a
+natural next step once the cockpit (issue #51) lands; the spend already rides the stream in
+the meantime.
 
 ## Cost, tokens, and time telemetry
 
@@ -396,17 +398,15 @@ are projections of the one stream.
 - **Idle-stop on quiet.** A role that goes quiet past its `idle_stop` timeout is stopped by
   the supervisor's lifecycle machine (issue #22), keeping its roster entry so a restart is
   fast. This is what makes an idle role cost nothing; see `docs/config.md` (`idle_stop`).
-- **Usage telemetry.** The supervisor carries the reporting seam, `Fleet::record_usage`,
-  which emits a per-turn `telemetry` event (from the role, to `all-units`) over
-  `POST /telemetry` whether or not a budget is set, and charges the same tokens against the
-  budget. Cost rides the wire as micro-USD (millionths of a dollar) so it sums exactly. A
-  turn's tokens and cost come from the agent's stream-json, so the seam stays unwired until
-  the activity parser lands (issue #24): calling `record_usage` per turn is issue #114, paused
-  on #24. When #24 arrives it reads the stream-json `result` event's `usage` tokens and
-  `total_cost_usd` (converted to micro-USD) and calls `record_usage(role, tokens,
-  cost_micro_usd)`. Working time needs no feed, since the broker reads it from the role's
-  `lifecycle` events already on the stream. Until then the rollup below is exercised against
-  usage fed to the seam directly.
+- **Usage telemetry.** The supervisor's `Fleet::record_usage` emits a per-turn `telemetry`
+  event (from the role, to `all-units`) over `POST /telemetry` whether or not a budget is
+  set, and charges the same tokens against the budget. Cost rides the wire as micro-USD
+  (millionths of a dollar) so it sums exactly. A turn's tokens and cost come from the agent's
+  stream-json: the activity parser reads the `result` line's `usage` tokens (its fields
+  summed) and `total_cost_usd` (converted to micro-USD), and the activity forwarder calls
+  `record_usage(role, tokens, cost_micro_usd)` per turn (issues #24, #177). Working time
+  needs no feed, since the broker reads it from the role's `lifecycle` events already on the
+  stream.
 
 The broker folds these into a rollup and serves it at **`GET /stats`**: per role and in
 aggregate, the cumulative tokens, cost (micro-USD), and working seconds. Working time is a

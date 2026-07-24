@@ -37,6 +37,7 @@
 //! stub run identical code.
 
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader, Read},
     process::Child,
     sync::{
@@ -181,154 +182,42 @@ pub struct Incident {
     pub recovery: Recovery,
 }
 
-/// A running fleet: one lifecycle-managed agent per role, backed by a watchdog.
+/// Charges a turn's usage against the crew budget and enforces the caps (issues
+/// #54, #177).
 ///
-/// Launch it with the roles resolved into [`PreparedAgent`]s; every agent
-/// starts [`Stopped`](AgentState::Stopped), so an unused role costs nothing.
-/// Drive an agent with [`start`](Fleet::start) and [`stop`](Fleet::stop), and
-/// read recorded deaths with [`incidents`](Fleet::incidents). Each agent's
-/// captured stream-json is parsed into activity events on the broker (issue
-/// #24; see the `activity` module). Dropping the fleet, like
-/// [`shutdown`](Fleet::shutdown), stops every agent and deregisters its role.
-#[derive(Debug)]
-pub struct Fleet {
-    drivers: Vec<AgentDriver>,
-    incidents: Arc<Mutex<Vec<Incident>>>,
-    watchdog_stop: Sender<()>,
-    watchdog: Option<JoinHandle<()>>,
-    /// The coordination stalls the monitor has detected (issue #48), shared
-    /// with its thread and read by [`stalls`](Fleet::stalls).
-    stalls: Arc<Mutex<Vec<Stall>>>,
-    stall_stop: Sender<()>,
-    stall_monitor: Option<JoinHandle<()>>,
-    /// The per-role git worktrees to clean up on stand-down (issue #43); empty
-    /// unless the crew opted into worktree isolation.
-    worktrees: Vec<Worktree>,
-    /// The crew's token budget (issue #54): the accountant
-    /// [`record_spend`](Fleet::record_spend) charges spend against,
-    /// idle-stopping a role or the crew at a cap. Unbounded by default; the
-    /// crew opts in through the config.
+/// The shared core behind [`Fleet::record_usage`]: it holds the crew
+/// [`Budget`], a [`RosterClient`] for the `telemetry` and `budget` stream
+/// events, and each role's driver command channel for idle-stopping on a
+/// breach. The [`Fleet`] delegates its usage methods here, and the activity
+/// forwarder (issue #24) holds a clone, so a per-turn usage parsed from an
+/// agent's stream-json charges spend directly rather than only when a caller
+/// pokes the seam (issue #177). Cloning shares the one budget and the one set
+/// of channels, so every clone charges the same accountant and stops the same
+/// drivers.
+#[derive(Debug, Clone)]
+pub(crate) struct UsageRecorder {
+    /// The crew's token budget: the accountant spend is charged against.
+    /// Unbounded by default; the crew opts in through the config.
     budget: Arc<Mutex<Budget>>,
-    /// A client for surfacing budget reports on the stream, shared with the
-    /// fleet threads.
+    /// A client for surfacing the `telemetry` and `budget` events on the
+    /// stream.
     roster: RosterClient,
+    /// Each role's driver command channel, for idle-stopping it on a breach.
+    stops: Arc<BTreeMap<RoleId, Sender<Command>>>,
 }
 
-impl Fleet {
-    /// Launches a lifecycle driver per agent (each stopped) and the fleet
-    /// watchdog.
-    ///
-    /// No process is spawned and no role is registered until
-    /// [`start`](Fleet::start), so launching an idle fleet is free.
-    #[must_use]
-    pub fn launch(
-        roster: &RosterClient,
-        agents: Vec<PreparedAgent>,
-        policy: LifecyclePolicy,
-    ) -> Self {
-        let (sink, output) = mpsc::channel();
-        let incidents = Arc::new(Mutex::new(Vec::new()));
-
-        // Parse each agent's captured stream-json into activity events on the broker
-        // (issue #24). The forwarder owns the receiver and ends when every agent has
-        // stopped and dropped its capture sink.
-        crate::activity::forward_activity(output, roster.clone());
-
-        let mut drivers = Vec::with_capacity(agents.len());
-        let mut shared = Vec::with_capacity(agents.len());
-        for prepared in agents {
-            let driver = AgentDriver::spawn(
-                roster.clone(),
-                prepared,
-                policy,
-                sink.clone(),
-                Arc::clone(&incidents),
-            );
-            shared.push(Arc::clone(&driver.shared));
-            drivers.push(driver);
-        }
-
-        let (watchdog_stop, stop) = mpsc::channel();
-        let watchdog = {
-            let roster = roster.clone();
-            let incidents = Arc::clone(&incidents);
-            let timeout = policy.watchdog_timeout;
-            thread::spawn(move || run_watchdog(&shared, &roster, &incidents, timeout, &stop))
-        };
-
-        // The coordination-stall monitor: the fleet-wide half of the defibrillator that
-        // watches the stream for a crew stuck waiting on itself (issue #48).
-        let stalls = Arc::new(Mutex::new(Vec::new()));
-        let (stall_stop, stall_stop_rx) = mpsc::channel();
-        let stall_monitor = {
-            let roles: Vec<RoleId> = drivers
-                .iter()
-                .map(|driver| driver.shared.role.clone())
-                .collect();
-            let monitor = StallMonitor::new(
-                roster.clone(),
-                roles,
-                policy.stall_timeout,
-                policy.stall_scan_interval,
-                Arc::clone(&stalls),
-            );
-            thread::spawn(move || monitor.run(&stall_stop_rx))
-        };
-
-        Self {
-            drivers,
-            incidents,
-            watchdog_stop,
-            watchdog: Some(watchdog),
-            stalls,
-            stall_stop,
-            stall_monitor: Some(stall_monitor),
-            worktrees: Vec::new(),
-            budget: Arc::new(Mutex::new(Budget::default())),
-            roster: roster.clone(),
-        }
-    }
-
-    /// Hands the fleet the per-role worktrees to clean up on stand-down (issue
-    /// #43).
-    ///
-    /// The supervisor creates them before launch; the fleet owns them so it can
-    /// remove each unchanged one once its agent has stopped (see
-    /// [`shutdown`](Fleet::shutdown)).
-    #[must_use]
-    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
-        self.worktrees = worktrees;
-        self
-    }
-
-    /// Sets the crew token budget the fleet enforces (issue #54).
-    ///
-    /// Build it from the crew config with
-    /// [`CrewConfig::budget`](crew_core::CrewConfig::budget). An unbounded
-    /// budget (no crew-wide budget and no per-role cap) leaves
-    /// [`record_spend`](Fleet::record_spend) a no-op, so a crew that opts out
-    /// pays nothing.
-    #[must_use]
-    pub fn with_budget(self, budget: Budget) -> Self {
-        *self.budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;
-        self
-    }
-
+impl UsageRecorder {
     /// Records a turn's `tokens` and `cost_micro_usd` for `role`: telemetry
-    /// then budget.
-    ///
-    /// This is the full turn-usage seam the activity parser (issue #24) drives
-    /// with each turn's usage once it lands. It surfaces a `telemetry`
-    /// event so per-role and aggregate spend is legible off the stream
-    /// regardless of any budget (issue #55, feeding `GET /stats`), then
-    /// charges the tokens against the crew budget, idle-stopping a role
-    /// or the crew at a cap (issue #54). Reporting the telemetry is best-effort
-    /// (a failure is logged, not fatal); the budget enforcement still runs.
+    /// then budget. See [`Fleet::record_usage`].
     ///
     /// # Errors
-    /// Returns an error if idle-stopping a role on a budget breach fails (its
-    /// driver is gone).
-    pub fn record_usage(&self, role: &RoleId, tokens: u64, cost_micro_usd: u64) -> Result<()> {
+    /// Returns an error if idle-stopping a role on a budget breach fails.
+    pub(crate) fn record_usage(
+        &self,
+        role: &RoleId,
+        tokens: u64,
+        cost_micro_usd: u64,
+    ) -> Result<()> {
         // Always surface the usage, so an unbounded crew is still legible (issue #55).
         let telemetry = TelemetryEvent {
             role: role.clone(),
@@ -348,20 +237,11 @@ impl Fleet {
     }
 
     /// Charges `tokens` of spend to `role` against the crew budget, enforcing
-    /// the caps.
-    ///
-    /// Surfaces a `budget` event so spend against budget is visible on the
-    /// stream, and when the spend reaches a ceiling idle-stops the role
-    /// (its own cap) or the whole crew (the crew-wide budget) rather than
-    /// overrun (issue #54). An unbounded crew is a no-op.
-    ///
-    /// Prefer [`record_usage`](Fleet::record_usage), which also emits the
-    /// per-turn telemetry the `GET /stats` rollup folds; this is the
-    /// budget-only path.
+    /// the caps. See [`Fleet::record_spend`].
     ///
     /// # Errors
-    /// Returns an error if idle-stopping a role fails (its driver is gone).
-    pub fn record_spend(&self, role: &RoleId, tokens: u64) -> Result<()> {
+    /// Returns an error if idle-stopping a role on a breach fails.
+    fn record_spend(&self, role: &RoleId, tokens: u64) -> Result<()> {
         let spend = {
             let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
             if !budget.is_bounded() {
@@ -405,13 +285,214 @@ impl Fleet {
         }
     }
 
-    /// Idle-stops every agent in the fleet, keeping each roster entry (a crew
-    /// budget hit).
+    /// Idle-stops every role in the crew, keeping each roster entry (a crew
+    /// budget breach).
     fn stop_all(&self) -> Result<()> {
-        for driver in &self.drivers {
-            self.command(&driver.shared.role, Command::Stop)?;
+        for role in self.stops.keys() {
+            self.stop(role)?;
         }
         Ok(())
+    }
+
+    /// Idle-stops `role`, keeping its roster entry (a role cap breach).
+    ///
+    /// # Errors
+    /// Returns an error if `role` is not in the fleet, or its driver has
+    /// stopped.
+    fn stop(&self, role: &RoleId) -> Result<()> {
+        let commands = self
+            .stops
+            .get(role)
+            .ok_or_else(|| eyre!("no such role `{role}` in the fleet"))?;
+        commands
+            .send(Command::Stop)
+            .map_err(|_error| eyre!("the `{role}` lifecycle driver has stopped"))
+    }
+}
+
+/// A running fleet: one lifecycle-managed agent per role, backed by a watchdog.
+///
+/// Launch it with the roles resolved into [`PreparedAgent`]s; every agent
+/// starts [`Stopped`](AgentState::Stopped), so an unused role costs nothing.
+/// Drive an agent with [`start`](Fleet::start) and [`stop`](Fleet::stop), and
+/// read recorded deaths with [`incidents`](Fleet::incidents). Each agent's
+/// captured stream-json is parsed into activity events on the broker (issue
+/// #24; see the `activity` module). Dropping the fleet, like
+/// [`shutdown`](Fleet::shutdown), stops every agent and deregisters its role.
+#[derive(Debug)]
+pub struct Fleet {
+    drivers: Vec<AgentDriver>,
+    incidents: Arc<Mutex<Vec<Incident>>>,
+    watchdog_stop: Sender<()>,
+    watchdog: Option<JoinHandle<()>>,
+    /// The coordination stalls the monitor has detected (issue #48), shared
+    /// with its thread and read by [`stalls`](Fleet::stalls).
+    stalls: Arc<Mutex<Vec<Stall>>>,
+    stall_stop: Sender<()>,
+    stall_monitor: Option<JoinHandle<()>>,
+    /// The per-role git worktrees to clean up on stand-down (issue #43); empty
+    /// unless the crew opted into worktree isolation.
+    worktrees: Vec<Worktree>,
+    /// Charges each turn's usage against the crew budget and enforces the caps
+    /// (issues #54, #177). Shared with the activity forwarder, so a per-turn
+    /// usage parsed from an agent's stream-json charges spend directly; the
+    /// [`record_usage`](Fleet::record_usage) and
+    /// [`record_spend`](Fleet::record_spend) methods delegate to it.
+    recorder: UsageRecorder,
+}
+
+impl Fleet {
+    /// Launches a lifecycle driver per agent (each stopped) and the fleet
+    /// watchdog.
+    ///
+    /// No process is spawned and no role is registered until
+    /// [`start`](Fleet::start), so launching an idle fleet is free.
+    #[must_use]
+    pub fn launch(
+        roster: &RosterClient,
+        agents: Vec<PreparedAgent>,
+        policy: LifecyclePolicy,
+    ) -> Self {
+        let (sink, output) = mpsc::channel();
+        let incidents = Arc::new(Mutex::new(Vec::new()));
+
+        // Spawn the drivers first, collecting each role's command channel, so the usage
+        // recorder can idle-stop a role on a budget breach (issue #54).
+        let mut drivers = Vec::with_capacity(agents.len());
+        let mut shared = Vec::with_capacity(agents.len());
+        let mut stops = BTreeMap::new();
+        for prepared in agents {
+            let driver = AgentDriver::spawn(
+                roster.clone(),
+                prepared,
+                policy,
+                sink.clone(),
+                Arc::clone(&incidents),
+            );
+            stops.insert(driver.shared.role.clone(), driver.commands.clone());
+            shared.push(Arc::clone(&driver.shared));
+            drivers.push(driver);
+        }
+
+        // The usage recorder charges each turn's spend and idle-stops on a cap. It
+        // starts unbounded (the crew opts in through `with_budget`), and the
+        // forwarder shares it.
+        let recorder = UsageRecorder {
+            budget: Arc::new(Mutex::new(Budget::default())),
+            roster: roster.clone(),
+            stops: Arc::new(stops),
+        };
+
+        // Parse each agent's captured stream-json into activity events on the broker
+        // (issue #24) and charge each turn's usage against the crew budget (issue
+        // #177). The forwarder owns the receiver and ends when every agent has
+        // stopped and dropped its capture sink.
+        crate::activity::forward_activity(output, roster.clone(), recorder.clone());
+
+        let (watchdog_stop, stop) = mpsc::channel();
+        let watchdog = {
+            let roster = roster.clone();
+            let incidents = Arc::clone(&incidents);
+            let timeout = policy.watchdog_timeout;
+            thread::spawn(move || run_watchdog(&shared, &roster, &incidents, timeout, &stop))
+        };
+
+        // The coordination-stall monitor: the fleet-wide half of the defibrillator that
+        // watches the stream for a crew stuck waiting on itself (issue #48).
+        let stalls = Arc::new(Mutex::new(Vec::new()));
+        let (stall_stop, stall_stop_rx) = mpsc::channel();
+        let stall_monitor = {
+            let roles: Vec<RoleId> = drivers
+                .iter()
+                .map(|driver| driver.shared.role.clone())
+                .collect();
+            let monitor = StallMonitor::new(
+                roster.clone(),
+                roles,
+                policy.stall_timeout,
+                policy.stall_scan_interval,
+                Arc::clone(&stalls),
+            );
+            thread::spawn(move || monitor.run(&stall_stop_rx))
+        };
+
+        Self {
+            drivers,
+            incidents,
+            watchdog_stop,
+            watchdog: Some(watchdog),
+            stalls,
+            stall_stop,
+            stall_monitor: Some(stall_monitor),
+            worktrees: Vec::new(),
+            recorder,
+        }
+    }
+
+    /// Hands the fleet the per-role worktrees to clean up on stand-down (issue
+    /// #43).
+    ///
+    /// The supervisor creates them before launch; the fleet owns them so it can
+    /// remove each unchanged one once its agent has stopped (see
+    /// [`shutdown`](Fleet::shutdown)).
+    #[must_use]
+    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> Self {
+        self.worktrees = worktrees;
+        self
+    }
+
+    /// Sets the crew token budget the fleet enforces (issue #54).
+    ///
+    /// Build it from the crew config with
+    /// [`CrewConfig::budget`](crew_core::CrewConfig::budget). An unbounded
+    /// budget (no crew-wide budget and no per-role cap) leaves
+    /// [`record_spend`](Fleet::record_spend) a no-op, so a crew that opts out
+    /// pays nothing.
+    #[must_use]
+    pub fn with_budget(self, budget: Budget) -> Self {
+        *self
+            .recorder
+            .budget
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = budget;
+        self
+    }
+
+    /// Records a turn's `tokens` and `cost_micro_usd` for `role`: telemetry
+    /// then budget.
+    ///
+    /// This is the full turn-usage seam the activity parser (issue #24) drives
+    /// with each turn's usage: the forwarder calls it as it parses a `result`
+    /// line (issue #177). It surfaces a `telemetry` event so per-role and
+    /// aggregate spend is legible off the stream regardless of any budget
+    /// (issue #55, feeding `GET /stats`), then charges the tokens against the
+    /// crew budget, idle-stopping a role or the crew at a cap (issue #54).
+    /// Reporting the telemetry is best-effort (a failure is logged, not
+    /// fatal); the budget enforcement still runs.
+    ///
+    /// # Errors
+    /// Returns an error if idle-stopping a role on a budget breach fails (its
+    /// driver is gone).
+    pub fn record_usage(&self, role: &RoleId, tokens: u64, cost_micro_usd: u64) -> Result<()> {
+        self.recorder.record_usage(role, tokens, cost_micro_usd)
+    }
+
+    /// Charges `tokens` of spend to `role` against the crew budget, enforcing
+    /// the caps.
+    ///
+    /// Surfaces a `budget` event so spend against budget is visible on the
+    /// stream, and when the spend reaches a ceiling idle-stops the role
+    /// (its own cap) or the whole crew (the crew-wide budget) rather than
+    /// overrun (issue #54). An unbounded crew is a no-op.
+    ///
+    /// Prefer [`record_usage`](Fleet::record_usage), which also emits the
+    /// per-turn telemetry the `GET /stats` rollup folds; this is the
+    /// budget-only path.
+    ///
+    /// # Errors
+    /// Returns an error if idle-stopping a role fails (its driver is gone).
+    pub fn record_spend(&self, role: &RoleId, tokens: u64) -> Result<()> {
+        self.recorder.record_spend(role, tokens)
     }
 
     /// Starts (or restarts) `role`'s agent: lazy start on first work, restart
