@@ -213,6 +213,20 @@ budget, revives it (a `recovered` event); it also records the diagnostic inciden
 behind each death. So the stream and the live count reflect lazy start, idle-stop,
 restart, and death-and-recovery with no separate signal.
 
+## The terminal cockpit
+
+`crew top` is the live terminal cockpit, htop for the crew, mission control in a plain
+terminal with no Seraphim required (issue #51). It is purely a rendering of the stream and
+the roster, so it captures nothing new: it seeds a state model once from the `/roster` (the
+roles, their liveness, and the live count) and `/stats` (per-role tokens and cost) snapshots,
+then folds each live `/stream` event, a `lifecycle` moving a role's status, an `activity`
+setting its current action, a `telemetry` adding to its tokens and cost, and a `message`
+landing on the flow. It shows every role's status, action, and spend over the recent message
+feed, with the live count and the aggregate cost in the header, and lets the operator filter
+the feed by role or channel and drill into one role's activity. The state model and the
+render are pure and unit-tested; the terminal shell reuses the same `/stream` reader `crew
+watch` and `crew notify` do, so the display updates by push, not by polling.
+
 ## Work ledger
 
 The **work ledger** keeps two roles from grabbing the same work or editing the same

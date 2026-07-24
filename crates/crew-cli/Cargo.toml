@@ -42,3 +42,7 @@ ureq.workspace = true
 # broker's JSON.
 serde_json.workspace = true
 chrono.workspace = true
+# `crew top` (issue #51) deserializes the `/roster` and `/stats` snapshots into typed
+# rows with serde derive, and renders the live cockpit with ratatui.
+serde.workspace = true
+ratatui.workspace = true

@@ -53,6 +53,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 ureq = { version = "2", default-features = false }
 # The CLI argument parser: derive the `crew` command surface (up, down, ...).
 clap = { version = "4", features = ["derive"] }
+# The live terminal cockpit `crew top` (issue #51): a TUI over the event stream.
+# It bundles crossterm (re-exported as `ratatui::crossterm`) for terminal control and
+# key input, so no separate terminal dependency is needed.
+ratatui = "0.29"
 # Internal crates. The domain graph flows toward crew-core; crew-cli is a consumer
 # only, never a dependency. crew-telemetry is a standalone infrastructure crate the
 # binaries call to initialize logging. crew-substrate is the umbrella that re-exports

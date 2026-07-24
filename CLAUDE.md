@@ -164,7 +164,9 @@ The full design is in `docs/architecture.md`. In short:
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
   (auto-reconnecting like `tail -F`, resuming from `Last-Event-ID` without loss, issue #117),
-  `crew notify` to push a native notification on each actionable moment (a question, a
+  `crew top` for the live terminal cockpit (issue #51: htop for the crew, every role's status,
+  action, and spend plus the message flow, updating live off the stream), `crew notify` to
+  push a native notification on each actionable moment (a question, a
   death, a stand-down, a coordination stall, a mission completion) over that same stream, and
   `crew usage` to read the shared-subscription usage gauge (issue #56).
 - **Coworker skill (`skills/coworker/`):** the upgraded `coworker` skill (issue #37),
@@ -742,6 +744,23 @@ drops the terminal bell. Each push prints a log line (the durable record), sound
 present. An approval pending (issue #40) plugs into the same classifier when its event
 lands, exactly as the stall moment did once the monitor began surfacing stalls. See
 `docs/observability.md` (push notifications).
+
+`crew top` is the live terminal cockpit, htop for the crew (issue #51, `src/top/`). It shows
+every role with its status (working / idle / stopped / dead, plus a paused flag), current
+action, tokens, and cost, over a live message feed, with a header carrying the live count and
+the aggregate spend. The split is the repo's usual pure-core-plus-thin-shell: `top::cockpit`
+is a pure state model that seeds from the `/roster` (issue #32) and `/stats` (issue #55)
+snapshots and then folds each live `/stream` event (a `lifecycle` moves a role's status, an
+`activity` sets its current action, a `telemetry` adds to its tokens and cost, a `message`
+lands on the feed), so it captures nothing new and is fully unit-tested; `top::render` draws
+it with `ratatui` (exercised headlessly against a `TestBackend`), and `top::run` is the thin
+terminal shell, a background thread tailing `/stream` through `broker::tail_events` (the same
+reader `crew watch` and `crew notify` share) and feeding events down a channel while the main
+loop drains them, redraws, and handles keys. The display updates by push, never by polling;
+the loop's tick is only a render cadence. Keys: up/down select a role, Enter drills into its
+activity, `f` filters the feed to the selected role, `c` cycles the channel filter, `x`
+clears it, and `q` / Esc / Ctrl-C quits. A dead broker fails fast on the initial roster fetch,
+before any terminal is touched. See `docs/observability.md` (the cockpit).
 
 **Running `crewd`:** `cargo run --bin crewd`. It binds `127.0.0.1:2739` by
 default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,

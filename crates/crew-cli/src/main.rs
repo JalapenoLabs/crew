@@ -42,6 +42,7 @@ mod notify;
 mod paths;
 mod pause;
 mod shim;
+mod top;
 mod up;
 mod usage;
 
@@ -122,6 +123,14 @@ enum Command {
         /// Watch one role's self-filtered inbox instead of the whole firehose.
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
+    /// Live terminal cockpit: htop for your crew, every role's status, action,
+    /// and spend, updating live (issue #51).
+    Top {
         /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
         /// environment).
         #[arg(long, value_name = "URL")]
@@ -375,6 +384,7 @@ fn main() -> Result<()> {
         } => shim::answer(to.as_deref(), channel.as_deref(), &body, &in_reply_to),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
+        Command::Top { broker } => top::run(broker.as_deref()),
         Command::Notify {
             mute,
             no_sound,
