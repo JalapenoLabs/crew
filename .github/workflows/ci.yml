@@ -1,10 +1,13 @@
 name: CI
 
-# Check every pull request and every push to the long-lived branches (issue #5).
+# Check every pull request and every push to `main`, the trunk. crew is
+# main-only: the scaffolded `develop` branch was vestigial (nothing deployed from
+# it and every PR merged to main), so it is dropped from this trigger to stop the
+# silent drift (issue #272; the two-branch setup came from issue #5).
 on:
   pull_request:
   push:
-    branches: [main, develop]
+    branches: [main]
 
 # A newer push to the same ref supersedes an in-flight run.
 concurrency:
