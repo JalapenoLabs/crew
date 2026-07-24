@@ -14,3 +14,7 @@ workspace = true
 [dependencies]
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Parse the JSON log output in tests (the `json` format from issue #213).
+serde_json.workspace = true

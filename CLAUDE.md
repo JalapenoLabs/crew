@@ -253,7 +253,9 @@ standalone, publishable crate. See `docs/architecture.md` (Distribution).
 
 Design of record plus the workspace scaffold. The crates build/test green.
 `crew-telemetry` carries the shared logging init and the `crew` binary boots with
-structured logging (issue #4); `crew-core` carries the shared, strongly-typed
+structured logging (issue #4): human-readable by default, or one JSON object per
+event when `CREW_LOG_FORMAT=json`, so a daemonized crewd feeds machine-parseable logs
+into aggregation (issue #213). `crew-core` carries the shared, strongly-typed
 vocabulary (issue #6): the identifier newtypes (`RoleId`, `ChannelId`,
 `MessageId`, `TaskId`), the `Timestamp` wrapper, the `Sender`, and the `Event` /
 `EventKind` (`Message` with a `MessageKind`, `Lifecycle`, `Activity`, `Ledger`, `Boundary`,
@@ -949,7 +951,9 @@ already-running `crewd` or starts its own.
   (M-MIMALLOC-APPS); logging is **tracing** with structured, named events
   `<component>.<operation>.<state>` and `{{property}}` message templates
   (M-LOG-STRUCTURED). Binaries call `crew_telemetry::init()` once at startup, and
-  any secret in a field goes through `crew_telemetry::redact::secret` first.
+  any secret in a field goes through `crew_telemetry::redact::secret` first. The
+  filter reads from `RUST_LOG` (default `info`), and `CREW_LOG_FORMAT=json` swaps the
+  human-readable output for one JSON object per event for log aggregation (issue #213).
 - **Library errors are canonical structs** (issue #193, M-ERRORS-CANONICAL-STRUCTS):
   the substrate's public entry points return per-crate error structs, not eyre, so
   they read as a publishable library. `crew_broker::ServeError` (from `run` /
