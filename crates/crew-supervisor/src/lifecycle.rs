@@ -31,6 +31,14 @@
 //!   wedged lets it through, so the watchdog reaps the orphan and hands the
 //!   role to the operator.
 //!
+//! Pause enforcement (issue #187): a fleet-wide pause monitor reads the
+//! broker's pause control (issue #41) from the roster and enforces it at the
+//! process level, so the brake and kill switch are more than the role-card
+//! contract. It records whether the crew has gated each role (so the driver
+//! refuses to spawn it) and reaps a still-working gated agent directly, like
+//! the watchdog, so a non-compliant or wedged agent is actually stopped rather
+//! than merely told to idle.
+//!
 //! Every transition marks the broker roster, so the roster and the stream
 //! reflect it (see `docs/observability.md`). The mechanics build on the
 //! [`spawn`](crate::spawn) primitives, so a real `claude` process and a test
@@ -41,6 +49,7 @@ use std::{
     io::{BufRead, BufReader, Read},
     process::Child,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
         Arc, Mutex, PoisonError,
     },
@@ -102,6 +111,10 @@ pub struct LifecyclePolicy {
     /// stall evolves over minutes, so a frequent scan would only re-read
     /// the same history.
     pub stall_scan_interval: Duration,
+    /// How often the pause monitor reads the roster to enforce the crew's brake
+    /// and kill switch at the process level (issue #187). A brief interval
+    /// keeps the response prompt without polling the broker each driver tick.
+    pub pause_poll_interval: Duration,
 }
 
 impl Default for LifecyclePolicy {
@@ -124,6 +137,10 @@ impl Default for LifecyclePolicy {
             // shift on it; scanning once a minute keeps the read light.
             stall_timeout: Duration::from_secs(10 * 60),
             stall_scan_interval: Duration::from_secs(60),
+            // A pause or stand-down should take hold within a second, well below the
+            // idle-stop and heartbeat clocks, so the process-level brake feels immediate
+            // without hammering the roster.
+            pause_poll_interval: Duration::from_secs(1),
         }
     }
 }
@@ -330,6 +347,10 @@ pub struct Fleet {
     stalls: Arc<Mutex<Vec<Stall>>>,
     stall_stop: Sender<()>,
     stall_monitor: Option<JoinHandle<()>>,
+    /// The pause monitor that enforces the crew's brake and kill switch at the
+    /// process level (issue #187), stopped and joined on shutdown.
+    pause_stop: Sender<()>,
+    pause_monitor: Option<JoinHandle<()>>,
     /// The per-role git worktrees to clean up on stand-down (issue #43); empty
     /// unless the crew opted into worktree isolation.
     worktrees: Vec<Worktree>,
@@ -389,12 +410,28 @@ impl Fleet {
         // stopped and dropped its capture sink.
         crate::activity::forward_activity(output, roster.clone(), recorder.clone());
 
+        // The pause monitor and the watchdog both read the agents' shared state, so
+        // hand each its own set of clones before the watchdog closure takes
+        // ownership.
+        let pause_shared: Vec<Arc<AgentShared>> = shared.iter().map(Arc::clone).collect();
+
         let (watchdog_stop, stop) = mpsc::channel();
         let watchdog = {
             let roster = roster.clone();
             let incidents = Arc::clone(&incidents);
             let timeout = policy.watchdog_timeout;
             thread::spawn(move || run_watchdog(&shared, &roster, &incidents, timeout, &stop))
+        };
+
+        // The pause monitor: enforce the crew's brake and kill switch at the process
+        // level (issue #187), reaping a role the crew has paused or stood down.
+        let (pause_stop, pause_stop_rx) = mpsc::channel();
+        let pause_monitor = {
+            let roster = roster.clone();
+            let interval = policy.pause_poll_interval;
+            thread::spawn(move || {
+                run_pause_monitor(&pause_shared, &roster, interval, &pause_stop_rx);
+            })
         };
 
         // The coordination-stall monitor: the fleet-wide half of the defibrillator that
@@ -424,6 +461,8 @@ impl Fleet {
             stalls,
             stall_stop,
             stall_monitor: Some(stall_monitor),
+            pause_stop,
+            pause_monitor: Some(pause_monitor),
             worktrees: Vec::new(),
             recorder,
         }
@@ -585,6 +624,7 @@ impl Fleet {
         }
         let _ = self.watchdog_stop.send(());
         let _ = self.stall_stop.send(());
+        let _ = self.pause_stop.send(());
         for driver in &mut self.drivers {
             if let Some(handle) = driver.handle.take() {
                 let _ = handle.join();
@@ -594,6 +634,9 @@ impl Fleet {
             let _ = handle.join();
         }
         if let Some(handle) = self.stall_monitor.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.pause_monitor.take() {
             let _ = handle.join();
         }
         // Every agent has stopped, so its worktree is no longer in use: clean it up.
@@ -629,6 +672,7 @@ impl Drop for Fleet {
         }
         let _ = self.watchdog_stop.send(());
         let _ = self.stall_stop.send(());
+        let _ = self.pause_stop.send(());
     }
 }
 
@@ -683,6 +727,11 @@ struct AgentShared {
     last_activity: Mutex<Instant>,
     /// The current process, when running.
     child: Mutex<Option<Child>>,
+    /// Whether the crew's pause control gates this role (issue #187). The pause
+    /// monitor sets it from the roster, and the driver refuses to spawn while
+    /// it is set, so a paused or stood-down role is held at the process
+    /// level.
+    paused: AtomicBool,
 }
 
 impl AgentShared {
@@ -692,11 +741,23 @@ impl AgentShared {
             state: Mutex::new(AgentState::Stopped),
             last_activity: Mutex::new(Instant::now()),
             child: Mutex::new(None),
+            paused: AtomicBool::new(false),
         }
     }
 
     fn state(&self) -> AgentState {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the crew's pause control currently gates this role.
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Records whether the crew's pause control gates this role, as the pause
+    /// monitor last read it from the roster.
+    fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
     }
 
     fn set_state(&self, state: AgentState) {
@@ -845,6 +906,59 @@ fn run_watchdog(
     }
 }
 
+/// The fleet pause monitor: enforce the crew's brake and kill switch at the
+/// process level (issue #187).
+///
+/// The broker's pause control (issue #41) gates work in state and by the
+/// role-card contract, but a non-compliant or wedged agent would keep running.
+/// This reads the roster pause state on each tick and, for every agent, records
+/// whether the crew has gated it (so its driver refuses to spawn it) and reaps
+/// a still-working gated agent, so a pause or a stand-down actually stops the
+/// process rather than only asking the agent to idle. It reaps directly, like
+/// the watchdog, so the kill switch holds even if a driver has wedged.
+///
+/// Reading the roster fails soft: a broker blip skips the tick and the
+/// last-known gates hold, so a transient error never spuriously un-gates the
+/// crew. Setting the state before reaping keeps the driver's own poll from
+/// mistaking the held process for a crash to defibrillate.
+fn run_pause_monitor(
+    agents: &[Arc<AgentShared>],
+    roster: &RosterClient,
+    interval: Duration,
+    stop: &Receiver<()>,
+) {
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(interval) {
+        let Ok(snapshot) = roster.pause_snapshot() else {
+            continue;
+        };
+        for shared in agents {
+            let gated = snapshot.is_gated(&shared.role);
+            shared.set_paused(gated);
+            if gated && shared.state() == AgentState::Working {
+                // Mark stopped before reaping, so the driver's poll does not read the
+                // reaped process as a crash and try to revive it.
+                shared.set_state(AgentState::Stopped);
+                shared.reap();
+                if let Err(err) = roster.mark(&shared.role, Liveness::Stopped) {
+                    event!(
+                        name: "supervisor.agent.roster.failed",
+                        Level::WARN,
+                        crew.role = %shared.role,
+                        error = %err,
+                        "could not mark `{{crew.role}}` stopped after a pause hold",
+                    );
+                }
+                event!(
+                    name: "supervisor.pause.held",
+                    Level::INFO,
+                    crew.role = %shared.role,
+                    "held `{{crew.role}}` at the process level: the crew paused it",
+                );
+            }
+        }
+    }
+}
+
 /// One agent's lifecycle state machine, owned by its driver thread.
 struct AgentLifecycle {
     shared: Arc<AgentShared>,
@@ -881,8 +995,19 @@ impl AgentLifecycle {
 
     /// Starts or restarts the agent on demand, resetting the recovery budget.
     ///
-    /// A no-op if it is already running.
+    /// A no-op if it is already running, or if the crew's pause control gates
+    /// this role: the Fleet refuses to feed a paused role, so the brake and
+    /// kill switch hold even against a start (issue #187).
     fn ensure_running(&mut self) -> Result<()> {
+        if self.shared.is_paused() {
+            event!(
+                name: "supervisor.agent.pause.held",
+                Level::INFO,
+                crew.role = %self.shared.role,
+                "not starting `{{crew.role}}`: the crew has it paused",
+            );
+            return Ok(());
+        }
         if self.shared.state() == AgentState::Working {
             return Ok(());
         }
