@@ -21,18 +21,21 @@
 //!
 //! Defibrillator (issue #23), mirroring Seraphim's: layered detection recovers
 //! an agent whose turn died, whether it **crashed** (its process exited) or
-//! **hung** (its process is alive but silent past the `heartbeat_timeout`).
+//! **hung** (its process is alive but silent mid-turn past the
+//! `heartbeat_timeout`).
 //!
-//! - **In-turn heartbeat.** Each driver polls its agent for a crash or a hang.
+//! - **In-turn heartbeat.** Each driver polls its agent, reading its silence
+//!   against the turn boundaries the activity parser marks (issue #24):
+//!   mid-turn silence is a hang, a quiet spell between turns is an idle-stop.
 //!   On a death it reaps the orphaned process, records an [`Incident`] with the
 //!   diagnostic detail, marks the role dead (a `died` event), and revives it (a
 //!   `recovered` event) while it has recovery budget; once the budget is spent
 //!   it stays dead and is handed to the operator.
 //! - **Background watchdog.** A single fleet-wide thread catches a working
-//!   agent that went silent past the longer `watchdog_timeout`, which the
-//!   in-turn heartbeat should have caught first; only a driver that has itself
-//!   wedged lets it through, so the watchdog reaps the orphan and hands the
-//!   role to the operator.
+//!   agent silent past the longer `watchdog_timeout`, which a live driver
+//!   should have handled first; only a wedged driver lets it through. It reads
+//!   the same turn state to finish that driver's job: a mid-turn hang is reaped
+//!   and handed to the operator, a between-turns idle is parked.
 //!
 //! Pause enforcement (issue #187): a fleet-wide pause monitor reads the
 //! broker's pause control (issue #41) from the roster and enforces it at the
@@ -61,8 +64,8 @@ use std::{
 };
 
 use crew_core::{
-    Budget, BudgetEvent, BudgetScope, Channel, ChannelId, Event, EventKind, MessageId, RoleId,
-    TelemetryEvent, Timestamp,
+    Activity, Budget, BudgetEvent, BudgetScope, Channel, ChannelId, Event, EventKind, MessageId,
+    RoleId, TelemetryEvent, Timestamp,
 };
 use eyre::{eyre, Result};
 use tracing::{event, Level};
@@ -84,25 +87,26 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// The lifecycle and defibrillator policy: the timeouts and the recovery
 /// budget.
 ///
-/// The three silence timeouts share one clock (the agent's last output). Which
-/// fires first is set by their relative order: with the defaults `idle_timeout`
-/// is shortest, so a quiet agent parks (idle-stop) rather than being
-/// force-recovered, and the `heartbeat_timeout` catches a hang only where
-/// idle-stop is lengthened or disabled. A crash (an exited process) is
-/// recovered regardless of the timeouts.
+/// The three silence timeouts share one clock (the agent's last output), and
+/// the activity parser's turn boundaries (issue #24) decide which applies.
+/// Silence mid-turn is a hang the `heartbeat_timeout` force-recovers; silence
+/// between turns is idleness the `idle_timeout` parks. The `watchdog_timeout`
+/// backs both from the fleet when a driver itself wedges, and sits above the
+/// `heartbeat_timeout` so a live driver acts first. A crash (an exited process)
+/// is recovered regardless of the timeouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecyclePolicy {
-    /// How long an agent may be quiet before it is idle-stopped.
+    /// How long an agent may be quiet between turns before it is idle-stopped.
     pub idle_timeout: Duration,
-    /// How long a working agent may be silent before it is presumed hung and
-    /// the defibrillator reaps it. Precise hang-versus-idle discrimination
-    /// needs the activity parser's turn boundaries (issue #24); until then
-    /// this is a coarse output-silence heartbeat.
+    /// How long an agent may be silent mid-turn before it is presumed hung and
+    /// the defibrillator recovers it. The activity parser's turn boundaries
+    /// (issue #24) scope this to in-turn silence, so a hang is told apart from
+    /// an agent quietly idle between turns.
     pub heartbeat_timeout: Duration,
-    /// How long a working agent may be silent before the fleet watchdog reaps
-    /// it as a backstop. Strictly greater than
-    /// [`heartbeat_timeout`](Self::heartbeat_timeout) in production, so a
-    /// live driver always defibrillates a hang first.
+    /// How long a working agent may be silent before the fleet watchdog steps
+    /// in as a backstop, telling a mid-turn hang from a between-turns idle.
+    /// Strictly greater than [`heartbeat_timeout`](Self::heartbeat_timeout) in
+    /// production, so a live driver always acts first.
     pub watchdog_timeout: Duration,
     /// How many times a dead agent may be revived before it is left for the
     /// operator, so a crash or hang loop cannot recover forever.
@@ -179,7 +183,8 @@ pub enum AgentState {
 pub enum DeathCause {
     /// The process exited unexpectedly.
     Crashed,
-    /// The process was alive but produced no output past the heartbeat timeout.
+    /// The process was alive but produced no output mid-turn past the heartbeat
+    /// timeout.
     Hung,
     /// The driver itself stalled, so the fleet watchdog reaped the orphaned
     /// process.
@@ -767,6 +772,12 @@ struct AgentShared {
     /// When the agent last produced output, the clock the heartbeat and
     /// watchdog read.
     last_activity: Mutex<Instant>,
+    /// Whether the agent is mid-turn: `true` from a turn's
+    /// [`TurnStarted`](Activity::TurnStarted) until its
+    /// [`TurnEnded`](Activity::TurnEnded) (issue #24). It tells silence
+    /// mid-turn (a hang, to recover) from silence between turns (idleness, to
+    /// park), so the driver and watchdog stop treating every quiet agent alike.
+    in_turn: AtomicBool,
     /// The current process, when running.
     child: Mutex<Option<Child>>,
     /// Whether the crew's pause control gates this role (issue #187). The pause
@@ -782,6 +793,7 @@ impl AgentShared {
             role,
             state: Mutex::new(AgentState::Stopped),
             last_activity: Mutex::new(Instant::now()),
+            in_turn: AtomicBool::new(false),
             child: Mutex::new(None),
             paused: AtomicBool::new(false),
         }
@@ -819,6 +831,22 @@ impl AgentShared {
             .last_activity
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the agent is between a turn's start and its end.
+    fn in_turn(&self) -> bool {
+        self.in_turn.load(Ordering::Relaxed)
+    }
+
+    /// Marks the agent as having opened a turn (its `TurnStarted`).
+    fn enter_turn(&self) {
+        self.in_turn.store(true, Ordering::Relaxed);
+    }
+
+    /// Marks the agent as having closed a turn (its `TurnEnded`), or as not yet
+    /// in one after a fresh spawn.
+    fn leave_turn(&self) {
+        self.in_turn.store(false, Ordering::Relaxed);
     }
 
     fn set_child(&self, child: Child) {
@@ -890,17 +918,17 @@ fn drive(mut agent: AgentLifecycle, inbox: &Receiver<Command>) {
     }
 }
 
-/// The fleet watchdog: reap any working agent whose driver failed to handle its
-/// death.
+/// The fleet watchdog: back up a wedged driver, telling a hang from an idle.
 ///
 /// It scans every agent's output-silence clock. Because `watchdog_timeout` is
-/// longer than the in-turn `heartbeat_timeout`, a live driver always
-/// defibrillates a hang first (which resets the clock) or parks the agent
-/// (which leaves `Working`); only a driver that has itself wedged lets an agent
-/// stay working and silent this long. So the watchdog reaps the orphan and
-/// hands the role to the operator rather than trying to revive it through a
-/// driver it cannot trust. Its actions are idempotent, so the rare overlap with
-/// a live driver is harmless.
+/// longer than the in-turn `heartbeat_timeout`, a live driver always acts first
+/// (recovering a hang or parking an idle, either of which resets or clears the
+/// clock); only a driver that has itself wedged lets an agent stay working and
+/// silent this long. The watchdog then reads the agent's turn state (issue #24)
+/// to do what that driver would have: a silent mid-turn agent is a hang, reaped
+/// and handed to the operator rather than revived through a driver it cannot
+/// trust; a silent between-turns agent is merely idle, so it is parked. Its
+/// actions are idempotent, so the rare overlap with a live driver is harmless.
 fn run_watchdog(
     agents: &[Arc<AgentShared>],
     roster: &RosterClient,
@@ -919,31 +947,50 @@ fn run_watchdog(
             if now.duration_since(shared.last_activity()) < watchdog_timeout {
                 continue;
             }
-            shared.reap();
-            let detail = format!(
-                "no output for over {}s and the driver did not recover it; \
-                 reaped the orphaned process and handed it to the operator",
-                watchdog_timeout.as_secs(),
-            );
-            event!(
-                name: "supervisor.watchdog.reaped",
-                Level::WARN,
-                crew.role = %shared.role,
-                "the watchdog reaped `{{crew.role}}`; its driver stalled",
-            );
-            // Record before the roster death event, so `died` on the stream never
-            // arrives ahead of the incident behind it.
-            incidents
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(Incident {
-                    role: shared.role.clone(),
-                    cause: DeathCause::Wedged,
-                    detail,
-                    recovery: Recovery::HandedOff,
-                });
-            shared.set_state(AgentState::Dead);
-            let _ = roster.mark(&shared.role, Liveness::Dead);
+            if shared.in_turn() {
+                // Silent mid-turn with a wedged driver: a hang. Reap the orphan and hand
+                // the role to the operator, since the driver cannot be trusted to revive
+                // it.
+                shared.reap();
+                let detail = format!(
+                    "no output for over {}s and the driver did not recover it; \
+                     reaped the orphaned process and handed it to the operator",
+                    watchdog_timeout.as_secs(),
+                );
+                event!(
+                    name: "supervisor.watchdog.reaped",
+                    Level::WARN,
+                    crew.role = %shared.role,
+                    "the watchdog reaped `{{crew.role}}`; its driver stalled",
+                );
+                // Record before the roster death event, so `died` on the stream never
+                // arrives ahead of the incident behind it.
+                incidents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(Incident {
+                        role: shared.role.clone(),
+                        cause: DeathCause::Wedged,
+                        detail,
+                        recovery: Recovery::HandedOff,
+                    });
+                shared.set_state(AgentState::Dead);
+                let _ = roster.mark(&shared.role, Liveness::Dead);
+            } else {
+                // Silent between turns with a wedged driver: merely idle. Park it the way
+                // the driver's idle-stop would have, not as a death. Set the state before
+                // reaping (as the pause monitor does), so the driver's own poll cannot
+                // mistake the parked process for a crash to defibrillate.
+                shared.set_state(AgentState::Idle);
+                shared.reap();
+                event!(
+                    name: "supervisor.watchdog.parked",
+                    Level::INFO,
+                    crew.role = %shared.role,
+                    "the watchdog parked idle `{{crew.role}}`; its driver stalled",
+                );
+                let _ = roster.mark(&shared.role, Liveness::Idle);
+            }
         }
     }
 }
@@ -1185,6 +1232,9 @@ impl AgentLifecycle {
         }
         self.shared.set_child(child);
         self.shared.touch();
+        // A fresh process has not opened a turn yet; clear any stale flag a prior hung
+        // turn left set, so its own `init` is what marks it mid-turn.
+        self.shared.leave_turn();
         // Set state before notifying the roster, so observing the roster change implies
         // the state has caught up.
         self.shared.set_state(AgentState::Working);
@@ -1299,7 +1349,14 @@ impl AgentLifecycle {
         }
     }
 
-    /// One tick: recover a crash or a hang, else idle-stop when quiet.
+    /// One tick: recover a crash, recover a mid-turn hang, or park a
+    /// between-turns idle.
+    ///
+    /// Silence is read against the turn state (issue #24), not by which timeout
+    /// is shortest: mid-turn silence is a hang the `heartbeat_timeout`
+    /// recovers, between-turns silence is idleness the `idle_timeout` parks. So
+    /// a quiet agent stuck mid-turn comes back instead of parking, however
+    /// short the idle clock.
     fn poll(&mut self, now: Instant) {
         if self.shared.state() != AgentState::Working {
             return;
@@ -1309,11 +1366,11 @@ impl AgentLifecycle {
             return;
         }
         let silent = now.duration_since(self.shared.last_activity());
-        if silent >= self.policy.heartbeat_timeout {
-            self.defibrillate(DeathCause::Hung);
-            return;
-        }
-        if silent >= self.policy.idle_timeout {
+        if self.shared.in_turn() {
+            if silent >= self.policy.heartbeat_timeout {
+                self.defibrillate(DeathCause::Hung);
+            }
+        } else if silent >= self.policy.idle_timeout {
             self.idle_stop();
         }
     }
@@ -1333,9 +1390,17 @@ impl AgentLifecycle {
     }
 }
 
-/// Reads `pipe` line by line on a detached thread, sending each line to `sink`
-/// and stamping the shared activity clock so output defers the idle-stop and
-/// the heartbeat.
+/// Reads `pipe` line by line on a detached thread, forwarding each line and
+/// tracking the agent's activity clock and turn state from it.
+///
+/// Every line stamps the shared activity clock, so output defers the idle-stop
+/// and the heartbeat. A stdout line also updates the mid-turn flag from the
+/// activity parser's turn boundaries (issue #24): the session `init` opens a
+/// turn, the `result` line closes it. Only stdout carries the stream-json, so
+/// stderr never moves the turn state. The parse here mirrors the fleet's
+/// [`forward_activity`](crate::activity::forward_activity), keeping one
+/// authority for what a line means; agent output is sparse, so the second parse
+/// is off any hot path.
 ///
 /// Ends at EOF (the process closed the stream, i.e. exited) or once the
 /// receiver is gone, so it never outlives its process.
@@ -1349,6 +1414,15 @@ fn capture(
         for line in BufReader::new(pipe).lines() {
             let Ok(line) = line else { break };
             shared.touch();
+            if stream == OutputStream::Stdout {
+                for activity in crate::activity::parse(&line) {
+                    match activity {
+                        Activity::TurnStarted => shared.enter_turn(),
+                        Activity::TurnEnded => shared.leave_turn(),
+                        _ => {}
+                    }
+                }
+            }
             let captured = Captured {
                 role: shared.role.clone(),
                 stream,

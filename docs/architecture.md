@@ -128,16 +128,18 @@ driver thread:
 The **defibrillator** recovers an agent whose turn died mid-flight, mirroring
 Seraphim's (issue #23). Detection is layered:
 
-- **In-turn heartbeat.** Each driver polls its agent. It reaps a turn that **crashed**
-  (its process exited) or **hung** (its process is alive but silent past the
+- **In-turn heartbeat.** Each driver polls its agent, reading its silence against the
+  activity parser's turn boundaries (issue #24). It reaps a turn that **crashed** (its
+  process exited) or **hung** (its process is alive but silent mid-turn past the
   `heartbeat_timeout`), records an incident with the diagnostic detail, marks the role
   dead, and revives it while it has recovery budget; once the budget is spent it stays
-  dead and is handed to the operator.
+  dead and is handed to the operator. A quiet spell between turns is idleness, not a
+  hang, so it parks the agent (idle-stop) rather than recovering it.
 - **Background watchdog.** A single fleet-wide thread catches a working agent silent
   past the longer `watchdog_timeout`, which the in-turn heartbeat should have caught
-  first; only a driver that has itself wedged lets it through, so the watchdog reaps
-  the orphan and hands the role to the operator rather than trusting the driver to
-  revive it.
+  first; only a driver that has itself wedged lets it through. It reads the same turn
+  state to finish that driver's job: a mid-turn hang is reaped and handed to the
+  operator, a between-turns idle is parked.
 
 Every transition marks the broker roster, so the roster and the stream carry the
 matching `lifecycle` event (started / idle / stopped / restarted / died / recovered):
@@ -146,10 +148,11 @@ role coming back to `working`), and the live count and every activity view stay 
 projection of that one stream. Recorded incidents (read with `Fleet::incidents`) give
 the operator the diagnostic behind each death. The policy is configurable, defaulting
 to a five-minute idle-stop, a twenty-minute heartbeat under a twenty-five-minute
-watchdog, and three recoveries. The activity parser now puts turn boundaries on the
-stream (issue #24), but the watchdog does not yet key on them for precise hang-versus-idle
-discrimination; until it does, the heartbeat is a coarse output-silence signal, so by
-default a quiet agent parks (idle-stop) rather than being force-recovered.
+watchdog, and three recoveries. The three silence clocks key on the activity parser's
+turn boundaries (issue #24): silence mid-turn is a hang the heartbeat force-recovers,
+silence between turns is idleness the idle-stop parks. So a quiet agent stuck mid-turn is
+recovered rather than parked, and the watchdog makes the same call, reaping a mid-turn
+hang but parking a between-turns idle.
 
 The supervisor targets Claude Code by default. A Codex agent (a runtime without MCP)
 reaches the same broker through the CLI shim instead of MCP tools (issue #28), so a

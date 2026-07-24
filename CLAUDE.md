@@ -635,7 +635,7 @@ Recording is best-effort: a broker hiccup is logged, never fatal.
 
 The **defibrillator** (issue #23) recovers an agent whose turn died mid-flight,
 mirroring Seraphim's, with layered detection: each driver's in-turn **heartbeat**
-reaps a turn that crashed (its process exited) or hung (alive but silent past
+reaps a turn that crashed (its process exited) or hung (alive but silent mid-turn past
 `heartbeat_timeout`), and a fleet-wide **watchdog** backs the drivers up for a working
 agent silent past the longer `watchdog_timeout`, which only a wedged driver lets
 through. On a death it records an `Incident` with the diagnostic detail (readable via
@@ -646,10 +646,11 @@ stream carry the matching `lifecycle` event (started / idle / stopped / restarte
 died / recovered): the broker derives `recovered` from a `dead` role coming back to
 `working` (issue #23 adds the `Recovered` variant to `crew_core::Lifecycle`). The
 `LifecyclePolicy` defaults to a five-minute idle-stop, a twenty-minute heartbeat under
-a twenty-five-minute watchdog, and three recoveries. The activity parser now puts turn
-boundaries on the stream (issue #24), but the watchdog does not yet key on them for precise
-hang-versus-idle discrimination, so by default a quiet agent still parks rather than being
-force-recovered. (Wiring the watchdog to those turn boundaries is a later cleanup.)
+a twenty-five-minute watchdog, and three recoveries. The three silence clocks key on the
+activity parser's turn boundaries (issue #24): silence mid-turn is a hang the heartbeat
+force-recovers, silence between turns is idleness the idle-stop parks. So a quiet agent
+stuck mid-turn is recovered rather than parked, and the watchdog makes the same call when it
+backs up a wedged driver, reaping a mid-turn hang but parking a between-turns idle.
 
 The Fleet also enforces the crew's brake and kill switch at the process level, not only via
 the agent contract (issue #187). A fleet-wide **pause monitor** thread reads the pause state

@@ -10,7 +10,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{lifecycle_events, liveness, start_broker, stub, wait_until};
+use common::{lifecycle_events, liveness, start_broker, stub, wait_until, TURN_CLOSE, TURN_OPEN};
 use crew_core::RoleId;
 use crew_supervisor::{AgentState, DeathCause, Fleet, LifecyclePolicy, Recovery, RosterClient};
 
@@ -71,8 +71,8 @@ fn a_hung_agent_is_detected_by_the_heartbeat_and_recovered() {
     let roster = RosterClient::new(base.clone());
     let backend = RoleId::new("backend");
 
-    // The heartbeat is short and fires before idle-stop, so a silent-but-alive
-    // process is a hang, not idle. One recovery, then hand off.
+    // The agent is mid-turn, so its silence is a hang the heartbeat recovers, not
+    // an idle to park. One recovery, then hand off.
     let policy = LifecyclePolicy {
         idle_timeout: NEVER,
         heartbeat_timeout: Duration::from_millis(300),
@@ -80,8 +80,12 @@ fn a_hung_agent_is_detected_by_the_heartbeat_and_recovered() {
         max_recoveries: 1,
         ..LifecyclePolicy::default()
     };
-    // The stub is alive but silent: a turn hung mid-flight.
-    let fleet = Fleet::launch(&roster, vec![stub("backend", "sleep 300")], policy);
+    // The stub opens a turn (an `init`), then goes silent: a turn hung mid-flight.
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub("backend", &format!("echo '{TURN_OPEN}'; sleep 300"))],
+        policy,
+    );
 
     fleet.start(&backend).unwrap();
 
@@ -123,7 +127,13 @@ fn the_watchdog_reaps_an_agent_the_in_turn_path_missed() {
         max_recoveries: 3,
         ..LifecyclePolicy::default()
     };
-    let fleet = Fleet::launch(&roster, vec![stub("docs", "sleep 300")], policy);
+    // The stub opens a turn (an `init`), then goes silent: a hang mid-turn that a
+    // wedged driver leaves for the watchdog.
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub("docs", &format!("echo '{TURN_OPEN}'; sleep 300"))],
+        policy,
+    );
 
     fleet.start(&docs).unwrap();
 
@@ -141,6 +151,104 @@ fn the_watchdog_reaps_an_agent_the_in_turn_path_missed() {
     assert_eq!(incidents.len(), 1);
     assert_eq!(incidents[0].cause, DeathCause::Wedged);
     assert_eq!(incidents[0].recovery, Recovery::HandedOff);
+
+    fleet.shutdown();
+}
+
+#[test]
+fn a_quiet_mid_turn_agent_is_recovered_not_idle_stopped() {
+    // Issue #217: a mid-turn agent that goes silent is hung, not idle, even when
+    // the idle-stop clock is the shorter one. The driver recovers it rather than
+    // parking it, so its in-flight work resumes instead of stalling.
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+    let backend = RoleId::new("backend");
+
+    // Idle-stop is shorter than the heartbeat, so the raw output-silence clock
+    // would have parked this agent first; its turn state must override that.
+    let policy = LifecyclePolicy {
+        idle_timeout: Duration::from_millis(300),
+        heartbeat_timeout: Duration::from_millis(700),
+        watchdog_timeout: NEVER,
+        max_recoveries: 1,
+        ..LifecyclePolicy::default()
+    };
+    // Open a turn, then go silent mid-turn.
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub("backend", &format!("echo '{TURN_OPEN}'; sleep 300"))],
+        policy,
+    );
+
+    fleet.start(&backend).unwrap();
+
+    // It is recovered as a hang and, its budget spent, handed off dead; it never
+    // parks idle, the way the shorter idle clock alone would have made it.
+    assert!(
+        wait_until(|| lifecycle_events(&base) == ["started", "died", "recovered", "died"]),
+        "a mid-turn hang is recovered, not idle-stopped; got {:?}",
+        lifecycle_events(&base),
+    );
+    assert!(
+        !lifecycle_events(&base).iter().any(|event| event == "idle"),
+        "a mid-turn agent is never parked idle; got {:?}",
+        lifecycle_events(&base),
+    );
+    assert_eq!(liveness(&base, "backend").as_deref(), Some("dead"));
+    let incidents = fleet.incidents();
+    assert!(
+        incidents
+            .iter()
+            .all(|incident| incident.cause == DeathCause::Hung),
+        "the mid-turn silence is diagnosed as a hang, not idleness",
+    );
+
+    fleet.shutdown();
+}
+
+#[test]
+fn the_watchdog_parks_a_quiet_between_turns_agent() {
+    // Issue #217: the watchdog tells a hang from an idle. An agent that finished
+    // its turn (an `init` then a `result`) and went quiet is idle, so a watchdog
+    // backing up a wedged driver parks it rather than reaping it as a death.
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+    let docs = RoleId::new("docs");
+
+    // Disable the driver's own idle-stop and heartbeat (huge timeouts), so only the
+    // watchdog acts, standing in for a driver that has wedged.
+    let policy = LifecyclePolicy {
+        idle_timeout: NEVER,
+        heartbeat_timeout: NEVER,
+        watchdog_timeout: Duration::from_millis(300),
+        max_recoveries: 3,
+        ..LifecyclePolicy::default()
+    };
+    // Open then close a turn, then go quiet: idle between turns, not hung.
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub(
+            "docs",
+            &format!("echo '{TURN_OPEN}'; echo '{TURN_CLOSE}'; sleep 300"),
+        )],
+        policy,
+    );
+
+    fleet.start(&docs).unwrap();
+
+    // The watchdog parks it idle, keeping its roster entry: no death, no incident.
+    assert!(
+        wait_until(|| liveness(&base, "docs").as_deref() == Some("idle")),
+        "the watchdog parks a between-turns idle agent; got {:?}",
+        liveness(&base, "docs"),
+    );
+    assert_eq!(fleet.state(&docs), Some(AgentState::Idle));
+    assert!(
+        !lifecycle_events(&base).iter().any(|event| event == "died"),
+        "a between-turns idle agent is not reaped as a death; got {:?}",
+        lifecycle_events(&base),
+    );
+    assert!(fleet.incidents().is_empty(), "parking records no incident");
 
     fleet.shutdown();
 }
