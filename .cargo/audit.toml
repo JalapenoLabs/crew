@@ -1,0 +1,28 @@
+# cargo-audit configuration (issue #270).
+#
+# The CI `Audit` job runs `cargo audit`, which fails the gate on a real security
+# vulnerability. It also reports informational advisories (`unmaintained`,
+# `unsound`) that are not vulnerabilities and, being transitive, are not directly
+# fixable here. Each advisory ignored below is a documented, dated decision,
+# tracked so the noise does not accumulate unreviewed. Drop an entry once its
+# upstream stops pulling the crate: `cargo update`, then confirm `cargo audit` no
+# longer reports it.
+#
+# Both advisories below are pulled solely by `ratatui 0.29` (via `crew-cli`; see
+# `cargo tree -i paste` / `cargo tree -i lru`). `ratatui = "0.29"` is already the
+# latest 0.29 release, so no in-range bump removes them; a later ratatui line may
+# drop them, which is the real fix.
+#
+# Revisit by 2026-10-24, or sooner if ratatui publishes a release that drops these
+# dependencies.
+
+[advisories]
+ignore = [
+  # paste 1.0.15 - unmaintained (RUSTSEC-2024-0436). The crate is archived by its
+  # author; not a vulnerability. Pulled only as ratatui's proc-macro dependency.
+  "RUSTSEC-2024-0436",
+  # lru 0.12.5 - unsound (RUSTSEC-2026-0002): IterMut violates Stacked Borrows.
+  # Not a known-exploitable vulnerability, and crew does not use lru directly.
+  # Resolved when ratatui bumps lru past the affected range or drops it.
+  "RUSTSEC-2026-0002",
+]

@@ -88,9 +88,12 @@ jobs:
   # rather than shipping (issue #215, M-STATIC-VERIFICATION). `cargo audit` reads
   # the committed `Cargo.lock` and exits non-zero on a vulnerability; the
   # informational advisories (`unmaintained`, `unsound`) it also reports do not
-  # fail the gate, since they are usually transitive and not directly fixable.
-  # The tool is version-pinned like the rest, but the advisory database it checks
-  # against is fetched fresh each run, so the scan stays current between bumps.
+  # fail the gate, since they are usually transitive and not directly fixable. The
+  # current ones are tracked with a documented, dated ignore in `.cargo/audit.toml`
+  # (issue #270), which `cargo audit` reads, so they are recorded rather than
+  # recurring noise. The tool is version-pinned like the rest, but the advisory
+  # database it checks against is fetched fresh each run, so the scan stays current
+  # between bumps.
   audit:
     name: Audit
     runs-on: ubuntu-latest

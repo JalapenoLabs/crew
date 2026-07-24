@@ -1023,9 +1023,13 @@ already-running `crewd` or starts its own.
   options (issue #60). `Audit` runs `cargo audit` (pinned `cargo-audit`, fresh
   RustSec database) to fail the gate on a dependency with a known security
   vulnerability, a supply-chain safeguard (issue #215, M-STATIC-VERIFICATION);
-  informational advisories (`unmaintained`, `unsound`) are reported but do not
-  fail it. Keep the tree clippy-clean, formatted at that level, free of broken doc
-  links, and clear of vulnerable dependencies.
+  informational advisories (`unmaintained`, `unsound`) do not fail it. The current
+  transitive ones (`paste` unmaintained, `lru` unsound, both pulled only by
+  `ratatui 0.29`) are tracked with a documented, dated ignore in
+  `.cargo/audit.toml` rather than left as recurring noise (issue #270); each entry
+  records its source and a revisit date and is dropped once ratatui stops pulling
+  the crate. Keep the tree clippy-clean, formatted at that level, free of broken
+  doc links, and clear of vulnerable dependencies.
 - Read the applicable `~/.claude/docs/*.md` before editing code in that language.
 - **Git:** commit and push only when asked. Never add a co-author trailer. Never
   self-assign PR credit.
