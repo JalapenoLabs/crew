@@ -579,7 +579,13 @@ crashes recover (issue #22). Each agent runs a state machine on its own driver t
 work via `Fleet::start` spawns and registers it), **idle-stop** (after a configurable
 quiet period the driver stops the process but keeps the roster entry, marked idle, so
 a restart is fast and keeps context), and **restart on demand** (`Fleet::start` on a
-stopped or idle agent restarts it).
+stopped or idle agent restarts it). Lazy start triggers automatically (issue #199): a
+fleet-wide lazy-start watcher polls the broker for new `message` events and calls
+`Fleet::start` on every parked (stopped or idle) role a message's channel addresses
+(`Channel::addresses`), so an idle-stopped role comes back on first work with no manual
+start. It is idempotent and respects the pause gate (a running, dead, or paused role is
+untouched), and its cursor starts at launch and advances past each message acted on, so
+a historical or already-handled brief never wakes a role.
 
 The supervisor captures **what each agent does inside its own process**, the per-agent
 activity log the broker cannot see (issue #24, `crew_supervisor::activity`). Each agent

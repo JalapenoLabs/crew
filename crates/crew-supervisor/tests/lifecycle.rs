@@ -6,9 +6,9 @@
 
 mod common;
 
-use std::time::Duration;
+use std::{thread, time::Duration};
 
-use common::{lifecycle_events, liveness, start_broker, stub, wait_until};
+use common::{lifecycle_events, liveness, post_message, start_broker, stub, wait_until};
 use crew_core::RoleId;
 use crew_supervisor::{AgentState, Fleet, LifecyclePolicy, RosterClient};
 
@@ -76,4 +76,58 @@ fn an_idle_role_stops_and_restarts_on_demand() {
         wait_until(|| liveness(&base, "commander").is_none()),
         "shutdown deregisters the role",
     );
+}
+
+#[test]
+fn a_message_addressed_to_a_parked_role_wakes_it() {
+    // Lazy start's trigger half (issue #199): a message addressed to a parked
+    // role wakes it, with no manual `start`, and a message for another role does
+    // not.
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+    let commander = RoleId::new("commander");
+
+    // Park quickly, and poll for a waking message often, so the test is prompt.
+    let policy = LifecyclePolicy {
+        idle_timeout: Duration::from_millis(300),
+        heartbeat_timeout: Duration::from_secs(30),
+        watchdog_timeout: Duration::from_secs(60),
+        lazy_start_poll_interval: Duration::from_millis(100),
+        ..LifecyclePolicy::default()
+    };
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub("commander", "echo ready; sleep 30")],
+        policy,
+    );
+
+    // Bring it up, then let it park on the quiet timeout.
+    fleet.start(&commander).unwrap();
+    assert!(
+        wait_until(|| liveness(&base, "commander").as_deref() == Some("working")),
+        "the role starts on the first work",
+    );
+    assert!(
+        wait_until(|| liveness(&base, "commander").as_deref() == Some("idle")),
+        "the quiet role idle-stops",
+    );
+
+    // A message for a different role must not wake the commander: only the
+    // addressee is woken. Give the watcher several polls to read and skip it.
+    post_message(&base, "@backend", "backend, own the api lane");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        liveness(&base, "commander").as_deref(),
+        Some("idle"),
+        "a message for another role leaves the commander parked",
+    );
+
+    // A message addressed to the commander wakes it, with no `fleet.start`.
+    post_message(&base, "@commander", "ship the login flow");
+    assert!(
+        wait_until(|| liveness(&base, "commander").as_deref() == Some("working")),
+        "a message to the parked role wakes it end to end (lazy start)",
+    );
+
+    fleet.shutdown();
 }

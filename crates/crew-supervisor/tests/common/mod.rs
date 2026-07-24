@@ -70,6 +70,20 @@ pub fn lifecycle_events(base: &str) -> Vec<String> {
         .collect()
 }
 
+/// Posts a `note` as the General to `channel` (for example `@commander` or
+/// `all-units`), standing in for a human brief that should wake a parked role.
+pub fn post_message(base: &str, channel: &str, body: &str) {
+    let payload = serde_json::json!({
+        "from": { "kind": "general" },
+        "kind": "note",
+        "body": body,
+    });
+    ureq::post(&format!("{base}/channels/{channel}/messages"))
+        .set("content-type", "application/json")
+        .send_string(&payload.to_string())
+        .unwrap();
+}
+
 /// The liveness the roster records for `role`, if it is registered.
 pub fn liveness(base: &str, role: &str) -> Option<String> {
     let text = ureq::get(&format!("{base}/roster"))

@@ -114,7 +114,12 @@ and crashes recover (issue #22). Each agent runs a small state machine on its ow
 driver thread:
 
 - **Lazy start.** A fleet launches with every agent stopped and no process; the
-  first work (`Fleet::start`) spawns the process and registers the role.
+  first work (`Fleet::start`) spawns the process and registers the role. That first
+  work triggers it automatically (issue #199): a fleet-wide lazy-start watcher polls
+  the broker for new messages and starts every parked role a message's channel
+  addresses, so an idle-stopped role comes back on first work with no manual start.
+  It is idempotent and honors the pause gate, and its cursor starts at launch, so a
+  historical or already-handled message never re-wakes a role.
 - **Idle-stop.** After a configurable quiet period (no output) the driver stops the
   process but keeps the roster entry, marked idle, so a restart is fast and keeps
   context. An idle role costs nothing.
