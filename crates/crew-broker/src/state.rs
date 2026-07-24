@@ -8,7 +8,7 @@ use std::{
 
 use crew_core::{
     BoardEvent, BoardSection, Event, EventKind, Lifecycle, RoleId, Sender, TelemetryEvent,
-    Timestamp, Verdict,
+    Timestamp, Verdict, VerificationEvent,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -170,12 +170,55 @@ pub struct GateEntry {
 /// title.
 ///
 /// A task title is a human label (the order's title), so the operator and the
-/// crew name the same work the same way. The broker holds this in memory as the
-/// live authority and records every transition as a `verification` event in the
-/// durable log.
+/// crew name the same work the same way. Like the situation board (issue #49),
+/// the gate is a projection of the `verification` events in the durable log, so
+/// it is rebuilt on a restart rather than lost: a task mid-verification
+/// survives a broker restart (issue #181). The broker is still the live
+/// authority that enforces the gate, and records every transition as a
+/// `verification` event.
 #[derive(Debug, Default)]
 struct Gate {
     tasks: BTreeMap<String, GateEntry>,
+}
+
+impl Gate {
+    /// Rebuilds the gate by folding every `verification` event in the log,
+    /// oldest first (issue #181).
+    ///
+    /// This is how the gate survives a restart, mirroring the board (issue
+    /// #49): the durable log is the source of truth, and replaying it restores
+    /// the live standing of every task under the gate.
+    fn rebuild(events: &[Event]) -> Self {
+        let mut gate = Self::default();
+        for event in events {
+            if let EventKind::Verification(change) = &event.kind {
+                gate.apply(change);
+            }
+        }
+        gate
+    }
+
+    /// Applies one `verification` event: each carries the task's full standing
+    /// at that moment (owner, verifier, verdict, detail), so the latest event
+    /// per task wins.
+    ///
+    /// A submission records the task [`Submitted`](Verdict::Submitted) awaiting
+    /// a verifier; a verdict replaces it with [`Passed`](Verdict::Passed) or
+    /// [`Failed`](Verdict::Failed); a resubmission after a failure records
+    /// `Submitted` again. Folding in log order reconstructs exactly what the
+    /// live [`submit_for_verification`](AppState::submit_for_verification) and
+    /// [`record_verdict`](AppState::record_verdict) writes produced.
+    fn apply(&mut self, change: &VerificationEvent) {
+        self.tasks.insert(
+            change.task.clone(),
+            GateEntry {
+                owner: change.owner.clone(),
+                verifier: change.verifier.clone(),
+                verdict: change.verdict,
+                detail: change.detail.clone(),
+            },
+        );
+    }
 }
 
 /// Why the broker refused a verdict on a task (issue #47).
@@ -590,9 +633,10 @@ pub struct AppState {
     /// with every claim also recorded as a `ledger` event in the durable
     /// log.
     ledger: Arc<Mutex<Ledger>>,
-    /// The adversarial done-gate: tasks under verification (issue #47). In
-    /// memory like the control state, with every transition also recorded
-    /// as a `verification` event.
+    /// The adversarial done-gate: tasks under verification (issue #47). A
+    /// projection of the `verification` events in the log, so it is rebuilt
+    /// from the log on a restart like the board (issue #181); the broker stays
+    /// the live authority enforcing it.
     gate: Arc<Mutex<Gate>>,
     /// The shared situation board: the crew's durable memory (issue #49). A
     /// projection of the `board` events in the log, so it is rebuilt from
@@ -633,10 +677,11 @@ impl AppState {
         let scrubber = Scrubber::new(config.secrets.iter().cloned());
         let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
         // Rebuild the durable projections from the log the storage just replayed, so a
-        // decision recorded (issue #49) or spend accrued (issue #55) before a restart
-        // survives it.
+        // decision recorded (issue #49), a task mid-verification (issue #181), or spend
+        // accrued (issue #55) before a restart survives it.
         let events = storage.events();
         let board = Board::rebuild(&events);
+        let gate = Gate::rebuild(&events);
         let stats = Stats::rebuild(&events);
         let budgets = Budgets::rebuild(&events);
         let usage = Usage::new(config.usage_threshold);
@@ -649,7 +694,7 @@ impl AppState {
             publish_order: Arc::new(Mutex::new(())),
             control: Arc::new(Mutex::new(Control::default())),
             ledger: Arc::new(Mutex::new(Ledger::default())),
-            gate: Arc::new(Mutex::new(Gate::default())),
+            gate: Arc::new(Mutex::new(gate)),
             board: Arc::new(Mutex::new(board)),
             stats: Arc::new(Mutex::new(stats)),
             budgets: Arc::new(Mutex::new(budgets)),
@@ -1211,5 +1256,53 @@ mod tests {
             .unwrap();
         assert_eq!(docs.tokens, 700, "the rollup rebuilds from the durable log");
         assert_eq!(docs.cost_micro_usd, 1_200);
+    }
+
+    #[test]
+    fn the_gate_survives_a_restart_by_rebuilding_from_the_log() {
+        use std::sync::Arc;
+
+        use crew_core::{Verdict, VerificationEvent};
+
+        use crate::store::{MemoryStore, Storage};
+
+        // A submission then an independent pass: two `verification` events for one
+        // task.
+        let store: Arc<dyn Storage> = Arc::new(MemoryStore::default());
+        let first = AppState::with_storage(Config::default(), Arc::clone(&store));
+        first.publish(from_role(
+            "backend",
+            at("2026-07-23T00:00:00Z"),
+            EventKind::Verification(VerificationEvent {
+                task: "login".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: None,
+                verdict: Verdict::Submitted,
+                detail: "tokens expire".to_owned(),
+            }),
+        ));
+        first.publish(from_role(
+            "qa",
+            at("2026-07-23T00:01:00Z"),
+            EventKind::Verification(VerificationEvent {
+                task: "login".to_owned(),
+                owner: RoleId::new("backend"),
+                verifier: Some(RoleId::new("qa")),
+                verdict: Verdict::Passed,
+                detail: String::new(),
+            }),
+        ));
+
+        // Rebuild over the same store: the latest verdict per task wins (issue #181).
+        let rebuilt = AppState::with_storage(Config::default(), store);
+        let gate = rebuilt.gate_snapshot();
+        let login = gate.get("login").expect("the task survived the restart");
+        assert_eq!(
+            login.verdict,
+            Verdict::Passed,
+            "the pass verdict was folded"
+        );
+        assert_eq!(login.owner, RoleId::new("backend"));
+        assert_eq!(login.verifier, Some(RoleId::new("qa")));
     }
 }

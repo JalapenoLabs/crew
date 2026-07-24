@@ -294,6 +294,8 @@ impl GateView {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -302,7 +304,7 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::{api, config::Config, state::AppState};
+    use crate::{api, config::Config, state::AppState, store::LogStore};
 
     async fn post(state: &AppState, path: &str, body: Value) -> (StatusCode, Value) {
         send(state, "POST", path, Some(body)).await
@@ -547,5 +549,74 @@ mod tests {
             }
             other => panic!("expected a review-request note, got {other:?}"),
         }
+    }
+
+    /// A unique temp dir for the durability test, removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!("crew-gate-test-{}-{n}", std::process::id())))
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_mid_verification_survives_a_restart() {
+        let dir = TempDir::new();
+
+        // First run: submit a task for verification against a durable store, then drop
+        // the broker with the task still awaiting a verdict.
+        let store = Arc::new(LogStore::open(&dir.0).unwrap());
+        let state = AppState::with_storage(Config::default(), store);
+        post(
+            &state,
+            "/gate/submit",
+            json!({ "role": "backend", "task": "login", "acceptance": "tokens expire" }),
+        )
+        .await;
+        drop(state);
+
+        // Second run: a fresh broker over the same dir rebuilds the gate from the log
+        // (issue #181), like the board (issue #49).
+        let reopened = Arc::new(LogStore::open(&dir.0).unwrap());
+        let restarted = AppState::with_storage(Config::default(), reopened);
+
+        // The submission survived: still awaiting a verdict, owned by backend.
+        let view = get(&restarted, "/gate").await;
+        assert_eq!(task_in(&view, "login")["verdict"], "submitted");
+        assert_eq!(task_in(&view, "login")["owner"], "backend");
+
+        // The gate still enforces on the rebuilt task: the owner cannot self-verify it,
+        // proving the owner (not just the task key) was restored.
+        let (self_verdict, _) = post(
+            &restarted,
+            "/gate/verdict",
+            json!({ "role": "backend", "task": "login", "pass": true }),
+        )
+        .await;
+        assert_eq!(
+            self_verdict,
+            StatusCode::CONFLICT,
+            "the rebuilt owner still blocks a self-verdict"
+        );
+
+        // An independent verifier passes the surviving submission: the gate works after
+        // a restart just as before it.
+        let (status, view) = post(
+            &restarted,
+            "/gate/verdict",
+            json!({ "role": "qa", "task": "login", "pass": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(task_in(&view, "login")["verdict"], "passed");
+        assert_eq!(task_in(&view, "login")["verifier"], "qa");
     }
 }
