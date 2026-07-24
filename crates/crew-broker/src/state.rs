@@ -222,6 +222,22 @@ pub struct BoardEntry {
     pub body: String,
 }
 
+/// Why the broker refused a board retraction (issue #180).
+///
+/// The board lets the whole crew record, but curation is the commander's: only
+/// the entry's author or the crew's commander may retract one, so a stray role
+/// cannot erase a decision the commander curated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetractError {
+    /// No entry is recorded under the key, so there is nothing to retract.
+    NoSuchEntry,
+    /// The requester is neither the entry's author nor the commander.
+    Unauthorized {
+        /// The entry's author, who (with the commander) may retract it.
+        author: RoleId,
+    },
+}
+
 /// The shared situation board: the crew's durable memory, keyed by entry topic
 /// (issue #49).
 ///
@@ -885,14 +901,37 @@ impl AppState {
         );
     }
 
-    /// Retracts the board entry under `key`, returning the entry it removed
-    /// (issue #49).
+    /// Retracts the board entry under `key` for `requester`, enforcing that
+    /// only the entry's author or the crew's `commander` may remove it
+    /// (issues #49, #180).
     ///
-    /// Returns `None` if no entry was recorded under `key`, so the endpoint can
-    /// report a retraction of nothing as a 404.
-    #[must_use = "the removed entry tells the caller whether the key was present"]
-    pub fn retract_board(&self, key: &str) -> Option<BoardEntry> {
-        self.board().entries.remove(key)
+    /// Holds the board lock across the authorization check and the removal, so
+    /// a concurrent change cannot slip between them (mirroring the
+    /// done-gate's check-then-update under one lock). Returns the removed
+    /// entry, or a `RetractError` the endpoint renders as a 404 (no such
+    /// entry) or a 403 (an unauthorized role), so curation is enforced
+    /// rather than conventional.
+    ///
+    /// # Errors
+    /// Returns `RetractError::NoSuchEntry` if no entry is recorded under
+    /// `key`, or `RetractError::Unauthorized` if `requester` is neither
+    /// the entry's author nor `commander`.
+    pub fn retract_board_as(
+        &self,
+        key: &str,
+        requester: &RoleId,
+        commander: &RoleId,
+    ) -> Result<BoardEntry, RetractError> {
+        let mut board = self.board();
+        let Some(author) = board.entries.get(key).map(|entry| entry.author.clone()) else {
+            return Err(RetractError::NoSuchEntry);
+        };
+        if requester != &author && requester != commander {
+            return Err(RetractError::Unauthorized { author });
+        }
+        // The lock is held across the read above and this removal, so the entry is
+        // still present; `ok_or` keeps this total without a panicking `expect`.
+        board.entries.remove(key).ok_or(RetractError::NoSuchEntry)
     }
 
     /// A snapshot of the whole board: every entry, keyed and ordered by topic

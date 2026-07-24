@@ -43,8 +43,10 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
     let (crew_config, config_dir) = load_config(config_path)?;
 
     // The broker: its runtime config (env-overridable) and the endpoint agents
-    // reach.
-    let broker_config = BrokerConfig::from_env()?;
+    // reach. The crew config names the commander, so the broker enforces board
+    // curation for the real commander, not just the default (issue #180).
+    let mut broker_config = BrokerConfig::from_env()?;
+    broker_config.commander = crew_config.commander.clone();
     let endpoint = BrokerEndpoint::new(broker_config.host.to_string(), broker_config.port);
     let base_url = endpoint.base_url();
 

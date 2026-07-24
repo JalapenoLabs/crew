@@ -117,11 +117,16 @@ crew reads and writes it, and the commander curates it.
 
 A role reads the board with `crew_board` before it re-derives a settled decision, and
 records a new decision, interface, or gotcha with `crew_record` (keyed by a stable topic,
-so recording the same key updates the entry; `retract` removes one). Every change is a
-`board` event, so the board is auditable, and because the board is a projection of those
-durable events it survives an idle-stop or a broker restart: the broker rebuilds it from
-the log. See `docs/communication.md` (context management) and `docs/observability.md` (the
-situation board).
+so recording the same key updates the entry; `retract` removes one). Recording is open to
+every role, but retraction is curation: only the entry's author or the crew's commander may
+remove one, and any other role is refused with a 403, so curation is enforced rather than
+conventional (issue #180). The broker knows the commander from its config (`crew up` sets it
+from the crew config, or `CREW_BROKER_COMMANDER` for a bare `crewd`), so a role that wants to
+retract another's entry routes it through the commander. Every change is a `board` event, so
+the board is auditable, and because the board is a projection of those durable events it
+survives an idle-stop or a broker restart: the broker rebuilds it from the log. See
+`docs/communication.md` (context management) and `docs/observability.md` (the situation
+board).
 
 ### The integration step
 

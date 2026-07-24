@@ -9,8 +9,12 @@
 //! it survives a restart (see `docs/communication.md`, context management, and
 //! `docs/observability.md`).
 //!
-//! The whole crew reads and writes it; the commander curates it. The board
-//! state lives in the broker ([`AppState`]).
+//! The whole crew reads and writes it; the commander curates it. Recording is
+//! open to every role, but retraction is curation: only the entry's author or
+//! the crew's commander may remove an entry, and any other role is refused with
+//! a 403, so curation is enforced rather than conventional (issue #180). The
+//! board state lives in the broker ([`AppState`]), which knows the commander
+//! from its [`Config`](crate::Config).
 
 use axum::{
     extract::{Query, State},
@@ -25,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::ApiError,
     events::JsonBody,
-    state::{AppState, BoardEntry},
+    state::{AppState, BoardEntry, RetractError},
 };
 
 /// The board routes: read the board, and record or retract an entry.
@@ -73,8 +77,9 @@ struct BoardChange {
 /// durable and auditable.
 ///
 /// # Errors
-/// Returns a 400 [`ApiError`] if a required field is empty, or a 404 if a
-/// retraction names an entry that is not on the board.
+/// Returns a 400 [`ApiError`] if a required field is empty, a 404 if a
+/// retraction names an entry that is not on the board, or a 403 if a role other
+/// than the entry's author or the commander tries to retract it (issue #180).
 async fn record(
     State(state): State<AppState>,
     JsonBody(change): JsonBody<BoardChange>,
@@ -83,9 +88,11 @@ async fn record(
     let key = non_empty(&change.key, "key")?.to_owned();
 
     if change.retract {
+        // Curation is the commander's: only the entry's author or the commander may
+        // retract it, so a stray role cannot erase a curated decision (issue #180).
         let removed = state
-            .retract_board(&key)
-            .ok_or_else(|| ApiError::not_found(format!("no board entry `{key}` to retract")))?;
+            .retract_board_as(&key, &author, &state.config.commander)
+            .map_err(|err| retract_error(&key, err))?;
         state.publish(board_event(
             author,
             key,
@@ -126,6 +133,19 @@ fn board_event(
             body,
             retracted,
         }),
+    }
+}
+
+/// Renders a refused retraction as its HTTP error: a 404 for a missing entry, a
+/// 403 for an unauthorized role (issue #180).
+fn retract_error(key: &str, err: RetractError) -> ApiError {
+    match err {
+        RetractError::NoSuchEntry => {
+            ApiError::not_found(format!("no board entry `{key}` to retract"))
+        }
+        RetractError::Unauthorized { author } => ApiError::forbidden(format!(
+            "only `{author}` (the author) or the commander may retract board entry `{key}`"
+        )),
     }
 }
 
@@ -363,6 +383,118 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_author_may_retract_its_own_entry() {
+        let state = AppState::new(Config::default());
+        post(
+            &state,
+            "/board",
+            json!({ "role": "backend", "key": "api-errors", "section": "interface", "body": "v1" }),
+        )
+        .await;
+        let (status, view) = post(
+            &state,
+            "/board",
+            json!({ "role": "backend", "key": "api-errors", "retract": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            entry(&view, "api-errors").is_none(),
+            "the author removes its own entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_author_non_commander_may_not_retract() {
+        let state = AppState::new(Config::default());
+        post(
+            &state,
+            "/board",
+            json!({ "role": "backend", "key": "api-errors", "section": "interface", "body": "v1" }),
+        )
+        .await;
+
+        // frontend authored nothing and is not the commander, so it cannot erase
+        // backend's entry (issue #180).
+        let (status, body) = post(
+            &state,
+            "/board",
+            json!({ "role": "frontend", "key": "api-errors", "retract": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body["error"].as_str().unwrap().contains("backend"),
+            "the 403 names the author who may retract: {body}"
+        );
+
+        // The entry survives the refused retraction.
+        let view = get(&state, "/board").await;
+        assert!(
+            entry(&view, "api-errors").is_some(),
+            "an unauthorized retraction leaves the entry in place"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_commander_may_retract_another_roles_entry() {
+        // The default commander is `commander`, so it may curate anyone's entry.
+        let state = AppState::new(Config::default());
+        post(
+            &state,
+            "/board",
+            json!({ "role": "backend", "key": "api-errors", "section": "interface", "body": "v1" }),
+        )
+        .await;
+        let (status, view) = post(
+            &state,
+            "/board",
+            json!({ "role": "commander", "key": "api-errors", "retract": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            entry(&view, "api-errors").is_none(),
+            "the commander curates the board across roles"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_configured_commander_is_honored_not_the_default_name() {
+        // A crew whose commander is `lead`, not the default `commander`.
+        let config = Config {
+            commander: crew_core::RoleId::new("lead"),
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        post(
+            &state,
+            "/board",
+            json!({ "role": "backend", "key": "api-errors", "section": "interface", "body": "v1" }),
+        )
+        .await;
+
+        // The default name `commander` is not this crew's commander, so it is refused.
+        let (denied, _) = post(
+            &state,
+            "/board",
+            json!({ "role": "commander", "key": "api-errors", "retract": true }),
+        )
+        .await;
+        assert_eq!(denied, StatusCode::FORBIDDEN);
+
+        // The configured commander may curate.
+        let (allowed, view) = post(
+            &state,
+            "/board",
+            json!({ "role": "lead", "key": "api-errors", "retract": true }),
+        )
+        .await;
+        assert_eq!(allowed, StatusCode::OK);
+        assert!(entry(&view, "api-errors").is_none());
     }
 
     #[tokio::test]
