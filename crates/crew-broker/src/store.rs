@@ -6,14 +6,16 @@
 //!
 //! - [`MemoryStore`] keeps everything in memory, for tests and ephemeral use.
 //! - [`LogStore`] persists to an on-disk append-only log (JSON per line) with
-//!   an in-memory index, so a restart replays the log and no event is lost.
+//!   an in-memory index, so a restart replays the log and no event is lost. A
+//!   dedicated writer thread does the disk I/O, so an append never blocks the
+//!   async runtime, even under a burst (issue #206).
 //!
 //! The trait covers the whole persisted surface: [`append`](Storage::append) an
-//! event, [`query`](Storage::query) the log with filters and a stable page
-//! cursor, read every event, and read or write the [`Roster`]. `query` has a
-//! default that scans the in-memory index; a backend with a real index (a
-//! database) overrides it to push the filter down, which is why the query types
-//! here stay backend-neutral.
+//! event, [`flush`](Storage::flush) pending writes, [`query`](Storage::query)
+//! the log with filters and a stable page cursor, read every event, and read or
+//! write the [`Roster`]. `query` has a default that scans the in-memory index;
+//! a backend with a real index (a database) overrides it to push the filter
+//! down, which is why the query types here stay backend-neutral.
 
 use std::{
     collections::BTreeMap,
@@ -22,8 +24,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, PoisonError,
+        mpsc, Arc, Mutex, PoisonError,
     },
+    thread::JoinHandle,
 };
 
 use crew_core::{Channel, ChannelId, Event, EventKind, RoleId, Sender, TaskId, Timestamp};
@@ -58,14 +61,23 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// after the last event it saw.
     fn next_seq(&self) -> u64;
 
-    /// Appends an event to the log.
+    /// Records an event in the log.
     ///
-    /// Infallible by design: an event that cannot be persisted stays in the
-    /// in-memory index, so the running broker is consistent even when the disk
-    /// is not. A persist failure is not silent, though: it is counted in
-    /// [`durability`](Storage::durability) so `GET /health` can report degraded
-    /// durability (issue #207).
+    /// A durable backend may persist in the background, so the event is not
+    /// guaranteed on disk when this returns; call [`flush`](Storage::flush) to
+    /// wait for durability. Never blocks on disk I/O. A persist failure is not
+    /// silent, though: the event stays in the in-memory index and the failure
+    /// is counted in [`durability`](Storage::durability) so `GET /health`
+    /// can report degraded durability (issues #206, #207).
     fn append(&self, event: Event);
+
+    /// Blocks until every appended event is durably persisted.
+    ///
+    /// The default is a no-op, for a backend that persists synchronously or
+    /// holds nothing on disk. A background-writing backend overrides it to
+    /// drain its queue, which the broker calls on graceful shutdown so a
+    /// burst still in flight reaches disk before the process exits.
+    fn flush(&self) {}
 
     /// A snapshot of the backend's persistence health.
     ///
@@ -551,14 +563,30 @@ impl Storage for MemoryStore {
     }
 }
 
-/// The event log and its on-disk writer, held together under one lock so the
-/// in-memory positions always match the file's line order.
+/// A request to the durable log's background writer thread.
+///
+/// The writer owns the file and drains this queue, so a caller's thread never
+/// blocks on disk. A `Line` carries a serialized event; a `Barrier` lets a
+/// caller wait until everything queued before it is flushed (see
+/// [`LogStore::flush`]).
+enum LogWrite {
+    /// Persist one serialized event line.
+    Line(String),
+    /// Flush everything queued so far, then acknowledge on the sender.
+    Barrier(mpsc::Sender<()>),
+}
+
+/// The in-memory event index paired with the handle that persists it.
+///
+/// Held under one lock so an event is enqueued for the writer in the same order
+/// it enters the index, keeping the file's line order aligned with memory. The
+/// `writer` is absent only while the store is being dropped.
 #[derive(Debug)]
 struct Log {
     /// The in-memory index: every event, oldest first.
     events: Vec<Event>,
-    /// The append-only writer, positioned at the end of the log file.
-    writer: BufWriter<File>,
+    /// Enqueues lines to the background writer thread.
+    writer: Option<mpsc::Sender<LogWrite>>,
 }
 
 /// Tracks persistence failures so the store can report degraded durability.
@@ -600,22 +628,32 @@ impl DurabilityState {
 /// A durable event store: an on-disk append-only log with an in-memory index.
 ///
 /// The log is one JSON-encoded [`Event`] per line. [`open`](LogStore::open)
-/// replays the file into memory, so a restart restores the full log; each
-/// append updates the index and writes one line under a single lock. The roster
-/// persists to its own file, rewritten atomically on each change. A torn or
-/// unreadable line (for example a partial write from a crash) is skipped on
-/// replay so one bad line never loses the rest of the log.
+/// replays the file into memory, so a restart restores the full log. Each
+/// append updates the in-memory index and hands the line to a dedicated writer
+/// thread, so persistence never blocks the async runtime, even under a burst
+/// (issue #206). Events still reach disk in append order because a single
+/// writer drains one FIFO queue. [`flush`](LogStore::flush) waits for the queue
+/// to drain, and dropping the store flushes it, so a clean shutdown loses
+/// nothing.
 ///
 /// An append stays infallible: a write that fails leaves the event in the index
 /// and is counted in [`durability`](Storage::durability), so the running broker
 /// is consistent and the operator can still see that durability is degraded
-/// (issue #207).
+/// (issue #207). The writer thread records the failure, so the count reflects
+/// disk faults even though the write happens off the request path.
+///
+/// The roster persists to its own file, rewritten atomically on each change. A
+/// torn or unreadable line (for example a partial write from a crash) is
+/// skipped on replay so one bad line never loses the rest of the log.
 #[derive(Debug)]
 pub struct LogStore {
     log: Mutex<Log>,
+    writer_thread: Option<JoinHandle<()>>,
     roster: Mutex<Roster>,
     roster_path: PathBuf,
-    durability: DurabilityState,
+    // Shared with the writer thread so a background write failure is counted here
+    // and surfaced through `durability` (issues #206, #207).
+    durability: Arc<DurabilityState>,
 }
 
 impl LogStore {
@@ -623,7 +661,7 @@ impl LogStore {
     ///
     /// # Errors
     /// Returns an error if the directory or files cannot be created, read, or
-    /// opened.
+    /// opened, or if the background writer thread cannot start.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)
@@ -636,6 +674,19 @@ impl LogStore {
             .append(true)
             .open(&log_path)
             .wrap_err_with(|| format!("could not open event log {}", log_path.display()))?;
+
+        // Persist on a dedicated thread so an append never blocks the async
+        // runtime on disk I/O (issue #206). The queue is unbounded, which suits a
+        // broker at message rates with occasional bursts; a producer sustained
+        // faster than the disk is out of scope. The writer shares `durability` so
+        // a background write failure is counted for `GET /health` (issue #207).
+        let durability = Arc::new(DurabilityState::default());
+        let writer_durability = Arc::clone(&durability);
+        let (writer, requests) = mpsc::channel();
+        let writer_thread = std::thread::Builder::new()
+            .name("crew-log-writer".to_owned())
+            .spawn(move || run_writer(BufWriter::new(file), &requests, &writer_durability))
+            .wrap_err("could not start the log writer thread")?;
 
         let roster_path = dir.join(ROSTER_FILE);
         let roster = read_roster(&roster_path)?;
@@ -651,12 +702,35 @@ impl LogStore {
         Ok(Self {
             log: Mutex::new(Log {
                 events,
-                writer: BufWriter::new(file),
+                writer: Some(writer),
             }),
+            writer_thread: Some(writer_thread),
             roster: Mutex::new(roster),
             roster_path,
-            durability: DurabilityState::default(),
+            durability,
         })
+    }
+
+    /// Blocks until every event appended so far is durably on disk.
+    ///
+    /// Sends a barrier through the writer's FIFO queue and waits for the writer
+    /// thread to flush past it, so every prior append is persisted when this
+    /// returns. The broker calls it on graceful shutdown so a burst still in
+    /// the queue reaches disk before the process exits.
+    pub fn flush(&self) {
+        let (ack, acked) = mpsc::channel();
+        {
+            let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            // An absent writer means the store is shutting down; nothing to drain.
+            let Some(writer) = log.writer.as_ref() else {
+                return;
+            };
+            if writer.send(LogWrite::Barrier(ack)).is_err() {
+                return;
+            }
+        }
+        // Wait outside the lock so appends keep flowing while the writer drains.
+        let _ = acked.recv();
     }
 }
 
@@ -667,11 +741,40 @@ impl Storage for LogStore {
 
     fn append(&self, event: Event) {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        // Persist first, then index. A write failure is not fatal: the event stays
-        // in memory so the running broker is consistent, and the failure is
-        // recorded (not just logged) so `GET /health` reports degraded durability.
-        persist_event(&mut log.writer, &self.durability, &event);
+        // Encode and enqueue under the lock, so the writer receives events in the
+        // same order they enter the index and the file's lines stay aligned with
+        // memory. The send is non-blocking; the writer thread does the disk I/O
+        // and records any write failure. The event is indexed regardless, so a
+        // persist failure degrades only durability, not the running broker's
+        // consistency (issues #206, #207).
+        match serde_json::to_string(&event) {
+            Ok(line) => {
+                if let Some(writer) = log.writer.as_ref() {
+                    if writer.send(LogWrite::Line(line)).is_err() {
+                        event!(
+                            name: "broker.store.persist.failed",
+                            Level::ERROR,
+                            "the log writer thread is gone; keeping the event in memory only",
+                        );
+                        self.durability.record(&"the log writer thread is gone");
+                    }
+                }
+            }
+            Err(err) => {
+                event!(
+                    name: "broker.store.encode.failed",
+                    Level::ERROR,
+                    error = %err,
+                    "could not encode event for the log; keeping it in memory only",
+                );
+                self.durability.record(&err);
+            }
+        }
         log.events.push(event);
+    }
+
+    fn flush(&self) {
+        LogStore::flush(self);
     }
 
     fn durability(&self) -> Durability {
@@ -724,39 +827,84 @@ impl Storage for LogStore {
     }
 }
 
-/// Encodes and writes one event line, recording any failure to `durability`.
-///
-/// Kept separate from the store so the failure path is testable with a writer
-/// that fails, without a real disk fault (see the tests).
-fn persist_event(writer: &mut impl Write, durability: &DurabilityState, event: &Event) {
-    match serde_json::to_string(event) {
-        Ok(line) => {
-            if let Err(err) = write_line(writer, &line) {
-                event!(
-                    name: "broker.store.persist.failed",
-                    Level::ERROR,
-                    error = %err,
-                    "could not persist event to the log; keeping it in memory only",
-                );
-                durability.record(&err);
-            }
-        }
-        Err(err) => {
-            event!(
-                name: "broker.store.encode.failed",
-                Level::ERROR,
-                error = %err,
-                "could not encode event for the log; keeping it in memory only",
-            );
-            durability.record(&err);
+impl Drop for LogStore {
+    fn drop(&mut self) {
+        // Close the queue so the writer drains its backlog and returns, then wait
+        // for it, so every queued event reaches disk before the store goes away.
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .writer
+            .take();
+        if let Some(thread) = self.writer_thread.take() {
+            let _ = thread.join();
         }
     }
 }
 
-/// Writes one log line and flushes it to the OS so a restart can replay it.
-fn write_line(writer: &mut impl Write, line: &str) -> std::io::Result<()> {
-    writeln!(writer, "{line}")?;
-    writer.flush()
+/// Persists log lines on a dedicated thread, off the async runtime.
+///
+/// Blocks for the next request, then drains everything already queued so a
+/// burst becomes a single flush, letting the writer keep pace with a fast
+/// producer. Returns when the queue's sender is dropped (on store shutdown),
+/// having flushed the backlog. A write or flush failure is recorded to
+/// `durability` so `GET /health` reflects it even off the request path (issues
+/// #206, #207).
+fn run_writer(
+    mut writer: BufWriter<File>,
+    requests: &mpsc::Receiver<LogWrite>,
+    durability: &DurabilityState,
+) {
+    while let Ok(first) = requests.recv() {
+        let mut barriers = Vec::new();
+        write_request(&mut writer, first, &mut barriers, durability);
+        while let Ok(next) = requests.try_recv() {
+            write_request(&mut writer, next, &mut barriers, durability);
+        }
+        // One flush per drained batch, so a restart can replay every line written
+        // so far. A failure keeps the broker consistent in memory; only durability
+        // degrades until the operator resolves the disk problem.
+        if let Err(err) = writer.flush() {
+            event!(
+                name: "broker.store.persist.failed",
+                Level::ERROR,
+                error = %err,
+                "could not flush the event log; keeping events in memory only",
+            );
+            durability.record(&err);
+        }
+        // Acknowledge each barrier now that its prior lines are flushed.
+        for barrier in barriers {
+            let _ = barrier.send(());
+        }
+    }
+}
+
+/// Applies one write request: buffer a line (recording a failure to
+/// `durability`), or hold a barrier's acknowledgement until the batch flushes.
+///
+/// Generic over the writer so the failure path is testable with a writer that
+/// fails, without a real disk fault (see the tests).
+fn write_request(
+    writer: &mut impl Write,
+    request: LogWrite,
+    barriers: &mut Vec<mpsc::Sender<()>>,
+    durability: &DurabilityState,
+) {
+    match request {
+        LogWrite::Line(line) => {
+            if let Err(err) = writeln!(writer, "{line}") {
+                event!(
+                    name: "broker.store.persist.failed",
+                    Level::ERROR,
+                    error = %err,
+                    "could not write an event to the log; keeping it in memory only",
+                );
+                durability.record(&err);
+            }
+        }
+        LogWrite::Barrier(ack) => barriers.push(ack),
+    }
 }
 
 /// Replays the on-disk log into memory, skipping any unreadable line.
@@ -854,8 +1002,8 @@ mod tests {
     };
 
     use super::{
-        persist_event, query_events, Cursor, DurabilityState, EventFilter, EventKindTag,
-        EventQuery, Liveness, LogStore, MemoryStore, RoleStatus, Storage,
+        query_events, write_request, Cursor, DurabilityState, EventFilter, EventKindTag,
+        EventQuery, Liveness, LogStore, LogWrite, MemoryStore, RoleStatus, Storage,
     };
 
     /// A unique temp directory that removes itself on drop.
@@ -1151,6 +1299,25 @@ mod tests {
     }
 
     #[test]
+    fn log_store_flush_makes_appends_durable_without_dropping_the_store() {
+        let dir = TempDir::new();
+        let store = LogStore::open(dir.path()).unwrap();
+        store.append(message("backend", "all-units", ts(1)));
+        store.append(message("frontend", "@backend", ts(2)));
+
+        // The writer persists in the background, so a bare append is not yet on
+        // disk; flush blocks until it is. A second reader then sees both events
+        // while the first store is still open (issue #206).
+        store.flush();
+        let reopened = LogStore::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.events().len(),
+            2,
+            "flush persists every prior append without dropping the store",
+        );
+    }
+
+    #[test]
     fn log_store_persists_the_roster_across_a_restart() {
         let dir = TempDir::new();
         let store = LogStore::open(dir.path()).unwrap();
@@ -1219,18 +1386,22 @@ mod tests {
 
     #[test]
     fn a_failed_write_is_recorded_as_degraded_durability() {
-        // A write failure must not be silent (issue #207): it stays out of the log
-        // but is counted so `GET /health` can report degraded durability.
+        // A write failure must not be silent (issue #207): the writer thread
+        // counts it so `GET /health` can report degraded durability. Drive the
+        // writer's line path directly with a failing writer to prove the
+        // recording without a real disk fault (issue #206).
         let durability = DurabilityState::default();
         assert!(
             durability.snapshot().is_healthy(),
             "a fresh store is durable"
         );
 
-        persist_event(
+        let mut barriers = Vec::new();
+        write_request(
             &mut FailingWriter,
+            LogWrite::Line("{}".to_owned()),
+            &mut barriers,
             &durability,
-            &message("backend", "all-units", ts(1)),
         );
 
         let snapshot = durability.snapshot();
@@ -1243,12 +1414,14 @@ mod tests {
         );
 
         // A second failure accumulates rather than resetting the count.
-        persist_event(
+        write_request(
             &mut FailingWriter,
+            LogWrite::Line("{}".to_owned()),
+            &mut barriers,
             &durability,
-            &message("frontend", "@backend", ts(2)),
         );
         assert_eq!(durability.snapshot().write_failures, 2);
+        assert!(barriers.is_empty(), "a line request queues no barrier");
     }
 
     #[test]

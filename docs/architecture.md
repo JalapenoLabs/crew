@@ -355,11 +355,11 @@ parsed from stream-json. See `observability.md`.
 
 The broker keeps its state behind a `Storage` trait, so the backend is swappable
 and no handler names a concrete store (issue #13). The trait covers the whole
-persisted surface: append an event, query the log with filters and a stable page
-cursor, read every event, and read or write the roster. `query` has a default that
-scans the in-memory index, so a backend with a real index (a database) overrides it
-to push the filter down; the query types stay backend-neutral so no backend type
-leaks.
+persisted surface: append an event, flush pending writes, query the log with
+filters and a stable page cursor, read every event, and read or write the roster.
+`query` has a default that scans the in-memory index, so a backend with a real
+index (a database) overrides it to push the filter down; the query types stay
+backend-neutral so no backend type leaks.
 
 Two backends ship. `MemoryStore` holds everything in memory, for tests and
 ephemeral runs. `LogStore` is the durable default the `crewd` daemon uses: an
@@ -367,8 +367,14 @@ on-disk append-only log (one JSON-encoded event per line) plus an in-memory inde
 rooted at the state directory (`events.jsonl` and `roster.json`). On start it
 replays the log into memory, so a restart restores the full history; a torn or
 unreadable line (a crash mid-append) is skipped so one bad line never loses the
-rest. `SQLite` and Postgres remain future backends behind the same trait; Seraphim
-persists to its own Postgres when it is the front-end.
+rest. A dedicated writer thread does the disk I/O: an append updates the in-memory
+index and hands the line to the writer over a queue, so persistence never blocks
+the async runtime even under a burst (issue #206). A single writer drains the
+FIFO queue, so events reach disk in append order; `crewd` flushes the queue on
+graceful shutdown, and dropping the store flushes it, so a clean stop loses
+nothing. Roster writes stay synchronous: they happen at join and leave rate, not
+per message. `SQLite` and Postgres remain future backends behind the same trait;
+Seraphim persists to its own Postgres when it is the front-end.
 
 An append stays infallible so the in-memory index and the live stream never
 depend on the disk: a write that fails leaves the event in memory, so the running

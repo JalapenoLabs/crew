@@ -121,6 +121,10 @@ pub async fn serve(
     // serving ends, so it never outlives the broker it reports for.
     let sweeper = tokio::spawn(usage_sweeper(state.clone()));
 
+    // A durable backend persists in the background (issue #206); keep a handle so
+    // its writer can be drained once the server stops, before returning.
+    let storage = Arc::clone(&state.storage);
+
     // Serve on a task so the caller's `shutdown` is awaited alongside it and the
     // graceful drain can then be bounded. The `drain` trigger starts axum's
     // graceful shutdown; `SHUTDOWN_GRACE` bounds it so a long-lived SSE stream
@@ -161,6 +165,9 @@ pub async fn serve(
     };
 
     sweeper.abort();
+    // Flush events still in the writer's queue so a shutdown mid-burst reaches
+    // disk before the process exits. A no-op for a synchronous backend.
+    storage.flush();
     result
 }
 

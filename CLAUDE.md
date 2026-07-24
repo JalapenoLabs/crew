@@ -267,18 +267,21 @@ graceful drain waits for in-flight connections, yet an SSE subscriber (`/inbox`,
 `/stream`) holds its connection open indefinitely, so after a short grace any still-open
 stream is forced closed and crewd exits promptly rather than hanging on a live watcher
 (issue #204). It keeps state
-behind a swappable `Storage` trait (append, durability, query, roster read/write; issue
-#13): the daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus an
-in-memory index, rooted at the state dir), so a restart replays the full log; tests use
-the in-memory `MemoryStore`. An append is infallible so the in-memory index and stream
-never depend on the disk, but a failed write is not silent (issue #207): the store
-counts failed writes and keeps the last error via `Storage::durability`, and `GET
-/health` returns `200`/`status: ok` while durability is intact and `503`/`status:
-degraded` (with the failure count and last error) once a write fails, so a degraded disk
-surfaces to an operator instead of hiding until a restart replays a short log. The log
-flushes each line to the OS but does not `fsync`, so a clean restart loses nothing while
-a power loss can drop the unsynced tail; periodic `fsync` is a deliberate non-goal,
-deferred to the Postgres backend. It stores the
+behind a swappable `Storage` trait (append, flush, durability, query, roster read/write;
+issue #13): the daemon uses the durable `LogStore` (an on-disk append-only JSONL log plus
+an in-memory index, rooted at the state dir), so a restart replays the full log; tests use
+the in-memory `MemoryStore`. `LogStore` persists on a dedicated writer thread, so an append
+never blocks the async runtime under a burst (issue #206): the append indexes in memory and
+queues the line, a single writer drains the queue in order, and `crewd` flushes it on
+graceful shutdown so a clean stop loses nothing. An append is infallible so the in-memory
+index and stream never depend on the disk, but a failed write is not silent (issue #207):
+the writer counts failed writes and keeps the last error via `Storage::durability`, and `GET
+/health` returns `200`/`status: ok` while durability is intact and `503`/`status: degraded`
+(with the failure count and last error) once a write fails, so a degraded disk surfaces to an
+operator instead of hiding until a restart replays a short log. The log flushes each line to
+the OS but does not `fsync`, so a clean restart loses nothing while a power loss can drop the
+unsynced tail; periodic `fsync` is a deliberate non-goal, deferred to the Postgres backend.
+It stores the
 event model with typed per-kind message fields and typed 4xx on malformed input,
 reads the log over `GET /history` (the single bounded read path: filtered, ordered, and
 cursor-paginated with a ceiling, so there is no unpaginated full-log dump, issue #209),
