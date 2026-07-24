@@ -27,7 +27,7 @@ use eyre::{eyre, Result, WrapErr};
 use tokio::sync::oneshot;
 use tracing::{event, Level};
 
-use crate::paths::pidfile;
+use crate::pidfile;
 
 /// How long to wait for the broker to accept connections and for the roles to
 /// register.
@@ -78,9 +78,10 @@ pub fn run(config_path: Option<&Path>) -> Result<()> {
     print_roster(&crew_config, &fleet);
     print_commander_entry(&crew_config);
 
-    // Record the PID so `crew down` (or a signal) can stand this process down.
-    let pidfile = pidfile(&broker_config);
-    write_pidfile(&pidfile)?;
+    // Record the PID (and an identity marker) so `crew down` can stand this
+    // process down without risking a reused, unrelated PID (issue #195).
+    let pidfile = pidfile::path(&broker_config);
+    pidfile::write(&pidfile)?;
 
     // Hold the unit online until interrupted, then stand it down gracefully.
     wait_for_signal();
@@ -286,16 +287,6 @@ fn print_commander_entry(config: &CrewConfig) {
     println!("\nBrief the commander (`{commander}`) to set the unit to work:");
     println!("  crew send \"<your intent>\"");
     println!("\nPress Ctrl-C or run `crew down` to stand the crew down.");
-}
-
-/// Writes this process's PID to `path`, creating the state directory if needed.
-fn write_pidfile(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .wrap_err_with(|| format!("could not create state dir {}", parent.display()))?;
-    }
-    std::fs::write(path, std::process::id().to_string())
-        .wrap_err_with(|| format!("could not write pidfile {}", path.display()))
 }
 
 /// Blocks until the process receives Ctrl-C or (on Unix) `SIGTERM`.
