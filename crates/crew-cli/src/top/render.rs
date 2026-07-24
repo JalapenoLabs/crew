@@ -161,9 +161,10 @@ fn render_detail(frame: &mut Frame, area: Rect, cockpit: &Cockpit) {
             ),
             Span::styled(row.status.label(), status_style(row.status)),
             Span::raw(format!(
-                "  {} tokens  {}  lane: {lane}",
+                "  {} tokens  {}  {} active  lane: {lane}",
                 row.tokens,
                 dollars(row.cost_micro_usd),
+                duration(row.active_secs),
             )),
         ]),
         Line::from(Span::raw(format!("now: {}", short(&row.action, "idle")))),
@@ -216,6 +217,18 @@ fn status_style(status: Status) -> Style {
 fn dollars(cost_micro_usd: u64) -> String {
     let cents = cost_micro_usd / 10_000;
     format!("${}.{:02}", cents / 100, cents % 100)
+}
+
+/// Renders a working-time in seconds compactly (`45s`, `1m30s`, `2h05m`).
+fn duration(secs: u64) -> String {
+    let (hours, minutes, seconds) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// `text` if non-empty, else `fallback`.
@@ -279,7 +292,7 @@ mod tests {
         );
         cockpit.seed_stats(
             serde_json::from_value::<StatsSeed>(serde_json::json!({
-                "roles": [ { "role": "backend", "tokens": 1500, "cost_micro_usd": 45000 } ]
+                "roles": [ { "role": "backend", "tokens": 1500, "cost_micro_usd": 45000, "active_secs": 90 } ]
             }))
             .unwrap(),
         );
@@ -373,6 +386,10 @@ mod tests {
         assert!(
             text.contains("lane: api/"),
             "the detail shows the role's lane"
+        );
+        assert!(
+            text.contains("1m30s active"),
+            "the detail shows the role's working time"
         );
         assert!(
             text.contains("back"),
