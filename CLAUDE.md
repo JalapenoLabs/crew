@@ -999,6 +999,10 @@ already-running `crewd` or starts its own.
   any secret in a field goes through `crew_telemetry::redact::secret` first. The
   filter reads from `RUST_LOG` (default `info`), and `CREW_LOG_FORMAT=json` swaps the
   human-readable output for one JSON object per event for log aggregation (issue #213).
+  Both formats surface the event `name` (a top-level JSON key, or a trailing
+  `name=...` field in text) via a small formatter wrapper, since the stock
+  tracing-subscriber formatters drop the metadata name, so the M-LOG-STRUCTURED
+  naming is an actual aggregation key rather than convention-only (issue #271).
 - **Library errors are canonical structs** (issue #193, M-ERRORS-CANONICAL-STRUCTS):
   the substrate's public entry points return per-crate error structs, not eyre, so
   they read as a publishable library. `crew_broker::ServeError` (from `run` /
