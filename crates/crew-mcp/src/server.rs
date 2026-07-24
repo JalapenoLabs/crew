@@ -642,7 +642,9 @@ fn board_tools() -> Vec<Value> {
                 example `auth-strategy`); recording the same key again updates the entry. \
                 `section` is `decision`, `interface`, or `gotcha`, and `body` is the content (for a \
                 decision, include the rationale). Set `retract: true` with just the `key` to remove \
-                an entry the crew no longer holds. The commander curates the board.",
+                an entry the crew no longer holds. The commander curates the board: only the \
+                entry's author or the commander may retract one, so route a retraction of another \
+                role's entry through the commander.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

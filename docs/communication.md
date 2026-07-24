@@ -222,7 +222,9 @@ it:
   situation board bounds re-derivation (issue #49). It is the crew's durable memory,
   distinct from the message stream: agreed interfaces, decisions and their rationale, and
   known gotchas. A role reads it with `crew_board` before re-deriving a settled decision,
-  and records one with `crew_record` so no one relitigates it; the commander curates it. It
+  and records one with `crew_record` so no one relitigates it; the commander curates it.
+  Recording is open to every role, but retraction is enforced (issue #180): only the entry's
+  author or the commander may remove one, and any other role is refused a 403. It
   is a projection of `board` events, so it is auditable and rebuilt from the durable log
   across an idle-stop or a restart (see `docs/observability.md`, the situation board).
 - **New-role briefing packet.** The three bounded pieces come together at boot (issue

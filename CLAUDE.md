@@ -502,10 +502,16 @@ body, and a retracted flag) published to `all-units` and filterable with
 the broker rebuilds it in `AppState::with_storage` by folding the log the store just
 replayed, so a decision recorded before an idle-stop or a broker restart is still on the
 board after it (this is what satisfies the acceptance, and why the board survives a restart,
-as the done-gate now does too (issue #181), where the in-memory pause control does not). The whole crew reads and writes
-it; the commander curates it, and each role card's briefing points a role at it. Added a
-`Board` history-kind tag. See `docs/communication.md` (context management), `docs/roles.md`
-(the situation board), and `docs/observability.md`.
+as the done-gate now does too (issue #181), where the in-memory pause control does not). The
+whole crew reads and writes
+it; the commander curates it, and each role card's briefing points a role at it. Recording
+is open to every role, but retraction is enforced curation (issue #180): `retract_board_as`
+holds the board lock across an author-or-commander check and the removal, so `POST /board`
+with `retract: true` succeeds only for the entry's author or the crew's commander and
+refuses any other role a 403 (`ApiError::Forbidden`). The broker resolves the commander from
+its `Config` (`crew up` sets it from the crew config; `CREW_BROKER_COMMANDER` for a bare
+`crewd`, default `commander`). Added a `Board` history-kind tag. See `docs/communication.md`
+(context management), `docs/roles.md` (the situation board), and `docs/observability.md`.
 
 The new-role briefing packet solves the 100k-token join problem (issue #50): a freshly
 spawned role catches up from a bounded packet, not the raw transcript. `GET
@@ -843,10 +849,11 @@ default. Configure via env: `CREW_BROKER_HOST`, `CREW_BROKER_PORT`,
 `CREW_BROKER_STATE_DIR` (default `.crew`, where the durable log `events.jsonl` and
 `roster.json` live), `CREW_BROKER_ALLOW_NON_LOCAL` (`1`/`true`/`yes`),
 `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values the broker masks
-out of every message before storing or streaming it), and `CREW_BROKER_USAGE_THRESHOLD`
-(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56).
-Binding a non-loopback address is refused unless the non-local flag is set, so the
-broker never exposes itself to the network by accident.
+out of every message before storing or streaming it), `CREW_BROKER_USAGE_THRESHOLD`
+(the shared-subscription usage percent at which new work auto-pauses, default 90; issue #56),
+and `CREW_BROKER_COMMANDER` (the role that may curate the board alongside each entry's author,
+default `commander`; issue #180). Binding a non-loopback address is refused unless the
+non-local flag is set, so the broker never exposes itself to the network by accident.
 
 **Running the crew:** `cargo run --bin crew -- up` brings the unit online (add
 `--config <path>` to point at a crew config; it defaults to `./crew.toml`, then the

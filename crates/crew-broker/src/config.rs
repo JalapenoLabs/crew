@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
 };
 
+use crew_core::RoleId;
 use eyre::{Result, WrapErr};
 
 /// The default port `crewd` listens on (2739 spells `crew` on a phone keypad).
@@ -21,6 +22,13 @@ pub const DEFAULT_STATE_DIR: &str = ".crew";
 /// is spent, mirroring Seraphim's usage auto-pause. A crew retunes it with
 /// `CREW_BROKER_USAGE_THRESHOLD`.
 pub const DEFAULT_USAGE_THRESHOLD: u8 = 90;
+
+/// The default crew commander, when none is configured (issue #180).
+///
+/// Matches [`CrewConfig`](crew_core::CrewConfig)'s own commander default, so a
+/// bare `crewd` and the default crew agree on who curates the board. `crew up`
+/// overrides it with the crew config's commander.
+pub const DEFAULT_COMMANDER: &str = "commander";
 
 /// The broker's runtime configuration.
 ///
@@ -57,6 +65,11 @@ pub struct Config {
     /// at or above 100 disables the auto-pause, since a reading never
     /// reaches it.
     pub usage_threshold: u8,
+    /// The crew's commander, who may curate the situation board alongside each
+    /// entry's author (issue #180). Defaults to
+    /// [`DEFAULT_COMMANDER`](crate::DEFAULT_COMMANDER); `crew up` sets it from
+    /// the crew config so the real commander is enforced.
+    pub commander: RoleId,
 }
 
 impl Default for Config {
@@ -68,6 +81,7 @@ impl Default for Config {
             allow_non_local: false,
             secrets: Vec::new(),
             usage_threshold: DEFAULT_USAGE_THRESHOLD,
+            commander: RoleId::new(DEFAULT_COMMANDER),
         }
     }
 }
@@ -78,8 +92,9 @@ impl Config {
     /// Reads `CREW_BROKER_HOST`, `CREW_BROKER_PORT`, `CREW_BROKER_STATE_DIR`,
     /// `CREW_BROKER_ALLOW_NON_LOCAL` (`1`, `true`, or `yes` enable it),
     /// `CREW_BROKER_SECRETS` (a whitespace-separated list of secret values to
-    /// mask), and `CREW_BROKER_USAGE_THRESHOLD` (the usage percent at which
-    /// new work auto-pauses).
+    /// mask), `CREW_BROKER_USAGE_THRESHOLD` (the usage percent at which new
+    /// work auto-pauses), and `CREW_BROKER_COMMANDER` (the role that may
+    /// curate the board, issue #180).
     ///
     /// # Errors
     /// Returns an error if `CREW_BROKER_HOST` is not a valid IP address,
@@ -113,6 +128,14 @@ impl Config {
                 .parse()
                 .wrap_err("CREW_BROKER_USAGE_THRESHOLD is not a percent (0..=100)")?;
         }
+        // Only override the default when the value names a role; a blank env var leaves
+        // the default commander in place rather than an unnamed one.
+        if let Ok(commander) = env::var("CREW_BROKER_COMMANDER") {
+            let commander = commander.trim();
+            if !commander.is_empty() {
+                config.commander = RoleId::new(commander);
+            }
+        }
         Ok(config)
     }
 
@@ -145,6 +168,16 @@ mod tests {
         assert!(config.host.is_loopback());
         assert_eq!(config.port, DEFAULT_PORT);
         assert!(!config.allow_non_local);
+    }
+
+    #[test]
+    fn the_default_commander_matches_the_crew_default() {
+        // A bare broker and the default crew must agree on who curates the board
+        // (issue #180), so board retraction resolves the same commander either way.
+        assert_eq!(
+            Config::default().commander,
+            crew_core::RoleId::new("commander")
+        );
     }
 
     #[test]
