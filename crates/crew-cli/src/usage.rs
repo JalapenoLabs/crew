@@ -10,7 +10,7 @@
 use eyre::{eyre, Result, WrapErr};
 use serde_json::Value;
 
-use crate::broker::resolve_base;
+use crate::broker_base::resolve_base;
 
 /// Prints the shared-subscription usage gauge: the reading, the threshold, and
 /// any pause.

@@ -173,7 +173,7 @@ struct Notification {
 /// Returns an error if the broker configuration is invalid, or the broker
 /// cannot be reached or refuses the stream.
 pub(crate) fn notify(broker: Option<&str>, policy: &NotifyPolicy) -> Result<()> {
-    let base = broker::resolve_base(broker)?;
+    let base = crate::broker_base::resolve_base(broker)?;
     // Seed liveness once from `GET /roster` (issue #32, #170) so an already-running
     // crew's quiet, registered roles are known to be live before any lifecycle
     // event arrives on the live-only firehose; the stream then keeps the roster

@@ -9,9 +9,10 @@
 //! preserves the durable state, so the crew is recoverable. The broker address
 //! comes from `--broker`, else the `CREW_BROKER_*` environment.
 
-use crew_substrate::{broker::Config as BrokerConfig, core::BrokerEndpoint};
 use eyre::{eyre, Result, WrapErr};
 use serde_json::json;
+
+use crate::broker_base::{broker_error, resolve_base};
 
 /// Pauses one role, or the whole crew when `role` is `None`.
 ///
@@ -80,54 +81,13 @@ fn post(broker: Option<&str>, path: &str, role: Option<&str>) -> Result<()> {
     }
 }
 
-/// The broker base URL: the `--broker` value if given, else the broker's
-/// environment.
-///
-/// # Errors
-/// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but
-/// invalid.
-fn resolve_base(flag: Option<&str>) -> Result<String> {
-    if let Some(url) = flag {
-        return Ok(normalize_base(url));
-    }
-    let config = BrokerConfig::from_env().wrap_err("could not read the broker configuration")?;
-    Ok(BrokerEndpoint::new(config.host.to_string(), config.port).base_url())
-}
-
-/// Normalizes a `--broker` value: default the scheme to `http`, drop a trailing
-/// slash.
-fn normalize_base(url: &str) -> String {
-    let url = url.trim().trim_end_matches('/');
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_owned()
-    } else {
-        format!("http://{url}")
-    }
-}
-
-/// The `{ "error": ... }` message from a broker error response, if any.
-fn broker_error(response: ureq::Response) -> Option<String> {
-    let text = response.into_string().ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("error")?.as_str().map(str::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{normalize_base, outcome};
+    use super::outcome;
 
     #[test]
     fn outcome_names_the_role_or_the_crew() {
         assert_eq!(outcome("Paused", Some("backend")), "Paused backend.");
         assert_eq!(outcome("Resumed", None), "Resumed the crew.");
-    }
-
-    #[test]
-    fn normalize_base_defaults_the_scheme_and_trims() {
-        assert_eq!(normalize_base("localhost:2739/"), "http://localhost:2739");
-        assert_eq!(
-            normalize_base("http://127.0.0.1:2739"),
-            "http://127.0.0.1:2739"
-        );
     }
 }

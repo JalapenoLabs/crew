@@ -43,7 +43,7 @@ const TICK: Duration = Duration::from_millis(200);
 /// Returns an error if the broker configuration is invalid, the broker cannot
 /// be reached for the initial roster, or the terminal cannot be driven.
 pub fn run(broker: Option<&str>) -> Result<()> {
-    let base = broker::resolve_base(broker)?;
+    let base = crate::broker_base::resolve_base(broker)?;
 
     // Seed from the snapshots first, so a wrong address or a broker that is not
     // running fails here with a clear message, not inside the alternate screen.
