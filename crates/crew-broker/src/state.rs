@@ -49,6 +49,52 @@ struct Control {
     paused_roles: BTreeSet<RoleId>,
 }
 
+impl Control {
+    /// Rebuilds the pause control by folding the crew's pause `lifecycle`
+    /// events in the log, oldest first (issue #185).
+    ///
+    /// The manual brake lives in memory, but every change is also a durable
+    /// `lifecycle` event: a crew-wide pause / resume / stand-down from the
+    /// General, and a per-role pause / resume from the role. Replaying them in
+    /// order restores the same standing and the same set of individually paused
+    /// roles the live control held, so a stand-down or a pause survives a
+    /// broker restart rather than silently clearing. The usage auto-pause
+    /// (issue #56) is time-based and not replayed; it re-arms on the next
+    /// usage reading.
+    fn rebuild(events: &[Event]) -> Self {
+        let mut control = Self::default();
+        for event in events {
+            control.apply(event);
+        }
+        control
+    }
+
+    /// Folds one event into the pause control, applying the same transition the
+    /// live control endpoints do (issue #41): a crew-wide pause does not weaken
+    /// a stand-down, a resume returns the crew to running, and a per-role pause
+    /// or resume toggles that role's own gate. Every other event is ignored.
+    fn apply(&mut self, event: &Event) {
+        let EventKind::Lifecycle(lifecycle) = &event.kind else {
+            return;
+        };
+        match (&event.from, lifecycle) {
+            // A crew-wide pause does not weaken a stand-down (mirrors `pause_crew`).
+            (Sender::General, Lifecycle::Paused) if self.standing != Standing::StoodDown => {
+                self.standing = Standing::Paused;
+            }
+            (Sender::General, Lifecycle::StoodDown) => self.standing = Standing::StoodDown,
+            (Sender::General, Lifecycle::Resumed) => self.standing = Standing::Running,
+            (Sender::Role(role), Lifecycle::Paused) => {
+                self.paused_roles.insert(role.clone());
+            }
+            (Sender::Role(role), Lifecycle::Resumed) => {
+                self.paused_roles.remove(role);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The shared-subscription usage gauge and auto-pause (issue #56).
 ///
 /// The crew shares one subscription, so the broker keeps one gauge across the
@@ -641,13 +687,14 @@ pub struct AppState {
     /// broadcast in the same order it is assigned, keeping every
     /// subscriber's `id` cursor monotonic.
     publish_order: Arc<Mutex<()>>,
-    /// The crew's pause / stand-down state (issue #41). In memory: the broker
-    /// is the live recoverable authority, and every pause change is also
-    /// recorded as a `lifecycle` event in the durable log.
+    /// The crew's pause / stand-down state (issue #41). The broker is the live
+    /// recoverable authority, and every pause change is also a `lifecycle`
+    /// event in the durable log, so it is rebuilt from the log on a restart
+    /// (issue #185).
     control: Arc<Mutex<Control>>,
-    /// The shared work ledger (issue #45): who holds which task. In memory,
-    /// with every claim also recorded as a `ledger` event in the durable
-    /// log.
+    /// The shared work ledger (issue #45): who holds which task. Every claim is
+    /// also a `ledger` event in the durable log, so it is rebuilt from the log
+    /// on a restart, and live ownership survives a restart (issue #185).
     ledger: Arc<Mutex<Ledger>>,
     /// The adversarial done-gate: tasks under verification (issue #47). A
     /// projection of the `verification` events in the log, so it is rebuilt
@@ -693,11 +740,14 @@ impl AppState {
         let scrubber = Scrubber::new(config.secrets.iter().cloned());
         let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
         // Rebuild the durable projections from the log the storage just replayed, so a
-        // decision recorded (issue #49), a task mid-verification (issue #181), or spend
-        // accrued (issue #55) before a restart survives it.
+        // decision recorded (issue #49), a task mid-verification (issue #181), a claim
+        // or a pause (issue #185), or spend accrued (issue #55) before a restart
+        // survives it.
         let events = storage.events();
         let board = Board::rebuild(&events);
         let gate = Gate::rebuild(&events);
+        let control = Control::rebuild(&events);
+        let ledger = Ledger::rebuild(&events);
         let stats = Stats::rebuild(&events);
         let budgets = Budgets::rebuild(&events);
         let usage = Usage::new(config.usage_threshold);
@@ -708,8 +758,8 @@ impl AppState {
             scrubber: Arc::new(scrubber),
             broadcast,
             publish_order: Arc::new(Mutex::new(())),
-            control: Arc::new(Mutex::new(Control::default())),
-            ledger: Arc::new(Mutex::new(Ledger::default())),
+            control: Arc::new(Mutex::new(control)),
+            ledger: Arc::new(Mutex::new(ledger)),
             gate: Arc::new(Mutex::new(gate)),
             board: Arc::new(Mutex::new(board)),
             stats: Arc::new(Mutex::new(stats)),
@@ -1343,5 +1393,93 @@ mod tests {
         );
         assert_eq!(login.owner, RoleId::new("backend"));
         assert_eq!(login.verifier, Some(RoleId::new("qa")));
+    }
+
+    /// A `lifecycle` event from the General on `all-units` at `ts`, the shape
+    /// the crew-wide pause / resume / stand-down publish.
+    fn from_general(ts: Timestamp, lifecycle: Lifecycle) -> Event {
+        Event {
+            ts,
+            from: Sender::General,
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind: EventKind::Lifecycle(lifecycle),
+        }
+    }
+
+    #[test]
+    fn the_pause_control_survives_a_restart_by_rebuilding_from_the_log() {
+        use std::sync::Arc;
+
+        use super::Standing;
+        use crate::store::{MemoryStore, Storage};
+
+        // The General stands the crew down, and backend is paused on its own: both are
+        // durable `lifecycle` events (issue #41).
+        let store: Arc<dyn Storage> = Arc::new(MemoryStore::default());
+        let first = AppState::with_storage(Config::default(), Arc::clone(&store));
+        first.publish(from_general(
+            at("2026-07-23T00:00:00Z"),
+            Lifecycle::StoodDown,
+        ));
+        first.publish(from_role(
+            "backend",
+            at("2026-07-23T00:00:01Z"),
+            EventKind::Lifecycle(Lifecycle::Paused),
+        ));
+
+        // Rebuild over the same store: the standing and the per-role pause are restored
+        // (issue #185), so the crew comes back gated rather than silently running.
+        let rebuilt = AppState::with_storage(Config::default(), store);
+        let (standing, paused) = rebuilt.control_snapshot();
+        assert_eq!(
+            standing,
+            Standing::StoodDown,
+            "the stand-down survived the restart"
+        );
+        assert!(
+            paused.contains(&RoleId::new("backend")),
+            "backend's own pause survived the restart"
+        );
+        assert!(
+            rebuilt.is_role_paused(&RoleId::new("frontend")),
+            "a stood-down crew gates every role after the restart"
+        );
+    }
+
+    #[test]
+    fn a_resumed_crew_and_role_rebuild_as_running_and_unpaused() {
+        use std::sync::Arc;
+
+        use super::Standing;
+        use crate::store::{MemoryStore, Storage};
+
+        // Pause the crew and a role, then resume both: the log holds the whole
+        // sequence.
+        let store: Arc<dyn Storage> = Arc::new(MemoryStore::default());
+        let first = AppState::with_storage(Config::default(), Arc::clone(&store));
+        first.publish(from_general(at("2026-07-23T00:00:00Z"), Lifecycle::Paused));
+        first.publish(from_role(
+            "backend",
+            at("2026-07-23T00:00:01Z"),
+            EventKind::Lifecycle(Lifecycle::Paused),
+        ));
+        first.publish(from_general(at("2026-07-23T00:00:02Z"), Lifecycle::Resumed));
+        first.publish(from_role(
+            "backend",
+            at("2026-07-23T00:00:03Z"),
+            EventKind::Lifecycle(Lifecycle::Resumed),
+        ));
+
+        // Folding the whole sequence, the latest transition wins: the crew is running
+        // and no role is paused.
+        let rebuilt = AppState::with_storage(Config::default(), store);
+        let (standing, paused) = rebuilt.control_snapshot();
+        assert_eq!(
+            standing,
+            Standing::Running,
+            "a resumed crew rebuilds as running"
+        );
+        assert!(paused.is_empty(), "a resumed role is no longer paused");
     }
 }

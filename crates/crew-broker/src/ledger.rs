@@ -9,8 +9,10 @@
 //! Every change also rides the event stream as a `ledger` event (from the
 //! owner, to `all-units`), so the ledger is a projection of it: an observer
 //! reconstructs the same ownership from the log. The live ledger lives in the
-//! broker ([`AppState`]), the authority that serializes claims; rebuilding it
-//! from the durable log on a broker restart is a later refinement.
+//! broker ([`AppState`]), the authority that serializes claims, and it is
+//! rebuilt from the durable log on a broker restart ([`Ledger::rebuild`]), so
+//! live ownership survives a restart rather than being lost until roles
+//! re-claim (issue #185).
 
 use std::collections::BTreeMap;
 
@@ -80,6 +82,39 @@ enum ReassignError {
 }
 
 impl Ledger {
+    /// Rebuilds the ledger by folding every `ledger` event in the log, oldest
+    /// first (issue #185).
+    ///
+    /// Each `ledger` event is a full snapshot of a task's ownership at that
+    /// moment (owner, state, title), so the latest event per task wins,
+    /// reconstructing the same ownership the live [`set`](Ledger::set) and
+    /// [`reassign`](Ledger::reassign) writes produced. This is how the ledger
+    /// survives a restart, mirroring the situation board (issue #49) and the
+    /// done-gate (issue #181): a role's claim is recovered rather than silently
+    /// lost until it re-claims.
+    pub(crate) fn rebuild(events: &[Event]) -> Self {
+        let mut ledger = Self::default();
+        for event in events {
+            if let EventKind::Ledger(change) = &event.kind {
+                ledger.apply(change);
+            }
+        }
+        ledger
+    }
+
+    /// Folds one `ledger` event into the projection: insert or replace the
+    /// task's entry with the event's owner, state, and title.
+    fn apply(&mut self, change: &LedgerEvent) {
+        self.tasks.insert(
+            change.task.clone(),
+            LedgerEntry {
+                title: change.title.clone(),
+                owner: change.owner.clone(),
+                state: change.state,
+            },
+        );
+    }
+
     /// Sets `task` to `state`, owned by `owner`, enforcing one owner per held
     /// task.
     ///
@@ -464,6 +499,8 @@ fn ledger_event(task: &str, owner: &RoleId, state: TaskState, title: &str) -> Ev
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -472,7 +509,7 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use crate::{api, config::Config, state::AppState};
+    use crate::{api, config::Config, state::AppState, store::LogStore};
 
     async fn request(state: &AppState, method: &str, body: Value) -> (StatusCode, Value) {
         let builder = Request::builder().method(method).uri("/ledger");
@@ -731,6 +768,103 @@ mod tests {
                 .contains("already owned by `backend`"),
             "the refusal explains it is already owned: {body}"
         );
+    }
+
+    /// A unique temp dir for the durability test, removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!("crew-ledger-test-{}-{n}", std::process::id())))
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claim_survives_a_restart() {
+        let dir = TempDir::new();
+
+        // First run: backend claims and starts `login` against a durable store, then
+        // drop the broker with the work still in flight.
+        let store = Arc::new(LogStore::open(&dir.0).unwrap());
+        let state = AppState::with_storage(Config::default(), store);
+        request(
+            &state,
+            "POST",
+            json!({ "task": "login", "owner": "backend", "state": "in_progress",
+                    "title": "login flow" }),
+        )
+        .await;
+        drop(state);
+
+        // Second run: a fresh broker over the same dir rebuilds the ledger from the log
+        // (issue #185), like the board (issue #49) and the done-gate (issue #181).
+        let reopened = Arc::new(LogStore::open(&dir.0).unwrap());
+        let restarted = AppState::with_storage(Config::default(), reopened);
+
+        // The claim survived: backend still holds `login`, in progress and titled.
+        let (_, view) = request(&restarted, "GET", Value::Null).await;
+        assert_eq!(owner_of(&view, "login").as_deref(), Some("backend"));
+        let entry = entry_of(&view, "login").unwrap();
+        assert_eq!(entry["state"], "in_progress");
+        assert_eq!(entry["title"], "login flow");
+
+        // The ledger still enforces on the rebuilt claim: a second role cannot take it.
+        let (status, body) = request(
+            &restarted,
+            "POST",
+            json!({ "task": "login", "owner": "frontend" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "the rebuilt claim still blocks a second role"
+        );
+        assert!(
+            body["error"].as_str().unwrap().contains("backend"),
+            "the conflict names the restored holder: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_done_task_rebuilds_as_free_to_reclaim() {
+        let dir = TempDir::new();
+
+        // backend claims `api` and finishes it, freeing the claim.
+        let store = Arc::new(LogStore::open(&dir.0).unwrap());
+        let state = AppState::with_storage(Config::default(), store);
+        request(&state, "POST", json!({ "task": "api", "owner": "backend" })).await;
+        request(
+            &state,
+            "POST",
+            json!({ "task": "api", "owner": "backend", "state": "done" }),
+        )
+        .await;
+        drop(state);
+
+        // After a restart the task rebuilds `done`, so it is free for another role to
+        // claim rather than wrongly locked to backend.
+        let reopened = Arc::new(LogStore::open(&dir.0).unwrap());
+        let restarted = AppState::with_storage(Config::default(), reopened);
+        let (status, view) = request(
+            &restarted,
+            "POST",
+            json!({ "task": "api", "owner": "frontend" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a rebuilt done task is free to reclaim"
+        );
+        assert_eq!(owner_of(&view, "api").as_deref(), Some("frontend"));
     }
 
     /// The entry keyed by `task` in a ledger view, if present.
