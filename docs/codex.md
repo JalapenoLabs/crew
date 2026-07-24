@@ -78,8 +78,13 @@ client's does. These gaps remain, by the nature of a stateless CLI:
   role, so a Codex-only unit never needs `claude` on `PATH`. The broker and roster do not
   care which runtime produced a role, so `crew up` brings up a mixed unit in one command.
   A Codex agent can still join a running crew through the shim, launched by the operator or
-  a wrapper script, the same way. (The exact `codex exec` autonomy flags may need tuning
-  against the installed `codex` version.)
+  a wrapper script, the same way. The full spawn invocation is `codex exec
+  --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check <briefing>`, verified
+  against codex-cli 0.145.0 (issue #162): `exec` is the non-interactive mode, the bypass
+  flag drops approvals and the sandbox for an unattended agent (intended for an externally
+  sandboxed host), and `--skip-git-repo-check` lets a role in a scratch dir rather than a
+  worktree boot outside a Git repo (a no-op inside one). If a future `codex` renames these
+  flags, the fix is `codex_turn_argv` in `crew-supervisor/src/mcp.rs`.
 
 ## References
 
