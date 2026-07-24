@@ -18,8 +18,9 @@
 //! written once. Each event carries its log sequence as the SSE `id`, so a
 //! reconnecting client resumes without loss.
 //!
-//! The channel-naming model here is the minimal resolution the inbox needs;
-//! issue #11 owns the canonical channel model and membership.
+//! Channel membership is the canonical [`crew_core::Channel::addresses`], the
+//! same test [`Event::in_timeline_of`] applies, so the inbox holds no second
+//! source of truth for who a channel reaches.
 
 use std::convert::Infallible;
 
@@ -30,7 +31,7 @@ use axum::{
     routing::get,
     Router,
 };
-use crew_core::{ChannelId, Event, RoleId, Sender};
+use crew_core::{Channel, Event, RoleId, Sender};
 use serde::Deserialize;
 use tokio_stream::{
     wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
@@ -42,9 +43,6 @@ use crate::{
     error::ApiError,
     state::{AppState, Sequenced},
 };
-
-/// The channel that reaches every live role (see `docs/communication.md`).
-const ALL_UNITS: &str = "all-units";
 
 /// The per-role stream routes: the self-filtered inbox and the full activity
 /// timeline.
@@ -220,35 +218,17 @@ fn last_event_id(headers: &HeaderMap) -> Option<u64> {
 /// Whether `event` should be delivered to `role`'s inbox.
 ///
 /// True when the event's channel addresses the role and the role is not the
-/// sender: a role never receives its own messages.
+/// sender: a role never receives its own messages. Membership is the canonical
+/// [`Channel::addresses`], so the inbox and [`Event::in_timeline_of`] agree on
+/// who a channel reaches; an unrecognized channel name parses to `None` and
+/// reaches no one.
 fn event_reaches_role(event: &Event, role: &RoleId) -> bool {
     if let Sender::Role(from) = &event.from {
         if from == role {
             return false;
         }
     }
-    channel_addresses_role(&event.channel, role)
-}
-
-/// Whether a channel addresses `role`, by the naming model in
-/// `docs/communication.md`.
-///
-/// `all-units` reaches every role, `@role` is a direct point-to-point channel,
-/// and a `a+b` pair channel reaches its two named members. Any other name
-/// reaches no one until issue #11 lands the canonical channel model.
-fn channel_addresses_role(channel: &ChannelId, role: &RoleId) -> bool {
-    let channel = channel.as_str();
-    let role = role.as_str();
-    if channel == ALL_UNITS {
-        return true;
-    }
-    if let Some(direct) = channel.strip_prefix('@') {
-        return direct == role;
-    }
-    if let Some((first, second)) = channel.split_once('+') {
-        return first == role || second == role;
-    }
-    false
+    Channel::parse(event.channel.as_str()).is_some_and(|channel| channel.addresses(role))
 }
 
 /// Renders an event as a Server-Sent Event carrying its sequence as the `id`.
@@ -276,7 +256,7 @@ mod tests {
     use tokio_stream::{wrappers::errors::BroadcastStreamRecvError, StreamExt};
     use tower::ServiceExt;
 
-    use super::{channel_addresses_role, event_reaches_role, map_live_event};
+    use super::{event_reaches_role, map_live_event};
     use crate::{
         api,
         config::Config,
@@ -303,32 +283,36 @@ mod tests {
         }
     }
 
+    // These pin the inbox's delivery predicate for each channel kind. Addressing
+    // itself is the canonical `Channel::addresses` (tested in crew-core); here we
+    // confirm `event_reaches_role` routes each kind through it. The sender differs
+    // from every addressee, so the self-filter never masks the addressing.
     #[test]
     fn all_units_reaches_every_role() {
-        let all = ChannelId::new("all-units");
-        assert!(channel_addresses_role(&all, &role("backend")));
-        assert!(channel_addresses_role(&all, &role("frontend")));
+        let all = message_from("commander", "all-units");
+        assert!(event_reaches_role(&all, &role("backend")));
+        assert!(event_reaches_role(&all, &role("frontend")));
     }
 
     #[test]
     fn a_direct_channel_reaches_only_its_role() {
-        let direct = ChannelId::new("@backend");
-        assert!(channel_addresses_role(&direct, &role("backend")));
-        assert!(!channel_addresses_role(&direct, &role("frontend")));
+        let direct = message_from("commander", "@backend");
+        assert!(event_reaches_role(&direct, &role("backend")));
+        assert!(!event_reaches_role(&direct, &role("frontend")));
     }
 
     #[test]
     fn a_pair_channel_reaches_both_members_and_no_one_else() {
-        let pair = ChannelId::new("frontend+backend");
-        assert!(channel_addresses_role(&pair, &role("frontend")));
-        assert!(channel_addresses_role(&pair, &role("backend")));
-        assert!(!channel_addresses_role(&pair, &role("qa")));
+        let pair = message_from("commander", "frontend+backend");
+        assert!(event_reaches_role(&pair, &role("frontend")));
+        assert!(event_reaches_role(&pair, &role("backend")));
+        assert!(!event_reaches_role(&pair, &role("qa")));
     }
 
     #[test]
     fn an_unknown_channel_reaches_no_one() {
-        let other = ChannelId::new("random");
-        assert!(!channel_addresses_role(&other, &role("backend")));
+        let other = message_from("commander", "random");
+        assert!(!event_reaches_role(&other, &role("backend")));
     }
 
     #[test]
