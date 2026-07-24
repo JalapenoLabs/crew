@@ -51,7 +51,8 @@ mod summary;
 mod usage;
 
 pub use config::{
-    Config, DEFAULT_COMMANDER, DEFAULT_PORT, DEFAULT_STATE_DIR, DEFAULT_USAGE_THRESHOLD,
+    Config, DEFAULT_COMMANDER, DEFAULT_PORT, DEFAULT_RETENTION_HOURS, DEFAULT_STATE_DIR,
+    DEFAULT_USAGE_THRESHOLD,
 };
 pub use error::ApiError;
 pub use router::ChannelRouter;
@@ -61,5 +62,5 @@ pub use serve_error::ServeError;
 pub use state::{AppState, Sequenced};
 pub use store::{
     Cursor, Durability, EventFilter, EventKindTag, EventPage, EventQuery, Liveness, LogStore,
-    MemoryStore, RoleStatus, Roster, Storage,
+    MemoryStore, RoleStatus, Roster, Storage, StoredEvent,
 };

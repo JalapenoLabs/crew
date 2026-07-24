@@ -653,15 +653,16 @@ impl Budgets {
 /// tolerated stall.
 const BROADCAST_CAPACITY: usize = 1024;
 
-/// An event paired with its sequence number: its position in the append-only
-/// log.
+/// An event paired with its stable absolute sequence number.
 ///
-/// The sequence is the cursor the inbox stream emits as a Server-Sent-Event
-/// `id`, so a reconnecting subscriber resumes exactly after the last event it
-/// received.
+/// The sequence is monotonic and never reused (see
+/// [`Storage::append`](crate::Storage::append)), so it is the cursor the inbox
+/// stream emits as a Server-Sent-Event `id`: a reconnecting subscriber resumes
+/// exactly after the last event it received, even across a prune of the events
+/// between (issue #201).
 #[derive(Debug, Clone)]
 pub struct Sequenced {
-    /// The event's position in the log, assigned on append.
+    /// The stable absolute sequence assigned on append.
     pub seq: u64,
     /// The event itself.
     pub event: Event,
@@ -1125,8 +1126,7 @@ impl AppState {
             .publish_order
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let seq = self.storage.next_seq();
-        self.storage.append(event.clone());
+        let seq = self.storage.append(event.clone());
         // Advance the usage rollup at the one choke point every event flows through, so
         // telemetry and lifecycle events from any handler are folded in (issue #55).
         self.stats().apply(&event);

@@ -11,13 +11,23 @@
 //!   async runtime, even under a burst (issue #206).
 //!
 //! The trait covers the whole persisted surface: [`append`](Storage::append) an
-//! event, [`flush`](Storage::flush) pending writes, [`query`](Storage::query)
-//! the log with filters and a stable page cursor, read every event or only
-//! those after a cursor ([`events_since`](Storage::events_since), so an SSE
-//! replay is O(gap), issue #225), and read or write the [`Roster`]. `query` has
-//! a default that scans the in-memory index;
-//! a backend with a real index (a database) overrides it to push the filter
-//! down, which is why the query types here stay backend-neutral.
+//! event (returning the stable sequence it is assigned),
+//! [`flush`](Storage::flush) pending writes, [`query`](Storage::query) the log
+//! with filters and a stable page cursor, read every event or only those after
+//! a cursor ([`events_since`](Storage::events_since), so an SSE replay is
+//! O(gap), issue #225), [`retain`](Storage::retain) only the events worth
+//! keeping (kind-aware retention, issue #201), and read or write the
+//! [`Roster`]. `query` has a default that scans the in-memory index; a backend
+//! with a real index (a database) overrides it to push the filter down, which
+//! is why the query types here stay backend-neutral.
+//!
+//! Every event carries a stable absolute [sequence](StoredEvent) assigned on
+//! append: monotonic, never reused, and never renumbered. Both the SSE
+//! `Last-Event-ID` and the `/history` [`Cursor`] resolve against it, and the
+//! log persists it, so pruning aged events from the middle of the log (issue
+//! #201) leaves every surviving event's cursor pointing at the same event. A
+//! position-derived sequence would shift under such a prune and silently gap or
+//! duplicate a lossless SSE resume; the stored sequence does not.
 
 use std::{
     collections::BTreeMap,
@@ -57,13 +67,20 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
 
     /// The sequence number the next appended event will receive.
     ///
-    /// Equal to the current event count, so an event's sequence is its position
-    /// in the log. It is the cursor the inbox stream hands out as a
-    /// `Last-Event-ID`, letting a reconnecting subscriber resume exactly
-    /// after the last event it saw.
+    /// A monotonic counter, advanced once per [`append`](Storage::append) and
+    /// never rewound by a [`retain`](Storage::retain) prune, so a sequence is
+    /// stable and never reused. It is the cursor the inbox stream hands out as
+    /// a `Last-Event-ID`, letting a reconnecting subscriber resume exactly
+    /// after the last event it saw even across a prune of the events
+    /// between.
     fn next_seq(&self) -> u64;
 
-    /// Records an event in the log.
+    /// Records an event in the log, returning the stable sequence it is
+    /// assigned.
+    ///
+    /// The sequence is monotonic and never reused (see
+    /// [`next_seq`](Storage::next_seq)), so the returned value is the event's
+    /// permanent identity on the stream.
     ///
     /// A durable backend may persist in the background, so the event is not
     /// guaranteed on disk when this returns; call [`flush`](Storage::flush) to
@@ -71,7 +88,7 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// silent, though: the event stays in the in-memory index and the failure
     /// is counted in [`durability`](Storage::durability) so `GET /health`
     /// can report degraded durability (issues #206, #207).
-    fn append(&self, event: Event);
+    fn append(&self, event: Event) -> u64;
 
     /// Blocks until every appended event is durably persisted.
     ///
@@ -91,26 +108,58 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
         Durability::default()
     }
 
-    /// Returns every stored event, oldest first.
-    fn events(&self) -> Vec<Event>;
+    /// Returns every stored event with its stable sequence, oldest first.
+    ///
+    /// The primitive read the other read paths default onto: [`events`] strips
+    /// the sequence, [`events_since`] slices the tail, and [`query`] filters
+    /// and pages over it.
+    ///
+    /// [`events`]: Storage::events
+    /// [`events_since`]: Storage::events_since
+    /// [`query`]: Storage::query
+    fn stored_events(&self) -> Vec<StoredEvent>;
 
-    /// Returns the events at position `after` and later (sequence `>= after`),
-    /// oldest first.
+    /// Returns every stored event, oldest first.
+    ///
+    /// The sequence-free view the projection rebuilds fold on boot; the default
+    /// drops the sequence from [`stored_events`](Storage::stored_events).
+    fn events(&self) -> Vec<Event> {
+        self.stored_events()
+            .into_iter()
+            .map(|stored| stored.event)
+            .collect()
+    }
+
+    /// Returns the events with sequence `>= after`, oldest first.
     ///
     /// This bounds a replay to the gap after a cursor rather than the whole log
     /// (issue #225): the SSE resume engine reads only what a reconnecting
-    /// client missed, so a connect is O(gap) instead of O(log).
-    /// The default clones the full log via [`events`](Storage::events) and
-    /// slices, so it is correct for any backend; a backend with an index
-    /// (the in-memory stores below, a database later) overrides it to seek.
-    /// `after` past the end yields an empty slice.
-    fn events_since(&self, after: u64) -> Vec<Event> {
-        let events = self.events();
-        let start = usize::try_from(after)
-            .unwrap_or(usize::MAX)
-            .min(events.len());
-        events[start..].to_vec()
+    /// client missed, so a connect is O(gap) instead of O(log). The match is by
+    /// stored sequence, not log position, so it stays correct after a prune
+    /// drops earlier events (issue #201).
+    ///
+    /// The default filters [`stored_events`](Storage::stored_events), so it is
+    /// correct for any backend; a backend with a sorted index (the in-memory
+    /// stores below, a database later) overrides it to seek. `after` past the
+    /// end yields an empty slice.
+    fn events_since(&self, after: u64) -> Vec<StoredEvent> {
+        self.stored_events()
+            .into_iter()
+            .filter(|stored| stored.seq >= after)
+            .collect()
     }
+
+    /// Prunes aged-out events the log need not keep, returning how many it
+    /// dropped.
+    ///
+    /// Kind-aware retention (issue #201): a state-bearing event (one a boot
+    /// projection folds) is kept forever, an ephemeral event older than
+    /// `before` is dropped, and the single newest event is always kept as
+    /// the sequence high-water anchor so a restart never reuses a pruned
+    /// sequence. The change lands in both the in-memory index and, for a
+    /// durable backend, on disk, so the broker's memory and its log stay
+    /// bounded on a long-running unit.
+    fn retain(&self, before: Timestamp) -> usize;
 
     /// Returns the current roster.
     fn roster(&self) -> Roster;
@@ -140,9 +189,69 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// it is decoded ([`Cursor::from_token`]), and a well-formed cursor past
     /// the end simply yields an empty page.
     fn query(&self, query: &EventQuery) -> EventPage {
-        // base_seq 0: the in-memory log is never trimmed yet (issue #208).
-        query_events(&self.events(), 0, query)
+        query_events(&self.stored_events(), query)
     }
+}
+
+/// An event paired with its stable absolute sequence number.
+///
+/// The unit of the store's in-memory index and its on-disk log: the sequence is
+/// assigned on [`append`](Storage::append), persisted alongside the event, and
+/// never reused or renumbered, so it survives a prune of the events around it
+/// (issue #201). Both the SSE `Last-Event-ID` and the `/history` [`Cursor`]
+/// resolve against it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredEvent {
+    /// The stable absolute sequence assigned on append.
+    pub seq: u64,
+    /// The event itself.
+    pub event: Event,
+}
+
+/// Whether an event must be kept forever because a boot projection folds it.
+///
+/// A state-bearing kind rebuilds a projection on restart: `lifecycle` feeds the
+/// pause control (issue #185) and the stats rollup (issue #55), `verification`
+/// the done-gate (issue #181), `board` the situation board (issue #49),
+/// `ledger` the work ledger (issue #185), `telemetry` the stats rollup,
+/// `budget` the budget snapshot (issue #176), and `mission` the stats rollup
+/// (issue #155). Pruning one would silently corrupt the rebuilt state, so
+/// retention keeps them regardless of age. Every other kind carries no state a
+/// restart rebuilds, so it is prunable past the retention window.
+///
+/// The `match` is exhaustive with no wildcard arm on purpose: a new
+/// [`EventKind`] variant fails to compile here until it is classified, so no
+/// kind is ever pruned (or kept) without a deliberate retention decision. In
+/// particular `mission` is state-bearing yet absent from [`EventKindTag`], so a
+/// tag-driven keep-list would silently drop it; deriving the decision from
+/// [`EventKind`] itself closes that trap (issue #201).
+fn is_state_bearing(kind: &EventKind) -> bool {
+    match kind {
+        // Kept forever: a boot projection folds it.
+        EventKind::Lifecycle(_)
+        | EventKind::Verification(_)
+        | EventKind::Board(_)
+        | EventKind::Ledger(_)
+        | EventKind::Telemetry(_)
+        | EventKind::Budget(_)
+        | EventKind::Mission(_) => true,
+        // Prunable past the retention window: no projection rebuilds from it.
+        EventKind::Message(_)
+        | EventKind::Activity(_)
+        | EventKind::Boundary(_)
+        | EventKind::Usage(_)
+        | EventKind::Stall(_) => false,
+    }
+}
+
+/// Whether `stored` survives a retention pass with cutoff `before`.
+///
+/// Keeps a state-bearing event at any age, an ephemeral event at or after the
+/// cutoff, and the single newest event (`newest_seq`) unconditionally as the
+/// sequence high-water anchor, so a durable backend that reconstructs
+/// `next_seq` from its log after a restart never reuses a pruned sequence.
+fn survives_retention(stored: &StoredEvent, before: Timestamp, newest_seq: u64) -> bool {
+    stored.seq == newest_seq || stored.event.ts >= before || is_state_bearing(&stored.event.kind)
 }
 
 /// A snapshot of a store's persistence health (issue #207).
@@ -474,19 +583,17 @@ pub struct EventPage {
 
 /// Runs a query over an in-memory event slice, the scan both backends share.
 ///
-/// `base_seq` is the sequence number of `events[0]`: `0` while the log is
-/// untrimmed, and the count already dropped once compaction or pruning lands
-/// (issue #208), so an event's `seq` is `base_seq + its index` and stays stable
-/// across a trim. Orders matches by `(ts, seq)` and resumes strictly after
-/// `query.after`'s key, which the cursor carries directly, so paging never
-/// depends on an event still sitting at a given index.
-fn query_events(events: &[Event], base_seq: u64, query: &EventQuery) -> EventPage {
+/// Each event carries its stable stored sequence, so ordering by `(ts, seq)`
+/// and resuming strictly after `query.after`'s key stays correct even after a
+/// prune drops earlier events (issue #201): the cursor names a `(ts, seq)`, not
+/// a log index, so paging never depends on an event sitting at a given
+/// position.
+fn query_events(events: &[StoredEvent], query: &EventQuery) -> EventPage {
     let boundary = query.after.map(Cursor::key);
 
     let mut matched: Vec<(u64, &Event)> = events
         .iter()
-        .enumerate()
-        .map(|(index, event)| (base_seq + index as u64, event))
+        .map(|stored| (stored.seq, &stored.event))
         .filter(|(_, event)| query.filter.matches(event))
         .collect();
     matched.sort_by(|a, b| a.1.ts.cmp(&b.1.ts).then_with(|| a.0.cmp(&b.0)));
@@ -531,8 +638,22 @@ fn channel_matches(channel: &ChannelId, filter: &ChannelId) -> bool {
 /// rather than panicked, so a bad request can never take the store down.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
-    events: Mutex<Vec<Event>>,
+    log: Mutex<MemLog>,
     roster: Mutex<Roster>,
+}
+
+/// The in-memory store's event index and its monotonic sequence counter.
+///
+/// Held under one lock so a sequence is assigned and the event indexed
+/// together, keeping the index sorted by sequence. `next_seq` only advances (on
+/// append) and never rewinds on a [`retain`](Storage::retain) prune, so a
+/// sequence is never reused.
+#[derive(Debug, Default)]
+struct MemLog {
+    /// Every stored event with its stable sequence, oldest first.
+    events: Vec<StoredEvent>,
+    /// The sequence the next appended event will take.
+    next_seq: u64,
 }
 
 impl Storage for MemoryStore {
@@ -541,32 +662,43 @@ impl Storage for MemoryStore {
     }
 
     fn next_seq(&self) -> u64 {
-        self.events
+        self.log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .len() as u64
+            .next_seq
     }
 
-    fn append(&self, event: Event) {
-        self.events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(event);
+    fn append(&self, event: Event) -> u64 {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let seq = log.next_seq;
+        log.next_seq += 1;
+        log.events.push(StoredEvent { seq, event });
+        seq
     }
 
-    fn events(&self) -> Vec<Event> {
-        self.events
+    fn stored_events(&self) -> Vec<StoredEvent> {
+        self.log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .events
             .clone()
     }
 
-    fn events_since(&self, after: u64) -> Vec<Event> {
-        let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        let start = usize::try_from(after)
-            .unwrap_or(usize::MAX)
-            .min(events.len());
-        events[start..].to_vec()
+    fn events_since(&self, after: u64) -> Vec<StoredEvent> {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let start = log.events.partition_point(|stored| stored.seq < after);
+        log.events[start..].to_vec()
+    }
+
+    fn retain(&self, before: Timestamp) -> usize {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(newest_seq) = log.events.last().map(|stored| stored.seq) else {
+            return 0;
+        };
+        let before_len = log.events.len();
+        log.events
+            .retain(|stored| survives_retention(stored, before, newest_seq));
+        before_len - log.events.len()
     }
 
     fn roster(&self) -> Roster {
@@ -594,12 +726,17 @@ impl Storage for MemoryStore {
 /// A request to the durable log's background writer thread.
 ///
 /// The writer owns the file and drains this queue, so a caller's thread never
-/// blocks on disk. A `Line` carries a serialized event; a `Barrier` lets a
-/// caller wait until everything queued before it is flushed (see
-/// [`LogStore::flush`]).
+/// blocks on disk. A `Line` carries a serialized event; a `Rewrite` replaces
+/// the whole file with the surviving lines after a prune (issue #201); a
+/// `Barrier` lets a caller wait until everything queued before it is flushed
+/// (see [`LogStore::flush`]).
 enum LogWrite {
     /// Persist one serialized event line.
     Line(String),
+    /// Replace the log file with these serialized survivor lines, oldest first,
+    /// after a retention prune. Keeping the rewrite on the writer thread (which
+    /// owns the file) means no other thread races its file handle.
+    Rewrite(Vec<String>),
     /// Flush everything queued so far, then acknowledge on the sender.
     Barrier(mpsc::Sender<()>),
 }
@@ -611,8 +748,12 @@ enum LogWrite {
 /// `writer` is absent only while the store is being dropped.
 #[derive(Debug)]
 struct Log {
-    /// The in-memory index: every event, oldest first.
-    events: Vec<Event>,
+    /// The in-memory index: every event with its stable sequence, oldest first.
+    events: Vec<StoredEvent>,
+    /// The sequence the next appended event will take. Advanced on append and
+    /// never rewound by a prune, so a sequence is never reused; reconstructed
+    /// on [`open`](LogStore::open) from the highest sequence on disk.
+    next_seq: u64,
     /// Enqueues lines to the background writer thread.
     writer: Option<mpsc::Sender<LogWrite>>,
 }
@@ -696,7 +837,7 @@ impl LogStore {
             .wrap_err_with(|| format!("could not create state dir {}", dir.display()))?;
 
         let log_path = dir.join(EVENTS_FILE);
-        let events = replay(&log_path)?;
+        let (events, next_seq) = replay(&log_path)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -707,13 +848,18 @@ impl LogStore {
         // runtime on disk I/O (issue #206). The queue is unbounded, which suits a
         // broker at message rates with occasional bursts; a producer sustained
         // faster than the disk is out of scope. The writer shares `durability` so
-        // a background write failure is counted for `GET /health` (issue #207).
+        // a background write failure is counted for `GET /health` (issue #207),
+        // and owns the log path so a retention rewrite (issue #201) never races
+        // another thread's file handle.
         let durability = Arc::new(DurabilityState::default());
         let writer_durability = Arc::clone(&durability);
         let (writer, requests) = mpsc::channel();
+        // Move the log path into the writer thread: it owns the file, so a
+        // retention rewrite (issue #201) happens there and never races an append.
+        let buffered = BufWriter::new(file);
         let writer_thread = std::thread::Builder::new()
             .name("crew-log-writer".to_owned())
-            .spawn(move || run_writer(BufWriter::new(file), &requests, &writer_durability))
+            .spawn(move || run_writer(&log_path, buffered, &requests, &writer_durability))
             .wrap_err("could not start the log writer thread")?;
 
         let roster_path = dir.join(ROSTER_FILE);
@@ -730,6 +876,7 @@ impl LogStore {
         Ok(Self {
             log: Mutex::new(Log {
                 events,
+                next_seq,
                 writer: Some(writer),
             }),
             writer_thread: Some(writer_thread),
@@ -767,15 +914,18 @@ impl Storage for LogStore {
         "log"
     }
 
-    fn append(&self, event: Event) {
+    fn append(&self, event: Event) -> u64 {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        // Encode and enqueue under the lock, so the writer receives events in the
-        // same order they enter the index and the file's lines stay aligned with
-        // memory. The send is non-blocking; the writer thread does the disk I/O
-        // and records any write failure. The event is indexed regardless, so a
-        // persist failure degrades only durability, not the running broker's
-        // consistency (issues #206, #207).
-        match serde_json::to_string(&event) {
+        // Assign the stable sequence and index under one lock, so the writer
+        // receives events in the same order they enter the index and the file's
+        // lines stay aligned with memory. The send is non-blocking; the writer
+        // thread does the disk I/O and records any write failure. The event is
+        // indexed regardless, so a persist failure degrades only durability, not
+        // the running broker's consistency (issues #206, #207).
+        let seq = log.next_seq;
+        log.next_seq += 1;
+        let stored = StoredEvent { seq, event };
+        match serde_json::to_string(&stored) {
             Ok(line) => {
                 if let Some(writer) = log.writer.as_ref() {
                     if writer.send(LogWrite::Line(line)).is_err() {
@@ -798,7 +948,8 @@ impl Storage for LogStore {
                 self.durability.record(&err);
             }
         }
-        log.events.push(event);
+        log.events.push(stored);
+        seq
     }
 
     fn flush(&self) {
@@ -809,7 +960,7 @@ impl Storage for LogStore {
         self.durability.snapshot()
     }
 
-    fn events(&self) -> Vec<Event> {
+    fn stored_events(&self) -> Vec<StoredEvent> {
         self.log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -817,11 +968,9 @@ impl Storage for LogStore {
             .clone()
     }
 
-    fn events_since(&self, after: u64) -> Vec<Event> {
+    fn events_since(&self, after: u64) -> Vec<StoredEvent> {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        let start = usize::try_from(after)
-            .unwrap_or(usize::MAX)
-            .min(log.events.len());
+        let start = log.events.partition_point(|stored| stored.seq < after);
         log.events[start..].to_vec()
     }
 
@@ -829,14 +978,48 @@ impl Storage for LogStore {
         self.log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .next_seq
+    }
+
+    fn retain(&self, before: Timestamp) -> usize {
+        let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(newest_seq) = log.events.last().map(|stored| stored.seq) else {
+            return 0;
+        };
+        let before_len = log.events.len();
+        log.events
+            .retain(|stored| survives_retention(stored, before, newest_seq));
+        let pruned = before_len - log.events.len();
+        if pruned == 0 {
+            // Nothing aged out, so leave the file untouched: no needless rewrite
+            // on a sweep that finds everything still worth keeping.
+            return 0;
+        }
+        // Rewrite the file to the survivors on the writer thread, which owns the
+        // file handle. `next_seq` is untouched, and the newest event is always a
+        // survivor, so the highest sequence stays on disk and a restart
+        // reconstructs the same `next_seq`: no sequence is ever reused.
+        let lines = log
             .events
-            .len() as u64
+            .iter()
+            .filter_map(|stored| serde_json::to_string(stored).ok())
+            .collect();
+        if let Some(writer) = log.writer.as_ref() {
+            if writer.send(LogWrite::Rewrite(lines)).is_err() {
+                event!(
+                    name: "broker.store.prune.failed",
+                    Level::ERROR,
+                    "the log writer thread is gone; pruned in memory only",
+                );
+                self.durability.record(&"the log writer thread is gone");
+            }
+        }
+        pruned
     }
 
     fn query(&self, query: &EventQuery) -> EventPage {
         let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        // base_seq 0: the on-disk log is never trimmed yet (issue #208).
-        query_events(&log.events, 0, query)
+        query_events(&log.events, query)
     }
 
     fn roster(&self) -> Roster {
@@ -887,15 +1070,16 @@ impl Drop for LogStore {
 /// `durability` so `GET /health` reflects it even off the request path (issues
 /// #206, #207).
 fn run_writer(
+    path: &Path,
     mut writer: BufWriter<File>,
     requests: &mpsc::Receiver<LogWrite>,
     durability: &DurabilityState,
 ) {
     while let Ok(first) = requests.recv() {
         let mut barriers = Vec::new();
-        write_request(&mut writer, first, &mut barriers, durability);
+        writer = drain_one(path, writer, first, &mut barriers, durability);
         while let Ok(next) = requests.try_recv() {
-            write_request(&mut writer, next, &mut barriers, durability);
+            writer = drain_one(path, writer, next, &mut barriers, durability);
         }
         // One flush per drained batch, so a restart can replay every line written
         // so far. A failure keeps the broker consistent in memory; only durability
@@ -914,6 +1098,61 @@ fn run_writer(
             let _ = barrier.send(());
         }
     }
+}
+
+/// Applies one write request, returning the (possibly replaced) writer.
+///
+/// A [`Rewrite`](LogWrite::Rewrite) swaps the writer onto the freshly rewritten
+/// file; every other request writes through the current one. Keeping the swap
+/// here, on the one thread that owns the file, means no append ever races the
+/// rewrite. A rewrite failure keeps the old writer so appends keep flowing; the
+/// prune already landed in memory and only durability degrades (issue #201).
+fn drain_one(
+    path: &Path,
+    mut writer: BufWriter<File>,
+    request: LogWrite,
+    barriers: &mut Vec<mpsc::Sender<()>>,
+    durability: &DurabilityState,
+) -> BufWriter<File> {
+    if let LogWrite::Rewrite(lines) = request {
+        match rewrite_log(path, &lines) {
+            Ok(replaced) => return replaced,
+            Err(err) => {
+                event!(
+                    name: "broker.store.prune.failed",
+                    Level::ERROR,
+                    error = %err,
+                    "could not rewrite the pruned log; keeping the prune in memory only",
+                );
+                durability.record(&err);
+                return writer;
+            }
+        }
+    }
+    write_request(&mut writer, request, barriers, durability);
+    writer
+}
+
+/// Rewrites the log file to `lines`, returning a fresh append writer on it.
+///
+/// Writes a temp file, flushes it, and renames it over the target so the
+/// replacement is atomic (a crash leaves either the old file or the new one,
+/// never a torn mix), then opens a fresh append writer so subsequent appends
+/// land after the survivors. The caller drops the old writer; its buffered
+/// bytes are survivors already written to the new file, so nothing is lost.
+fn rewrite_log(path: &Path, lines: &[String]) -> std::io::Result<BufWriter<File>> {
+    let tmp = path.with_file_name(format!("{EVENTS_FILE}.tmp"));
+    let mut scratch = BufWriter::new(File::create(&tmp)?);
+    for line in lines {
+        writeln!(scratch, "{line}")?;
+    }
+    scratch.flush()?;
+    // Close the scratch file before the rename so the replacement is clean on
+    // every platform.
+    drop(scratch);
+    std::fs::rename(&tmp, path)?;
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    Ok(BufWriter::new(file))
 }
 
 /// Applies one write request: buffer a line (recording a failure to
@@ -940,14 +1179,24 @@ fn write_request(
             }
         }
         LogWrite::Barrier(ack) => barriers.push(ack),
+        // A rewrite swaps the file handle, which this generic writer cannot do,
+        // so `drain_one` intercepts it before it ever reaches here.
+        LogWrite::Rewrite(_) => {
+            unreachable!("a rewrite is handled by drain_one, not write_request")
+        }
     }
 }
 
 /// Replays the on-disk log into memory, skipping any unreadable line.
-fn replay(path: &Path) -> Result<Vec<Event>> {
+///
+/// Returns the stored events, each with its persisted sequence, and the next
+/// sequence to assign, reconstructed as one past the highest sequence on disk.
+/// Retention always keeps the newest event (issue #201), so the highest
+/// sequence survives a prune and the reconstruction never reuses one.
+fn replay(path: &Path) -> Result<(Vec<StoredEvent>, u64)> {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(err) => {
             return Err(err)
                 .wrap_err_with(|| format!("could not read event log {}", path.display()))
@@ -955,13 +1204,17 @@ fn replay(path: &Path) -> Result<Vec<Event>> {
     };
 
     let mut events = Vec::new();
+    let mut next_seq = 0;
     for (index, line) in BufReader::new(file).lines().enumerate() {
         let line = line.wrap_err_with(|| format!("could not read event log {}", path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<Event>(&line) {
-            Ok(event) => events.push(event),
+        match serde_json::from_str::<StoredEvent>(&line) {
+            Ok(stored) => {
+                next_seq = next_seq.max(stored.seq + 1);
+                events.push(stored);
+            }
             // A torn or corrupt line (e.g. a crash mid-append) must not lose the rest.
             Err(err) => event!(
                 name: "broker.store.replay.skipped",
@@ -972,7 +1225,7 @@ fn replay(path: &Path) -> Result<Vec<Event>> {
             ),
         }
     }
-    Ok(events)
+    Ok((events, next_seq))
 }
 
 /// Reads the roster file, defaulting to empty if it is absent or unreadable.
@@ -1033,14 +1286,30 @@ mod tests {
     };
 
     use crew_core::{
-        ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId, Sender,
-        Timestamp,
+        Activity, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, ChannelId, Event,
+        EventKind, LedgerEvent, Lifecycle, Message, MessageId, MessageKind, MissionEvent, RoleId,
+        Sender, StallEvent, StallKind, StallStatus, TaskId, TaskState, TelemetryEvent, Timestamp,
+        UsageEvent, Verdict, VerificationEvent,
     };
 
     use super::{
-        query_events, write_request, Cursor, DurabilityState, EventFilter, EventKindTag,
-        EventQuery, Liveness, LogStore, LogWrite, MemoryStore, RoleStatus, Storage,
+        is_state_bearing, query_events, survives_retention, write_request, Cursor, DurabilityState,
+        EventFilter, EventKindTag, EventQuery, Liveness, LogStore, LogWrite, MemoryStore,
+        RoleStatus, Storage, StoredEvent,
     };
+
+    /// Wraps events into stored events, assigning sequences in order, so a scan
+    /// helper reads the same stored shape the store's index holds.
+    fn stored_log(events: Vec<Event>) -> Vec<StoredEvent> {
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| StoredEvent {
+                seq: index as u64,
+                event,
+            })
+            .collect()
+    }
 
     /// A unique temp directory that removes itself on drop.
     struct TempDir(PathBuf);
@@ -1092,17 +1361,14 @@ mod tests {
         }
     }
 
-    /// The untrimmed base sequence the store uses today (issue #208).
-    const UNTRIMMED: u64 = 0;
-
     #[test]
     fn query_orders_by_timestamp_then_position() {
-        let log = vec![
+        let log = stored_log(vec![
             message("backend", "all-units", ts(3)),
             message("backend", "all-units", ts(1)),
             message("backend", "all-units", ts(2)),
-        ];
-        let page = query_events(&log, UNTRIMMED, &unfiltered(None, 10));
+        ]);
+        let page = query_events(&log, &unfiltered(None, 10));
         let times: Vec<_> = page.events.iter().map(|event| event.ts).collect();
         assert_eq!(times, vec![ts(1), ts(2), ts(3)]);
         assert!(page.next.is_none());
@@ -1114,15 +1380,15 @@ mod tests {
             .map(|i| message("backend", "all-units", ts(i)))
             .collect();
 
-        let page1 = query_events(&log, UNTRIMMED, &unfiltered(None, 8));
+        let page1 = query_events(&stored_log(log.clone()), &unfiltered(None, 8));
         assert_eq!(page1.events.len(), 8);
 
         // A concurrent writer appends newer events after page 1 was read.
         log.push(message("frontend", "all-units", ts(40)));
         log.push(message("frontend", "all-units", ts(41)));
 
-        let page2 = query_events(&log, UNTRIMMED, &unfiltered(page1.next, 8));
-        let page3 = query_events(&log, UNTRIMMED, &unfiltered(page2.next, 8));
+        let page2 = query_events(&stored_log(log.clone()), &unfiltered(page1.next, 8));
+        let page3 = query_events(&stored_log(log.clone()), &unfiltered(page2.next, 8));
 
         let seen: Vec<Timestamp> = page1
             .events
@@ -1147,7 +1413,7 @@ mod tests {
 
     #[test]
     fn query_filters_compose() {
-        let log = vec![
+        let log = stored_log(vec![
             message("backend", "all-units", ts(1)),
             message("frontend", "all-units", ts(2)),
             Event {
@@ -1155,12 +1421,11 @@ mod tests {
                 ..message("backend", "all-units", ts(3))
             },
             message("backend", "@backend", ts(4)),
-        ];
+        ]);
 
         let filtered = |filter: EventFilter| {
             query_events(
                 &log,
-                UNTRIMMED,
                 &EventQuery {
                     filter,
                     after: None,
@@ -1208,10 +1473,9 @@ mod tests {
 
     #[test]
     fn query_channel_filter_ignores_pair_member_order() {
-        let log = vec![message("backend", "frontend+backend", ts(1))];
+        let log = stored_log(vec![message("backend", "frontend+backend", ts(1))]);
         let page = query_events(
             &log,
-            UNTRIMMED,
             &EventQuery {
                 filter: EventFilter {
                     channel: Some(ChannelId::new("backend+frontend")),
@@ -1229,33 +1493,34 @@ mod tests {
         // A well-formed cursor beyond every event is not an error: it just has
         // nothing after it. This is what lets a cursor survive a future trim that
         // drops the event it named (issue #208).
-        let log = vec![message("backend", "all-units", ts(1))];
+        let log = stored_log(vec![message("backend", "all-units", ts(1))]);
         let beyond = Cursor { ts: ts(9), seq: 99 };
-        let page = query_events(&log, UNTRIMMED, &unfiltered(Some(beyond), 10));
+        let page = query_events(&log, &unfiltered(Some(beyond), 10));
         assert!(page.events.is_empty(), "no event sorts after the cursor");
         assert!(page.next.is_none(), "and so no next page");
     }
 
     #[test]
-    fn a_cursor_is_stable_when_earlier_events_are_trimmed() {
-        // The cursor carries `(ts, seq)`, and `seq` is `base_seq + index`, so a
-        // page fetched before a trim and resumed after one neither repeats nor
-        // skips an event even though every surviving index shifted (issue #208).
-        let log: Vec<Event> = (0..10)
-            .map(|i| message("backend", "all-units", ts(i)))
-            .collect();
+    fn a_cursor_is_stable_when_earlier_events_are_pruned() {
+        // The cursor carries `(ts, seq)` and the stored sequence never shifts, so
+        // a page fetched before a prune and resumed after one neither repeats nor
+        // skips an event even though earlier events were physically dropped
+        // (issues #201, #208).
+        let log = stored_log(
+            (0..10)
+                .map(|i| message("backend", "all-units", ts(i)))
+                .collect(),
+        );
 
         // Page 1 over the full log: the first four events, cursor at the fourth.
-        let page1 = query_events(&log, UNTRIMMED, &unfiltered(None, 4));
+        let page1 = query_events(&log, &unfiltered(None, 4));
         let seen: Vec<Timestamp> = page1.events.iter().map(|event| event.ts).collect();
         assert_eq!(seen, (0..4).map(ts).collect::<Vec<_>>());
         let cursor = page1.next.expect("a fourth event remains");
 
-        // Now trim the first three events: the survivors keep their seqs because
-        // `base_seq` advances by the trimmed count.
-        let trimmed = &log[3..];
-        let base = 3;
-        let page2 = query_events(trimmed, base, &unfiltered(Some(cursor), 4));
+        // Prune the first three events; the survivors keep their stored seqs.
+        let pruned: Vec<StoredEvent> = log.into_iter().skip(3).collect();
+        let page2 = query_events(&pruned, &unfiltered(Some(cursor), 4));
         let resumed: Vec<Timestamp> = page2.events.iter().map(|event| event.ts).collect();
         assert_eq!(
             resumed,
@@ -1369,16 +1634,15 @@ mod tests {
             store.append(message("qa", "all-units", ts(3)));
 
             // From 0, the whole log; from a mid-point, only the tail after it.
-            assert_eq!(
-                store.events_since(0),
-                store.events(),
-                "since 0 is the whole log"
-            );
+            let since_0: Vec<Event> = store.events_since(0).into_iter().map(|s| s.event).collect();
+            assert_eq!(since_0, store.events(), "since 0 is the whole log");
             let tail = store.events_since(1);
             assert_eq!(tail.len(), 2, "since 1 skips the first event");
-            assert_eq!(tail[0].ts, ts(2), "the slice starts at the cursor position");
+            assert_eq!(tail[0].seq, 1, "the slice starts at the requested sequence");
+            assert_eq!(tail[0].event.ts, ts(2), "and at the matching event");
+            let tail_events: Vec<Event> = tail.into_iter().map(|s| s.event).collect();
             assert_eq!(
-                store.events_since(1),
+                tail_events,
                 store.events()[1..].to_vec(),
                 "the gap matches the full log's tail, so replay is behavior-preserving",
             );
@@ -1521,5 +1785,241 @@ mod tests {
         let store = MemoryStore::default();
         store.append(message("backend", "all-units", ts(1)));
         assert!(store.durability().is_healthy());
+    }
+
+    /// A representative event of `kind`, stamped at `at`, for the retention
+    /// tests.
+    fn of_kind(kind: EventKind, at: Timestamp) -> Event {
+        Event {
+            ts: at,
+            from: Sender::Role(RoleId::new("backend")),
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind,
+        }
+    }
+
+    fn message_kind() -> EventKind {
+        EventKind::Message(Message {
+            id: MessageId::new(),
+            kind: MessageKind::Note,
+            body: String::new(),
+        })
+    }
+
+    fn role() -> RoleId {
+        RoleId::new("backend")
+    }
+
+    #[test]
+    fn is_state_bearing_classifies_every_kind_a_projection_rebuilds() {
+        // The retention keep-set is derived from `EventKind` itself, not the
+        // `EventKindTag` filter set, so a state-bearing kind absent from the tags
+        // is not silently dropped (issue #201). The exhaustive `match` in
+        // `is_state_bearing` fails to compile if a new kind is added without a
+        // decision; this pins the decision for every current kind so a
+        // misclassification (for example flipping `mission` to prunable) fails
+        // loudly too.
+        let keep = [
+            EventKind::Lifecycle(Lifecycle::Started),
+            EventKind::Verification(VerificationEvent {
+                task: TaskId::new(),
+                title: String::new(),
+                owner: role(),
+                verifier: None,
+                verdict: Verdict::Submitted,
+                detail: String::new(),
+            }),
+            EventKind::Board(BoardEvent {
+                key: "k".to_owned(),
+                section: BoardSection::Decision,
+                author: role(),
+                body: String::new(),
+                retracted: false,
+            }),
+            EventKind::Ledger(LedgerEvent {
+                task: TaskId::new(),
+                owner: role(),
+                state: TaskState::Claimed,
+                title: String::new(),
+            }),
+            EventKind::Telemetry(TelemetryEvent {
+                role: role(),
+                tokens: 0,
+                cost_micro_usd: 0,
+            }),
+            EventKind::Budget(BudgetEvent {
+                role: role(),
+                role_spent: 0,
+                role_cap: None,
+                crew_spent: 0,
+                crew_budget: None,
+                breach: None,
+            }),
+            // The landmine: `mission` is folded by the stats rollup yet absent
+            // from `EventKindTag`, so it must be kept, not pruned.
+            EventKind::Mission(MissionEvent {
+                summary: String::new(),
+            }),
+        ];
+        for kind in &keep {
+            assert!(
+                is_state_bearing(kind),
+                "a projection rebuilds from this kind, so it must be kept: {kind:?}",
+            );
+        }
+
+        let prune = [
+            message_kind(),
+            EventKind::Activity(Activity::TurnStarted),
+            EventKind::Boundary(BoundaryEvent {
+                role: role(),
+                path: "x".to_owned(),
+                blocked: false,
+            }),
+            EventKind::Usage(UsageEvent {
+                percent: 0,
+                window_reset: None,
+                paused: false,
+            }),
+            EventKind::Stall(StallEvent {
+                kind: StallKind::Deadlock,
+                status: StallStatus::Detected,
+                roles: Vec::new(),
+                detail: String::new(),
+            }),
+        ];
+        for kind in &prune {
+            assert!(
+                !is_state_bearing(kind),
+                "no projection rebuilds from this kind, so it is prunable: {kind:?}",
+            );
+        }
+
+        // Every kind is accounted for above, so the two sets partition the enum.
+        assert_eq!(
+            keep.len() + prune.len(),
+            12,
+            "every EventKind is classified"
+        );
+    }
+
+    #[test]
+    fn survives_retention_keeps_state_recent_and_the_newest_anchor() {
+        let newest = 7;
+        // Aged, ephemeral, and not the newest: the only combination that prunes.
+        assert!(!survives_retention(
+            &StoredEvent {
+                seq: 3,
+                event: of_kind(message_kind(), ts(1)),
+            },
+            ts(5),
+            newest,
+        ));
+        // State-bearing at any age is kept.
+        assert!(survives_retention(
+            &StoredEvent {
+                seq: 4,
+                event: of_kind(EventKind::Lifecycle(Lifecycle::Started), ts(1)),
+            },
+            ts(5),
+            newest,
+        ));
+        // An ephemeral event at or after the cutoff is kept.
+        assert!(survives_retention(
+            &StoredEvent {
+                seq: 5,
+                event: of_kind(message_kind(), ts(9)),
+            },
+            ts(5),
+            newest,
+        ));
+        // The newest event is kept even when aged and ephemeral: the high-water
+        // anchor a restart reconstructs `next_seq` from.
+        assert!(survives_retention(
+            &StoredEvent {
+                seq: newest,
+                event: of_kind(message_kind(), ts(1)),
+            },
+            ts(5),
+            newest,
+        ));
+    }
+
+    #[test]
+    fn retain_prunes_aged_ephemeral_while_sequences_stay_monotonic() {
+        let store = MemoryStore::default();
+        let aged = store.append(of_kind(message_kind(), ts(1)));
+        let kept_state = store.append(of_kind(EventKind::Lifecycle(Lifecycle::Started), ts(1)));
+        let newest = store.append(of_kind(message_kind(), ts(1)));
+        assert_eq!(
+            (aged, kept_state, newest),
+            (0, 1, 2),
+            "sequences are assigned in order"
+        );
+
+        // Cutoff after every event, so age alone does not save the messages: the
+        // kind and the newest-anchor rule decide.
+        let pruned = store.retain(ts(5));
+        assert_eq!(pruned, 1, "only the aged, non-newest message is pruned");
+
+        let seqs: Vec<u64> = store.stored_events().iter().map(|s| s.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![kept_state, newest],
+            "the state-bearing event and the newest anchor survive; the aged message does not",
+        );
+
+        // A prune never rewinds the counter, so the next append continues past
+        // every sequence ever assigned rather than reusing the pruned one.
+        assert_eq!(store.next_seq(), 3, "the counter is not rewound by a prune");
+        assert_eq!(
+            store.append(of_kind(message_kind(), ts(9))),
+            3,
+            "no sequence is reused"
+        );
+    }
+
+    #[test]
+    fn log_store_persists_sequences_and_a_pruned_restart_never_reuses_one() {
+        let dir = TempDir::new();
+
+        // Append three aged events, then prune: the middle (state-bearing) and the
+        // newest (anchor) survive; the first (aged, ephemeral) is dropped.
+        let store = LogStore::open(dir.path()).unwrap();
+        store.append(of_kind(message_kind(), ts(1)));
+        store.append(of_kind(EventKind::Lifecycle(Lifecycle::Started), ts(1)));
+        store.append(of_kind(message_kind(), ts(1)));
+        assert_eq!(store.retain(ts(5)), 1, "the aged message is pruned");
+        // Barrier through the writer so the on-disk rewrite has landed.
+        store.flush();
+        let seqs: Vec<u64> = store.stored_events().iter().map(|s| s.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![1, 2],
+            "the survivors keep their stored sequences"
+        );
+        drop(store);
+
+        // A restart replays the pruned file: the surviving sequences are stable,
+        // and `next_seq` is reconstructed past the highest on disk, so the next
+        // append never collides with the pruned sequence 0.
+        let reopened = LogStore::open(dir.path()).unwrap();
+        let replayed: Vec<u64> = reopened.stored_events().iter().map(|s| s.seq).collect();
+        assert_eq!(
+            replayed,
+            vec![1, 2],
+            "the on-disk prune and its sequences survive the restart"
+        );
+        assert_eq!(
+            reopened.next_seq(),
+            3,
+            "next_seq is reconstructed past the highest on disk"
+        );
+        assert_eq!(
+            reopened.append(of_kind(message_kind(), ts(9))),
+            3,
+            "no sequence is reused"
+        );
     }
 }

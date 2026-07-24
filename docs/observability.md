@@ -110,9 +110,9 @@ always agree (issues #12, #31). Historically, `GET /history` reads the past: fil
 (`channel`, `role` sent-by, `agent` a role's timeline, `kind` (a comma-separated set
 keeps several kinds in one query, issue #125), `task`, `since`),
 deterministic ordering by `ts` then a per-event sequence, and opaque cursor pagination
-that stays stable under concurrent writes and a future log trim (the cursor is a
-prune-stable `(ts, seq)` key, not a log index, issue #208), so a consumer or a late
-joiner reads the past without holding the stream open. `summary=true` returns the rolling compaction instead (issue
+that stays stable under concurrent writes and a log prune (the cursor is a
+prune-stable `(ts, seq)` key on a stable absolute sequence, not a log index, issues #208,
+#201), so a consumer or a late joiner reads the past without holding the stream open. `summary=true` returns the rolling compaction instead (issue
 #19): the older events folded into bounded aggregates plus the recent raw tail, so
 joining a long-running conversation costs bounded context rather than the full log.
 Live, `GET /stream` delivers the same view over SSE, narrowed by the same filter
@@ -124,6 +124,32 @@ replays the matching events it missed before returning to the live tail, so it n
 separate `/history` catch-up. A fresh connection with no cursor starts at the live tail.
 The replay reuses the same `EventFilter::matches` as the live tail and `/history`, so
 the three agree; `/inbox`, `/activity`, and `/stream` share one replay-then-live engine.
+
+### Retention: bounding the log
+
+The broker keeps every event both in memory and in the durable log, so on a long-running
+unit both grow without bound. Kind-aware retention prunes the events the log need not keep
+(issue #201), bounding the broker's footprint while keeping every projection correct.
+
+The classification is derived from the event kind itself, not the `kind` filter set, so it
+never silently drops a kind the filter set omits:
+
+- **Kept forever** are the state-bearing kinds a boot projection rebuilds from the log:
+  `lifecycle` (the pause control and the stats rollup), `verification` (the done-gate),
+  `board` (the situation board), `ledger` (the work ledger), `telemetry` and `mission`
+  (the stats rollup), and `budget` (the budget snapshot). Pruning one would corrupt the
+  state a restart rebuilds, so age never drops it.
+- **Prunable** past the retention window are the ephemeral kinds no projection rebuilds:
+  `message`, `activity`, `boundary`, `usage`, and `stall`. The rolling summary
+  (`summary=true`) already folds older messages into bounded aggregates, so bounded
+  catch-up survives their prune.
+
+A periodic sweep drops prunable events older than the window from both memory and disk,
+leaving the newest event in place as the sequence high-water mark so a restart never
+reuses a pruned sequence. The window defaults to seven days and is retuned with
+`CREW_BROKER_RETENTION_HOURS` (`0` retains everything). Because sequences are stable and
+never reused, a lossless SSE resume and cursor pagination stay correct across a prune (see
+`docs/stream-contract.md`).
 
 ### Lane boundary crossings
 

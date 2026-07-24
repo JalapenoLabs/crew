@@ -2,6 +2,7 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
+use crew_core::Timestamp;
 use tokio::net::TcpListener;
 use tracing::{event, Level};
 
@@ -22,6 +23,14 @@ use crate::{
 /// seconds keeps the sweep negligibly cheap (one mutex read per tick) while
 /// surfacing the resume promptly.
 const USAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often the broker prunes aged-out events from the log (issue #201).
+///
+/// Retention is coarse (events age out over hours or days), so an hourly sweep
+/// bounds the broker's memory and log promptly while the scan stays cheap: one
+/// pass over the in-memory index, and a file rewrite only when something is
+/// actually dropped.
+const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// How long graceful shutdown waits for in-flight connections to finish before
 /// forcing a stop (issue #204).
@@ -121,6 +130,11 @@ pub async fn serve(
     // serving ends, so it never outlives the broker it reports for.
     let sweeper = tokio::spawn(usage_sweeper(state.clone()));
 
+    // A background sweep prunes aged-out events so the broker's memory and log
+    // stay bounded on a long-running unit (issue #201). Tied to the server's
+    // lifetime the same way, and a no-op when retention is disabled.
+    let pruner = tokio::spawn(retention_sweeper(state.clone()));
+
     // A durable backend persists in the background (issue #206); keep a handle so
     // its writer can be drained once the server stops, before returning.
     let storage = Arc::clone(&state.storage);
@@ -165,6 +179,7 @@ pub async fn serve(
     };
 
     sweeper.abort();
+    pruner.abort();
     // Flush events still in the writer's queue so a shutdown mid-burst reaches
     // disk before the process exits. A no-op for a synchronous backend.
     storage.flush();
@@ -210,6 +225,55 @@ fn sweep_usage(state: &AppState) -> bool {
     true
 }
 
+/// Prunes aged-out events on a timer, when retention is configured.
+///
+/// Returns at once when retention is disabled ([`Config::retention_window`] is
+/// `None`), so the task simply ends and its abort handle is a no-op.
+async fn retention_sweeper(state: AppState) {
+    let Some(window) = state.config.retention_window else {
+        return;
+    };
+    let mut ticker = tokio::time::interval(RETENTION_SWEEP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        sweep_retention(&state, window);
+    }
+}
+
+/// One retention pass: prunes events older than `window`, returning how many it
+/// dropped.
+///
+/// Split from the timer loop so the behavior is unit-testable without waiting
+/// on the ticker. A prune of nothing is silent; a real prune logs the count.
+fn sweep_retention(state: &AppState, window: Duration) -> usize {
+    let Some(before) = retention_cutoff(window) else {
+        return 0;
+    };
+    let pruned = state.storage.retain(before);
+    if pruned > 0 {
+        event!(
+            name: "broker.retention.pruned",
+            Level::INFO,
+            crew.events = pruned,
+            "pruned {{crew.events}} aged-out events from the log",
+        );
+    }
+    pruned
+}
+
+/// The retention cutoff `window` before now: an event older than this is
+/// prunable.
+///
+/// Computed through the Unix-epoch parts so it needs no timestamp arithmetic on
+/// the wrapper; `None` only if the subtraction leaves the representable range,
+/// in which case the sweep keeps everything rather than pruning on a bad
+/// cutoff.
+fn retention_cutoff(window: Duration) -> Option<Timestamp> {
+    let (secs, nanos) = Timestamp::now().to_unix();
+    let window_secs = i64::try_from(window.as_secs()).ok()?;
+    Timestamp::from_unix(secs.checked_sub(window_secs)?, nanos)
+}
+
 /// Resolves when the process receives Ctrl-C or (on Unix) `SIGTERM`.
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -239,19 +303,62 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::{net::Ipv4Addr, time::Duration};
 
+    use crew_core::{
+        ChannelId, Event, EventKind, Lifecycle, Message, MessageId, MessageKind, RoleId, Sender,
+        Timestamp,
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
     };
 
-    use super::{serve, sweep_usage};
+    use super::{serve, sweep_retention, sweep_usage};
     use crate::{config::Config, state::AppState};
 
     /// Parses an RFC 3339 instant into a `Timestamp` for a test fixture.
     fn at(rfc3339: &str) -> crew_core::Timestamp {
         serde_json::from_value(serde_json::Value::String(rfc3339.to_owned())).unwrap()
+    }
+
+    /// An event of `kind` from a role on `all-units`, stamped at `ts`.
+    fn event(kind: EventKind, ts: Timestamp) -> Event {
+        Event {
+            ts,
+            from: Sender::Role(RoleId::new("backend")),
+            channel: ChannelId::new("all-units"),
+            task: None,
+            kind,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retention_sweep_prunes_an_aged_ephemeral_event_but_keeps_state() {
+        // The sweep threads its cutoff into the store's kind-aware retention
+        // (issue #201): an old `message` ages out, while an old `lifecycle` event
+        // a projection rebuilds is kept regardless.
+        let state = AppState::new(Config::default());
+        let old = at("2000-01-01T00:00:00Z");
+        state.publish(event(
+            EventKind::Message(Message {
+                id: MessageId::new(),
+                kind: MessageKind::Note,
+                body: "aged chatter".to_owned(),
+            }),
+            old,
+        ));
+        state.publish(event(EventKind::Lifecycle(Lifecycle::Started), old));
+
+        // A one-hour window makes both events "aged", so only the kind decides.
+        let pruned = sweep_retention(&state, Duration::from_secs(60 * 60));
+        assert_eq!(pruned, 1, "the aged message is pruned");
+
+        let kinds: Vec<_> = state.storage.events().into_iter().map(|e| e.kind).collect();
+        assert!(
+            matches!(kinds.as_slice(), [EventKind::Lifecycle(_)]),
+            "the state-bearing lifecycle event survives; the message does not: {kinds:?}",
+        );
     }
 
     #[tokio::test]
