@@ -63,11 +63,13 @@ pub struct Broker {
     role: RoleId,
     commander: RoleId,
     agent: ureq::Agent,
-    /// How many message events the pull-based inbox has already delivered, so a
-    /// later read returns only what is new. The event log is append-only,
-    /// so the count is a stable cursor. Used only in the pull fallback; the
+    /// The last message the pull-based inbox delivered, so a later read returns
+    /// only what arrived after it. Keyed on the message id, not a count, so
+    /// the cursor survives a broker log reset (issue #160): a fresh, shorter
+    /// log lacks the id, so the read replays the whole log rather than
+    /// silently skipping new messages. Used only in the pull fallback; the
     /// push path uses [`InboxStream`].
-    read_through: usize,
+    cursor: Option<MessageId>,
     /// The live inbox subscription, when [`subscribe`](Broker::subscribe) has
     /// established one (issue #76). When set, [`inbox`](Broker::inbox)
     /// drains its buffer; when `None`, it falls back to the pull-based
@@ -99,25 +101,25 @@ impl Broker {
             role,
             commander,
             agent,
-            read_through: 0,
+            cursor: None,
             inbox_stream: None,
             task: None,
         }
     }
 
     /// Seeds the pull-based inbox cursor, so the next [`inbox`](Broker::inbox)
-    /// returns only messages past `read_through`.
+    /// returns only messages past the one `cursor` names.
     ///
     /// The MCP server holds this cursor in memory across its session; a
     /// short-lived caller such as the CLI shim persists it instead and seeds a
     /// fresh client with it, so `crew inbox` resumes where the last call left
     /// off rather than re-reading the whole history (issue #130). Pass the
-    /// value a prior [`read_through`](Broker::read_through) returned. It
-    /// seeds only the pull fallback; the push path
+    /// value a prior [`cursor`](Broker::cursor) returned, or `None` to read
+    /// from the start. It seeds only the pull fallback; the push path
     /// ([`subscribe`](Broker::subscribe)) tracks its own position.
     #[must_use]
-    pub fn with_read_through(mut self, read_through: usize) -> Self {
-        self.read_through = read_through;
+    pub fn with_cursor(mut self, cursor: Option<MessageId>) -> Self {
+        self.cursor = cursor;
         self
     }
 
@@ -151,16 +153,17 @@ impl Broker {
         self.task
     }
 
-    /// The number of inbox messages the pull-based read has delivered, a stable
-    /// cursor into the append-only message log.
+    /// The last message the pull-based read delivered, a cursor into the
+    /// append-only message log that resumes by identity.
     ///
     /// Persist it after an [`inbox`](Broker::inbox) read and hand it to
-    /// [`with_read_through`](Broker::with_read_through) on the next client, so
-    /// a stateless caller shows only messages that arrived since (issue
-    /// #130).
+    /// [`with_cursor`](Broker::with_cursor) on the next client, so a stateless
+    /// caller shows only messages that arrived since (issue #130). Keyed on the
+    /// message id, so it survives a broker log reset (issue #160). `None`
+    /// before the first read delivers anything.
     #[must_use]
-    pub fn read_through(&self) -> usize {
-        self.read_through
+    pub fn cursor(&self) -> Option<MessageId> {
+        self.cursor
     }
 
     /// Posts a note as this role to a role's direct channel, a named channel,
@@ -454,8 +457,20 @@ impl Broker {
             drained
         } else {
             let messages = self.message_log()?;
-            let start = self.read_through.min(messages.len());
-            self.read_through = messages.len();
+            // Resume right after the message the cursor names. Keying on the id, not a
+            // count, means a cursor the log no longer holds (a fresh, shorter log after
+            // a broker reset) falls back to the whole log rather than skipping new
+            // messages until the log grows past a stale count (issue #160).
+            let start = match self.cursor {
+                Some(seen) => messages
+                    .iter()
+                    .position(|event| message_id(event) == Some(seen))
+                    .map_or(0, |index| index + 1),
+                None => 0,
+            };
+            if let Some(id) = messages.last().and_then(message_id) {
+                self.cursor = Some(id);
+            }
             messages[start..].to_vec()
         };
 
@@ -973,6 +988,20 @@ fn open_inbox(
         request = request.set("Last-Event-ID", &seq.to_string());
     }
     Ok(request.call().map_err(Box::new)?.into_reader())
+}
+
+/// The message id of `event`, if it is a message.
+///
+/// The pull cursor keys on this stable, server-stamped id (issue #160), so it
+/// resumes by identity and survives a broker log reset that a raw count would
+/// not. The message log is already filtered to message events, so a non-message
+/// is not expected; it maps to `None` so the cursor leaves such an event
+/// untouched rather than clearing itself.
+fn message_id(event: &Event) -> Option<MessageId> {
+    match &event.kind {
+        EventKind::Message(message) => Some(message.id),
+        _ => None,
+    }
 }
 
 /// The message id of `event`, if it is a message addressed to `role` and not

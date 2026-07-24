@@ -708,9 +708,13 @@ config) and reuses the same `crew_client::Broker` the MCP server dispatches to (
 the broker identically to the MCP path: it registers on boot (appearing on the roster
 and stream) and sends and reads the same way. The shim is a short-lived process per
 call, so where the MCP server holds its inbox cursor in memory, the shim persists a
-per-role cursor on disk (`<state_dir>/shim-cursors/<role>.cursor`, a count of inbox
-messages seen), so `crew inbox` shows only messages since the last call (issue #130);
-the remaining parity gap (no push) is in `docs/codex.md`. A Codex role no longer needs an operator to launch it: with
+per-role cursor on disk (`<state_dir>/shim-cursors/<role>.cursor`, the id of the last
+inbox message read), so `crew inbox` shows only messages since the last call (issue
+#130). Keying the cursor on the message id, not a count, lets it survive a broker log
+reset (issue #160): a stale id absent from a fresh, shorter log replays the log rather
+than silently skipping new messages until it grows past the old count. Both the shim
+cursor and the MCP server's in-memory one share this pull path in `crew-client`. The
+remaining parity gap (no push) is in `docs/codex.md`. A Codex role no longer needs an operator to launch it: with
 `runtime = "codex"` in the config, `crew up` supervisor-spawns it alongside the Claude
 roles (issue #128).
 

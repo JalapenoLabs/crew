@@ -56,9 +56,11 @@ self-filter the same way. `crew inbox` matches the MCP server's per-session curs
 though each call is its own process, it persists a **per-role inbox cursor** on disk, so
 it shows only what arrived since the last call (issue #130). The cursor is one small
 file per role under the broker state dir (`<state_dir>/shim-cursors/<role>.cursor`),
-holding the count of inbox messages already seen; `crew inbox` seeds the client from it
-and writes the advanced position back. A first call, or a role with no saved cursor,
-shows the whole inbox. The task a role adopts from an order persists the same way, one
+holding the id of the last inbox message read; `crew inbox` seeds the client from it and
+writes the new cursor back. Keying on the message id, not a count, lets a stale cursor
+survive a broker log reset (issue #160): a fresh, shorter log lacks the id, so the read
+replays the whole log rather than skipping new messages until it grows past an old count.
+A first call, or a role with no saved cursor, shows the whole inbox. The task a role adopts from an order persists the same way, one
 file per role (`<state_dir>/shim-cursors/<role>.task`, issue #132): `crew inbox` saves
 the task an order assigned, and a later `crew send` / `crew order` restores it and
 stamps it, so a shim role's work correlates to its task exactly as the long-lived MCP

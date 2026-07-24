@@ -16,7 +16,7 @@ use std::{
 
 use crew_broker::{AppState, Config};
 use crew_client::Broker;
-use crew_core::{Channel, RoleId};
+use crew_core::{Channel, MessageId, RoleId};
 
 /// A broker serving on an ephemeral loopback port, driven over HTTP.
 ///
@@ -374,25 +374,53 @@ fn a_seeded_read_cursor_shows_only_messages_past_it() {
         1,
         "the first read sees the message"
     );
-    let cursor = first.read_through();
-    assert!(cursor > 0, "reading advanced the cursor past the message");
+    let cursor = first.cursor();
+    assert!(
+        cursor.is_some(),
+        "reading advanced the cursor past the message"
+    );
 
     // A second message arrives after that read.
     sender.send(Some("reader"), None, "second").unwrap();
 
     // The next process seeds from the saved cursor: it sees only the new message,
     // not the one already read.
-    let mut resumed = broker.client("reader").with_read_through(cursor);
+    let mut resumed = broker.client("reader").with_cursor(cursor);
     let items = resumed.inbox().unwrap();
     assert_eq!(items.len(), 1, "only the message past the cursor");
     assert_eq!(items[0].body, "second");
 
     // Seeding at the current end shows nothing new.
-    let mut caught_up = broker
-        .client("reader")
-        .with_read_through(resumed.read_through());
+    let mut caught_up = broker.client("reader").with_cursor(resumed.cursor());
     assert!(
         caught_up.inbox().unwrap().is_empty(),
         "nothing is past the end of the log",
     );
+}
+
+#[test]
+fn an_unrecognized_cursor_replays_rather_than_skipping() {
+    // Keying the cursor on the message id, not a count, makes it survive a broker
+    // log reset (issue #160). A cursor naming a message the log no longer holds (a
+    // fresh, shorter log after the state dir is reset) falls back to delivering the
+    // whole log, rather than silently skipping genuinely new messages until the log
+    // grows past a stale count.
+    let broker = TestBroker::start();
+    broker.register("reader", &[]);
+    broker.register("sender", &[]);
+    broker
+        .client("sender")
+        .send(Some("reader"), None, "after reset")
+        .unwrap();
+
+    // A cursor from a prior, since-reset log: its id is absent from this one.
+    let stale = MessageId::new();
+    let mut reader = broker.client("reader").with_cursor(Some(stale));
+    let items = reader.inbox().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "an unknown cursor replays the log instead of skipping new messages"
+    );
+    assert_eq!(items[0].body, "after reset");
 }
