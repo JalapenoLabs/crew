@@ -15,17 +15,19 @@
 //!   the [`Launch`] the child process starts from. The standalone flow (the
 //!   `crew-mcp` binary) reads the very same card, so both paths share one
 //!   loader in [`crew_core`].
-//! - [`Supervisor::up`] runs the whole flow (issue #21): it spawns one process
-//!   per role, registers each on the roster on start and deregisters on exit,
-//!   and captures stdout and stderr, returning a running [`Crew`].
+//! - [`Supervisor::launch`] runs the whole flow (issues #21, #26): it
+//!   provisions one card per role, builds each spawn command, and hands the
+//!   resolved agents to the [`Fleet`], the single spawn engine.
 //! - [`Fleet`] manages each agent's lifecycle (issue #22): lazy start on first
 //!   work, idle-stop after a quiet period, and restart on demand, emitting a
-//!   lifecycle event on every transition. Its defibrillator (issue #23) detects
-//!   an agent whose turn died, whether it crashed or hung, with a layered
-//!   heartbeat and watchdog; it records an [`Incident`] and revives the agent
-//!   within a recovery budget, handing it to the operator once the budget is
-//!   spent. Its coordination-stall monitor (issue #48) extends that to the crew
-//!   as a whole: it reads the event stream for a deadlock, an unanswered
+//!   lifecycle event on every transition. It is the one place processes are
+//!   spawned, roles are registered and deregistered on the roster, and stdout
+//!   and stderr are captured for the activity parser. Its defibrillator (issue
+//!   #23) detects an agent whose turn died, whether it crashed or hung, with a
+//!   layered heartbeat and watchdog; it records an [`Incident`] and revives the
+//!   agent within a recovery budget, handing it to the operator once the budget
+//!   is spent. Its coordination-stall monitor (issue #48) extends that to the
+//!   crew as a whole: it reads the event stream for a deadlock, an unanswered
 //!   question, or a ledger with no forward motion, and escalates the specific
 //!   [`Stall`] so silence never reads as progress.
 
@@ -52,9 +54,7 @@ pub use integrate::{
 pub use lifecycle::{AgentState, DeathCause, Fleet, Incident, LifecyclePolicy, Recovery};
 pub use mcp::{agent_turn_argv, codex_turn_argv, locate_server, register_server, MCP_SERVER_NAME};
 pub use roster::{Liveness, RosterClient};
-pub use spawn::{
-    agent_command, AgentCommand, Captured, Crew, OutputStream, PreparedAgent, Supervisor,
-};
+pub use spawn::{agent_command, AgentCommand, Captured, OutputStream, PreparedAgent, Supervisor};
 pub use stall::{detect_stalls, Stall};
 pub use worktree::Worktree;
 

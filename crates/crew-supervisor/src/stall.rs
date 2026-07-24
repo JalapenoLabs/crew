@@ -23,10 +23,14 @@
 //!
 //! Detection ([`detect_stalls`]) is a pure function over the parsed stream, so
 //! every shape is unit-testable without a running broker; the `StallMonitor`
-//! loop feeds it the recent history on a timer and escalates each new stall.
+//! loop feeds it a rolling window of history on a timer and escalates each new
+//! stall. The window is filled incrementally (issue #165): each scan fetches
+//! only the events since the previous scan's newest one, splices them onto the
+//! buffer, and trims the aged-out front, so a scan costs O(new) rather than
+//! re-reading the whole lookback window every tick.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         mpsc::{Receiver, RecvTimeoutError},
         Arc, Mutex, PoisonError,
@@ -205,6 +209,16 @@ fn string_field(data: Option<&Value>, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+/// The `ts` of a raw history event, or `None` if it is missing or malformed.
+///
+/// The incremental scan window keys on this to trim aged-out events and to find
+/// the boundary run the next fetch re-includes (issue #165). An event without a
+/// parseable `ts` is one [`detect_stalls`] would drop anyway, so the window
+/// leaves it out rather than carry an untrimmable entry.
+fn event_ts(value: &Value) -> Option<Timestamp> {
+    serde_json::from_value(value.get("ts")?.clone()).ok()
 }
 
 /// Detects every coordination stall in `events`, given the live agent `roster`.
@@ -565,6 +579,71 @@ fn chrono_timeout(timeout: Duration) -> chrono::Duration {
     chrono::Duration::from_std(timeout).unwrap_or_else(|_| chrono::Duration::days(365))
 }
 
+/// The monitor's rolling scan window: the lookback window's events and the
+/// cursor to resume from, so each scan reads only what is new (issue #165).
+#[derive(Default)]
+struct ScanWindow {
+    /// The events in the current lookback window, oldest first (ordered by the
+    /// broker's `(ts, position)`), that [`detect_stalls`] runs over.
+    events: VecDeque<Value>,
+    /// The timestamp of the newest buffered event, the incremental resume
+    /// cursor for the next fetch; `None` before any event is seen (or after the
+    /// buffer ages out entirely), forcing a full window read.
+    cursor: Option<Timestamp>,
+}
+
+impl ScanWindow {
+    /// Splices a `fresh` fetch into the window and trims it to
+    /// `[lookback_start, now]`, leaving the buffer ordered and bounded
+    /// (issue #165).
+    ///
+    /// When `boundary` is `Some(ts)`, the fetch was made with `since = ts` (the
+    /// buffer's newest timestamp), so it re-includes every event already
+    /// buffered at `ts`. Those form the trailing run of the buffer (the log is
+    /// ordered by timestamp), so dropping that run and appending the whole
+    /// fetch splices the new events on with no duplicates and no re-scan of
+    /// the older events. When `boundary` is `None` (a cold start, or the
+    /// buffer aged out entirely), the fetch is the whole window, so it
+    /// replaces the buffer.
+    ///
+    /// Events without a parseable `ts` are dropped, so trimming and the
+    /// boundary run never trip over an untrimmable entry.
+    fn refresh(
+        &mut self,
+        fresh: Vec<Value>,
+        boundary: Option<Timestamp>,
+        lookback_start: Timestamp,
+    ) {
+        let fresh = fresh.into_iter().filter(|event| event_ts(event).is_some());
+        match boundary {
+            Some(boundary) => {
+                // Drop the trailing run at the boundary timestamp the fetch re-included,
+                // so appending it back deduplicates that overlap in O(boundary run).
+                while self.events.back().and_then(event_ts) == Some(boundary) {
+                    self.events.pop_back();
+                }
+                self.events.extend(fresh);
+            }
+            None => self.events = fresh.collect(),
+        }
+
+        // Trim the aged-out front, so the buffer stays bounded to the window.
+        while self
+            .events
+            .front()
+            .and_then(event_ts)
+            .is_some_and(|ts| ts < lookback_start)
+        {
+            self.events.pop_front();
+        }
+
+        // The cursor tracks the newest survivor; a wholly aged-out buffer drops it,
+        // so the next scan reads the full window afresh rather than resuming from a
+        // timestamp already off the window.
+        self.cursor = self.events.back().and_then(event_ts);
+    }
+}
+
 /// The coordination-stall monitor: the fleet-wide half of the defibrillator
 /// (issue #48).
 ///
@@ -573,6 +652,11 @@ fn chrono_timeout(timeout: Duration) -> chrono::Duration {
 /// caught the way a dead agent is. It records the stalls (read with
 /// [`Fleet::stalls`](crate::Fleet::stalls)) and logs a specific warning the
 /// operator sees, and re-escalates a stall only after it resolves.
+///
+/// The scan is incremental (issue #165): a rolling [`ScanWindow`] keeps the
+/// lookback window's events, and each tick fetches only the events since the
+/// previous scan, so the cost is O(new) rather than re-reading the whole window
+/// every interval.
 pub(crate) struct StallMonitor {
     /// A broker client, for reading the recent event history.
     roster: RosterClient,
@@ -612,18 +696,29 @@ impl StallMonitor {
         // a persistent one is escalated once, and one that clears is surfaced as
         // resolved and forgotten, so a recurrence is escalated afresh.
         let mut reported: BTreeMap<String, Stall> = BTreeMap::new();
+        // The rolling window of history, filled incrementally each scan (#165).
+        let mut window = ScanWindow::default();
         while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(self.scan_interval) {
-            self.scan(&mut reported);
+            self.scan(&mut window, &mut reported);
         }
     }
 
-    /// One scan: read the recent history, detect stalls, and surface the ones
-    /// that newly appeared or have since resolved.
-    fn scan(&self, reported: &mut BTreeMap<String, Stall>) {
-        let events = match self
-            .roster
-            .history_since(self.lookback_start(), STALL_EVENT_KINDS)
-        {
+    /// One scan: pull the events new since the last scan into the rolling
+    /// window, detect stalls over it, and surface the ones that newly appeared
+    /// or have since resolved.
+    fn scan(&self, window: &mut ScanWindow, reported: &mut BTreeMap<String, Stall>) {
+        let now = Timestamp::now();
+        let lookback_start = self.lookback_start(now);
+
+        // Read only what is new since the last scan: from the newest buffered
+        // event's timestamp when it is still within the window, else the whole
+        // lookback window on a cold start or after a long idle (issue #165). The
+        // fetch's `since` is inclusive, so the boundary run is re-read and spliced
+        // out by `ScanWindow::refresh`.
+        let boundary = window.cursor.filter(|&ts| ts >= lookback_start);
+        let since = boundary.unwrap_or(lookback_start);
+
+        let fresh = match self.roster.history_since(since, STALL_EVENT_KINDS) {
             Ok(events) => events,
             // A transient broker read failure is not fatal: skip this scan and retry.
             Err(err) => {
@@ -636,8 +731,14 @@ impl StallMonitor {
                 return;
             }
         };
-        let now = Timestamp::now();
-        let stalls = detect_stalls(&events, &self.roles, now, self.timeout);
+        window.refresh(fresh, boundary, lookback_start);
+
+        let stalls = detect_stalls(
+            window.events.make_contiguous(),
+            &self.roles,
+            now,
+            self.timeout,
+        );
         let current: BTreeSet<String> = stalls.iter().map(Stall::key).collect();
 
         // Newly detected stalls: escalate to the operator and surface on the stream.
@@ -686,12 +787,12 @@ impl StallMonitor {
         }
     }
 
-    /// The start of the history window to scan: far enough back to see a wait
-    /// that first crossed the threshold, bounded so a scan reads a bounded
-    /// slice of the log.
-    fn lookback_start(&self) -> Timestamp {
+    /// The start of the history window, relative to `now`: far enough back to
+    /// see a wait that first crossed the threshold, bounded so the rolling
+    /// buffer holds a bounded slice of the log.
+    fn lookback_start(&self, now: Timestamp) -> Timestamp {
         let lookback = self.timeout.checked_mul(3).unwrap_or(self.timeout);
-        (Timestamp::now().to_datetime() - chrono_timeout(lookback)).into()
+        (now.to_datetime() - chrono_timeout(lookback)).into()
     }
 }
 
@@ -716,7 +817,7 @@ mod tests {
     use crew_core::{RoleId, Timestamp};
     use serde_json::{json, Value};
 
-    use super::{detect_stalls, StallKind};
+    use super::{detect_stalls, event_ts, ScanWindow, StallKind};
 
     /// A fixed "now", with helpers to build events at a chosen age.
     fn now() -> Timestamp {
@@ -918,6 +1019,149 @@ mod tests {
         assert!(
             stalls.is_empty(),
             "waits on a non-agent are not deadlocks: {stalls:?}"
+        );
+    }
+
+    // --- The incremental scan window (issue #165) ---
+
+    /// A question at an explicit timestamp `ts`, tagged by `body` so the
+    /// window's ordering is checkable even across events that share a
+    /// timestamp. Binding the `ts` once (rather than via a fresh [`ago`])
+    /// makes the same event compare equal across scans, as the broker
+    /// returns it.
+    fn q(ts: &str, body: &str) -> Value {
+        question(ts, "backend", "@frontend", body)
+    }
+
+    /// The bodies of the window's events, oldest first, for order assertions.
+    fn bodies(window: &ScanWindow) -> Vec<String> {
+        window
+            .events
+            .iter()
+            .map(|event| event["kind"]["data"]["body"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// The lookback-window start `refresh` trims against, `minutes` before now.
+    fn lookback(minutes: i64) -> Timestamp {
+        (Timestamp::now().to_datetime() - chrono::Duration::minutes(minutes)).into()
+    }
+
+    #[test]
+    fn a_cold_scan_loads_the_whole_window_and_sets_the_cursor() {
+        let (t30, t20) = (ago(30), ago(20));
+        let mut window = ScanWindow::default();
+        window.refresh(vec![q(&t30, "a"), q(&t20, "b")], None, lookback(60));
+        assert_eq!(
+            bodies(&window),
+            ["a", "b"],
+            "the full fetch fills the buffer"
+        );
+        assert_eq!(
+            window.cursor,
+            event_ts(&q(&t20, "b")),
+            "the cursor is the newest event's timestamp",
+        );
+    }
+
+    #[test]
+    fn an_incremental_scan_splices_new_events_without_duplicating_the_boundary() {
+        let (t30, t20, t10) = (ago(30), ago(20), ago(10));
+        let mut window = ScanWindow::default();
+        window.refresh(vec![q(&t30, "a"), q(&t20, "b")], None, lookback(60));
+        let boundary = window.cursor;
+
+        // The next fetch (since = the boundary) re-includes `b` and adds `c`.
+        window.refresh(vec![q(&t20, "b"), q(&t10, "c")], boundary, lookback(60));
+        assert_eq!(
+            bodies(&window),
+            ["a", "b", "c"],
+            "the boundary event is not duplicated; only the new event is appended",
+        );
+        assert_eq!(window.cursor, event_ts(&q(&t10, "c")));
+    }
+
+    #[test]
+    fn an_idle_incremental_scan_neither_grows_the_buffer_nor_moves_the_cursor() {
+        let (t30, t20) = (ago(30), ago(20));
+        let mut window = ScanWindow::default();
+        window.refresh(vec![q(&t30, "a"), q(&t20, "b")], None, lookback(60));
+        let boundary = window.cursor;
+
+        // Nothing new arrived: the fetch returns only the re-included boundary run.
+        window.refresh(vec![q(&t20, "b")], boundary, lookback(60));
+        assert_eq!(
+            bodies(&window),
+            ["a", "b"],
+            "an idle scan leaves the buffer as is"
+        );
+        assert_eq!(window.cursor, boundary, "the cursor holds steady");
+    }
+
+    #[test]
+    fn new_events_sharing_the_boundary_timestamp_are_kept() {
+        // Two events at the same instant, then a third at that instant arrives next
+        // scan: dropping the boundary run and re-appending the fetch keeps them all.
+        let (t30, t20, t10) = (ago(30), ago(20), ago(10));
+        let mut window = ScanWindow::default();
+        window.refresh(
+            vec![q(&t30, "a"), q(&t20, "b1"), q(&t20, "b2")],
+            None,
+            lookback(60),
+        );
+
+        window.refresh(
+            vec![q(&t20, "b1"), q(&t20, "b2"), q(&t20, "b3"), q(&t10, "c")],
+            window.cursor,
+            lookback(60),
+        );
+        assert_eq!(
+            bodies(&window),
+            ["a", "b1", "b2", "b3", "c"],
+            "a new event at the boundary timestamp is appended, not lost",
+        );
+    }
+
+    #[test]
+    fn refresh_trims_events_that_have_aged_out_of_the_window() {
+        let (t40, t10) = (ago(40), ago(10));
+        let mut window = ScanWindow::default();
+        // `old` is older than the 25-minute lookback; `recent` is inside it.
+        window.refresh(vec![q(&t40, "old"), q(&t10, "recent")], None, lookback(25));
+        assert_eq!(bodies(&window), ["recent"], "the aged-out front is dropped");
+        assert_eq!(window.cursor, event_ts(&q(&t10, "recent")));
+    }
+
+    #[test]
+    fn a_wholly_aged_out_buffer_drops_its_cursor_so_the_next_scan_reads_the_full_window() {
+        let t30 = ago(30);
+        let mut window = ScanWindow::default();
+        window.refresh(vec![q(&t30, "a")], None, lookback(60));
+        let boundary = window.cursor;
+
+        // Time has moved on: the only event is now older than the window, and nothing
+        // new arrived. It ages out, and the cursor resets to force a full read.
+        window.refresh(vec![q(&t30, "a")], boundary, lookback(20));
+        assert!(window.events.is_empty(), "everything aged out");
+        assert!(
+            window.cursor.is_none(),
+            "the reset cursor makes the next scan read the full window",
+        );
+    }
+
+    #[test]
+    fn refresh_drops_events_missing_a_timestamp() {
+        let mut window = ScanWindow::default();
+        let no_ts = json!({
+            "from": { "kind": "role", "id": "backend" },
+            "channel": "@frontend",
+            "kind": { "kind": "message", "data": { "kind": "question", "body": "x" } },
+        });
+        window.refresh(vec![q(&ago(20), "a"), no_ts], None, lookback(60));
+        assert_eq!(
+            bodies(&window),
+            ["a"],
+            "an event with no parseable ts is left out, so trimming never stalls",
         );
     }
 }
