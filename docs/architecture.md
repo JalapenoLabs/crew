@@ -376,6 +376,20 @@ nothing. Roster writes stay synchronous: they happen at join and leave rate, not
 per message. `SQLite` and Postgres remain future backends behind the same trait;
 Seraphim persists to its own Postgres when it is the front-end.
 
+An append stays infallible so the in-memory index and the live stream never
+depend on the disk: a write that fails leaves the event in memory, so the running
+broker is consistent. The failure is not silent, though (issue #207). The store
+counts failed writes and keeps the last error, exposed through
+`Storage::durability`, and `GET /health` reports it: `200 OK` with
+`status: "ok"` while every write reaches disk, and `503 Service Unavailable` with
+`status: "degraded"` (plus the failure count and last error) once a write fails,
+so an operator or an automated probe learns durability is degraded instead of
+discovering it when a restart replays a short log. The log flushes each line to
+the OS but does not `fsync`, so a clean process restart loses nothing while a
+power loss can drop the unsynced tail; crash-durability (periodic `fsync`) is a
+deliberate non-goal for this local coordination log, deferred to the Postgres
+backend that owns durability as a system of record.
+
 ## Distribution
 
 The substrate is the reusable part, so it ships as a Rust crate (the broker plus
