@@ -655,7 +655,13 @@ fires once, and an unbounded crew records nothing. The token feed is the one def
 #24 lands; until then the accounting, enforcement, and `budget` events are exercised
 against spend fed to the seam directly (proven end to end in `tests/budget.rs`). The broker
 accepts a report at `POST /budget` and streams it as `EventKind::Budget`, filterable with
-`GET /history?kind=budget`. See `docs/observability.md` (token budget) and `docs/config.md`.
+`GET /history?kind=budget`. It also folds those `budget` events into a snapshot served at
+`GET /budget` (issue #176): current spend against budget per role (cumulative spend and cap)
+and crew-wide (the crew total and budget). Like the situation board (issue #49) and the
+`GET /stats` rollup, it is a projection of the durable log, latest-wins per role and
+crew-wide, rebuilt by folding the `budget` events on a restart, so the `crew top` cockpit
+(issue #51) reads a snapshot rather than replaying the stream. See `docs/observability.md`
+(token budget) and `docs/config.md`.
 
 Auto-idle on quiet with cost and token telemetry makes spend legible per role and overall
 (issue #55). Idle-stop is the lifecycle machine from issue #22: a role quiet past its
