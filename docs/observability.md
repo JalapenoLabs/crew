@@ -208,9 +208,11 @@ other. `GET /roster` carries the state too: a crew-wide `standing` (`running` /
 whenever it is paused on its own or the crew is not `running`; it honors this by
 pulling no work while gated (its role card says so). The control state lives in the
 broker, the live recoverable authority, and a stand-down preserves the durable log and
-roster, so the crew resumes with `crew resume` or a fresh `crew up`. Persisting the
-control state across a broker restart is a later refinement; the stream already records
-every transition.
+roster, so the crew resumes with `crew resume` or a fresh `crew up`. Every transition is
+a durable `lifecycle` event, so the broker rebuilds the control state from the log on a
+restart (issue #185): a stand-down or a per-role pause survives a restart rather than
+silently clearing. The usage auto-pause (issue #56) is time-based and re-arms on the next
+reading, so it is not replayed.
 
 The supervisor's lifecycle state machine drives these transitions (issue #22): it
 marks a role working on start, idle after a quiet period, and stopped on stand-down,
@@ -252,8 +254,10 @@ Every change also rides the stream as a `ledger` event (from the owner, to `all-
 filterable with `history?kind=ledger`), so the ledger is reconstructable from the log
 and the cockpit can render it. Agents use the ledger through `crew_claim` and
 `crew_ledger` (or the CLI shim `crew claim` / `crew ledger`); every role card tells a
-role to claim before it touches shared work. The live ledger lives in the broker; like
-the pause state, rebuilding it from the durable log on a restart is a later refinement.
+role to claim before it touches shared work. The live ledger lives in the broker, and it
+is rebuilt from the durable log on a restart (issue #185), folding each `ledger` event so
+the latest owner and state per task wins, so live ownership survives a restart rather than
+being lost until roles re-claim, like the situation board and the done-gate.
 
 ## Coordination-stall detection
 

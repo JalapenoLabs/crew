@@ -367,7 +367,9 @@ before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `b
 event and, under a blocking policy, refuses, routing the change through the commander;
 issue #46), the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
 touching shared work, moving the claim through `in_progress` / `blocked` / `done`, and
-read the ledger; the broker refuses a claim another role holds, issue #45), the
+read the ledger; the broker refuses a claim another role holds, issue #45, and rebuilds
+the ledger from the `ledger` events in the log on a restart so live ownership survives one,
+issue #185), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
 work for verification instead of asserting it done, judge a teammate's work as an
 independent skeptic, and read the gate; issue #47), `crew_complete` (report the mission
@@ -502,7 +504,8 @@ body, and a retracted flag) published to `all-units` and filterable with
 the broker rebuilds it in `AppState::with_storage` by folding the log the store just
 replayed, so a decision recorded before an idle-stop or a broker restart is still on the
 board after it (this is what satisfies the acceptance, and why the board survives a restart,
-as the done-gate now does too (issue #181), where the in-memory pause control does not). The
+as the done-gate (issue #181) and now the work ledger and pause control (issue #185) do
+too, each rebuilt from its own events in the log). The
 whole crew reads and writes
 it; the commander curates it, and each role card's briefing points a role at it. Recording
 is open to every role, but retraction is enforced curation (issue #180): `retract_board_as`
