@@ -85,8 +85,9 @@ not a reimplementation of the agent.
   (`crew pause` / `crew resume` / `crew standdown`, issue #41), and override the
   commander to command a specialist directly (`crew command <role>`, issue #42: the
   General orders a role itself, bypassing the commander, and the commander is informed
-  rather than bypassed silently; reassigning an in-flight task against the work ledger
-  awaits issue #46).
+  rather than bypassed silently), and reassign an in-flight task from one role to another
+  against the work ledger, informing both roles and the commander (`crew reassign`, issue
+  #42's second half, done).
 - **Coordination robustness.** Parallel roles work in isolated git worktrees
   (`worktrees` in the crew config, issue #43) and integrate through a deliberate step
   (`crew integrate`, issue #44: merge each role's `crew/<role>` branch into one branch,
@@ -156,8 +157,10 @@ The full design is in `docs/architecture.md`. In short:
   plain send (`crew brief` to post a free-form note as the General to the commander by
   default, a role, or a channel, issue #118), the General's
   command-and-control directives (`crew redirect` / `crew belay` to steer a role
-  mid-task, and `crew command` to order a role directly, bypassing the commander while
-  keeping it informed, issue #42), `crew integrate` to merge the roles' branches into one
+  mid-task, `crew command` to order a role directly, bypassing the commander while
+  keeping it informed, and `crew reassign` to move an in-flight task to a new owner in the
+  work ledger while informing both roles and the commander, issue #42), `crew integrate`
+  to merge the roles' branches into one
   coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` /
   `crew order` / `crew ask` / `crew answer` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
@@ -756,9 +759,20 @@ the commander itself carries no notice. Briefing the commander (`Channel::resolv
 default and the override is explicit, so the chain of command is intact, not broken. Built on
 the same General front-end path as `crew redirect` / `crew belay` (posting as the General, no
 role card), it needs no broker change: the direct order and the commander notice are two posts
-to the ordinary message endpoint. The override's other half, reassigning an in-flight task
-from one role to another and updating the work ledger, awaits the work ledger (issue #46) to
-reassign against. See `docs/communication.md` (direct override) and `docs/roles.md`.
+to the ordinary message endpoint.
+
+`crew reassign` is the override's other half (issue #42): the General moves an in-flight task
+from one role to another in the work ledger (issue #45). It POSTs to the broker's
+`POST /ledger/reassign`, which overrides the ledger's one-owner invariant to take a held task
+from its current holder, preserves the task's state and title so the work moves in place, and
+publishes a `ledger` event with the new owner so the change rides the stream like any claim
+(from the owner, to `all-units`). The broker refuses a move on a task that is not held (absent
+or done), held by a role other than an optional `--from` guard, or already owned by the target
+(each a 409). `crew reassign <task> --to <role> [--from <role>]` then posts a General `note` to
+each party so no one is surprised: the old owner is told to hand off, the new owner to pick the
+work up where it stands, and the commander that the General moved it, unless the commander is
+one of the two roles (already notified as a party). See `docs/communication.md` (direct
+override) and `docs/roles.md`.
 
 `crew notify` lets the General walk away and be pulled back only when it matters (issue
 #52). It tails the firehose (`GET /stream`, the same event stream `crew watch` reads,

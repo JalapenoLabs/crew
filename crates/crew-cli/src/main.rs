@@ -273,6 +273,27 @@ enum Command {
         #[arg(long, value_name = "URL")]
         broker: Option<String>,
     },
+    /// Reassign an in-flight task to a new owner in the work ledger: the
+    /// General moves a claimed task, and both roles and the commander are
+    /// informed (issue #42).
+    Reassign {
+        /// The task key to reassign, as shown in `crew ledger`.
+        task: String,
+        /// The role to move the task to (its `@role` channel).
+        #[arg(long, value_name = "ROLE")]
+        to: String,
+        /// The role the task is expected to be held by; a guard against a stale
+        /// view. Optional.
+        #[arg(long, value_name = "ROLE")]
+        from: Option<String>,
+        /// The crew's commander to inform. Defaults to `commander`.
+        #[arg(long, value_name = "ROLE")]
+        commander: Option<String>,
+        /// The broker base URL (default: the `CREW_BROKER_HOST` / `PORT`
+        /// environment).
+        #[arg(long, value_name = "URL")]
+        broker: Option<String>,
+    },
     /// Pause a role, or the whole crew: it pulls no new work until resumed.
     Pause {
         /// The role to pause; omit to pause the whole crew.
@@ -518,6 +539,19 @@ fn main() -> Result<()> {
             &order,
             scope.as_deref(),
             acceptance.as_deref(),
+            commander.as_deref(),
+        ),
+        Command::Reassign {
+            task,
+            to,
+            from,
+            commander,
+            broker,
+        } => control::reassign(
+            broker.as_deref(),
+            &task,
+            &to,
+            from.as_deref(),
             commander.as_deref(),
         ),
         Command::Pause { role, broker } => pause::pause(broker.as_deref(), role.as_deref()),
