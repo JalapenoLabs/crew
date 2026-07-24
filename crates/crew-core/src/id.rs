@@ -105,6 +105,23 @@ macro_rules! uuid_id {
                 Self(value)
             }
         }
+
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            #[doc = concat!("Parses a [`", stringify!($name), "`] from its canonical UUID text.")]
+            ///
+            /// This is the inverse of [`Display`](std::fmt::Display), so a
+            /// front-end or CLI can turn a task-id argument back into a typed
+            /// id (issue #183). The accepted forms are exactly those a
+            /// [`uuid::Uuid`] parses from a string.
+            ///
+            /// # Errors
+            /// Returns a [`uuid::Error`] when `value` is not a valid UUID.
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                value.parse::<Uuid>().map(Self)
+            }
+        }
     };
 }
 
@@ -160,7 +177,7 @@ pub enum Sender {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelId, MessageId, RoleId, Sender};
+    use super::{ChannelId, MessageId, RoleId, Sender, TaskId};
 
     #[test]
     fn string_ids_serialize_transparently() {
@@ -180,6 +197,19 @@ mod tests {
         assert_ne!(id, MessageId::new());
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(serde_json::from_str::<MessageId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn uuid_ids_parse_from_their_display_string() {
+        // FromStr is the inverse of Display, so a CLI or MCP argument round-trips
+        // through the wire form (issue #183).
+        let id = TaskId::new();
+        let parsed: TaskId = id.to_string().parse().unwrap();
+        assert_eq!(parsed, id, "the id parses back from its own Display text");
+        assert!(
+            "not-a-uuid".parse::<TaskId>().is_err(),
+            "a non-UUID string is a parse error, not a silent default",
+        );
     }
 
     #[test]

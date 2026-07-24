@@ -209,17 +209,22 @@ the store. It exposes sixteen tools (issues #17,
   the crossing to the unit (a `boundary` event) and, under a blocking policy, refuses the
   edit, telling the role to route the change through the commander. The policy comes from
   the role card (`lane_enforcement`: `warn` / `block` / `off`). See `docs/roles.md`.
-- `crew_claim` claims a piece of work (a task key) before the role starts it, or moves
-  the role's claim to `in_progress`, `blocked`, or `done`. The broker refuses a claim
-  another role holds, so two roles never edit the same work blind (issue #45).
-- `crew_ledger` reads the work ledger: every claimed task, its owner, and its state.
+- `crew_claim` claims the role's work before it starts, or moves the role's claim to
+  `in_progress`, `blocked`, or `done`. It keys by the task the role adopted from its order
+  (a fresh id for ad-hoc work), not a human string, so a claim chain and the done-gate
+  share one id (issue #183). The broker refuses a claim another role holds, so two roles
+  never edit the same work blind (issue #45).
+- `crew_ledger` reads the work ledger: every claimed task (its id and display title), its
+  owner, and its state.
 - `crew_submit`, `crew_verdict`, and `crew_gate` are the adversarial done-gate (issue
   #47). A role submits finished work for verification with `crew_submit` rather than
-  reporting it done; an independent role tries to break it and records a pass or a
-  failure with `crew_verdict`; and `crew_gate` reads the live gate. The broker refuses a
-  self-verdict, so a task is done only when a role other than the owner could not break
-  it, and a failure hands the work back to the owner's inbox. See `docs/roles.md` (the
-  done-gate).
+  reporting it done; an independent role reads the task id from `crew_gate`, tries to
+  break the work, and records a pass or a failure with `crew_verdict`; and `crew_gate`
+  reads the live gate. The gate keys by the work's `TaskId`, not its human title, so two
+  tasks sharing a title never collide and a submission and its verdict share one id (issue
+  #183). The broker refuses a self-verdict, so a task is done only when a role other than
+  the owner could not break it, and a failure hands the work back to the owner's inbox.
+  See `docs/roles.md` (the done-gate).
 - `crew_complete` reports the mission gracefully finished (issues #121, #154, #155): the
   crew, typically through the commander, declares the work done, so the broker records a
   `mission` event and `crew notify` fires on a true completion rather than a stand-down. The

@@ -641,6 +641,7 @@ async fn joining_a_long_conversation_costs_bounded_context() {
             json!({
                 "from": role("commander"),
                 "kind": "order",
+                "task": "11111111-1111-1111-1111-111111111111",
                 "title": "Ship the endpoint",
                 "scope": "api only",
                 "owned_paths": ["api/"],

@@ -29,7 +29,7 @@
 //! the broker address comes from `--broker`, else the `CREW_BROKER_*`
 //! environment.
 
-use crew_substrate::core::{Channel, RoleId};
+use crew_substrate::core::{Channel, RoleId, TaskId};
 use eyre::{eyre, Result, WrapErr};
 use serde_json::json;
 
@@ -148,10 +148,14 @@ pub fn command(
     let base = resolve_base(broker)?;
 
     // The direct order to the specialist: the General taking the commander's
-    // ordering role.
+    // ordering role. Mint a fresh task id and stamp it on the order (issue #132),
+    // like `crew_order` does, so the specialist adopts it, the order seeds a
+    // ledger claim keyed by that id (issue #184), and the work correlates on the
+    // stream rather than by its display title (issue #183).
     let order_payload = json!({
         "from": { "kind": "general" },
         "kind": "order",
+        "task": TaskId::new(),
         "title": order,
         "scope": scope.unwrap_or_default(),
         "owned_paths": [],
@@ -207,19 +211,29 @@ pub fn reassign(
     from: Option<&str>,
     commander: Option<&str>,
 ) -> Result<()> {
+    let task: TaskId = task
+        .parse()
+        .wrap_err_with(|| format!("`{task}` is not a task id; pass the id `crew ledger` shows"))?;
     let to = plain_role(to);
     let to_channel = role_channel(&to, "reassign to")?;
     let from = from.map(plain_role);
     let base = resolve_base(broker)?;
 
-    // Move the ledger owner authoritatively; the broker returns who held it and
-    // the state the task keeps, so the notes are precise.
+    // Move the ledger owner authoritatively; the broker returns who held it, the
+    // state the task keeps, and its display title, so the notes are precise.
     let outcome = post_reassign(&base, task, &to, from.as_deref())?;
     let previous_owner = outcome.previous_owner;
+    // Name the task by its human title when the ledger has one, else its id (issue
+    // #183).
+    let label = if outcome.title.is_empty() {
+        task.to_string()
+    } else {
+        outcome.title.clone()
+    };
 
     // Notify the old owner to hand off, and the new owner to pick the work up.
     let old_channel = role_channel(&previous_owner, "notify")?;
-    let old_note = general_note(&reassign_old_owner_notice(task, &to));
+    let old_note = general_note(&reassign_old_owner_notice(&label, &to));
     post_message(
         &base,
         old_channel.name().as_str(),
@@ -228,7 +242,7 @@ pub fn reassign(
     )?;
 
     let new_note = general_note(&reassign_new_owner_notice(
-        task,
+        &label,
         &previous_owner,
         &outcome.state,
     ));
@@ -242,34 +256,43 @@ pub fn reassign(
     // Inform the commander, unless it is one of the two parties (already notified).
     let commander = default_commander(commander);
     if commander.eq_ignore_ascii_case(&previous_owner) || commander.eq_ignore_ascii_case(&to) {
-        println!("reassigned `{task}` from {previous_owner} to {to}");
+        println!("reassigned `{label}` from {previous_owner} to {to}");
         return Ok(());
     }
     let commander_channel = role_channel(&commander, "inform")?;
-    let notice = general_note(&reassign_commander_notice(task, &previous_owner, &to));
+    let notice = general_note(&reassign_commander_notice(&label, &previous_owner, &to));
     post_message(
         &base,
         commander_channel.name().as_str(),
         &notice,
         "commander notice",
     )?;
-    println!("reassigned `{task}` from {previous_owner} to {to}; informed {commander}");
+    println!("reassigned `{label}` from {previous_owner} to {to}; informed {commander}");
     Ok(())
 }
 
-/// What the broker reported for a reassignment: who held the task, and the
-/// state it kept across the move.
+/// What the broker reported for a reassignment: who held the task, the state it
+/// kept across the move, and its display title.
 struct ReassignOutcome {
     /// The role that held the task before the reassignment.
     previous_owner: String,
     /// The task's state (`claimed` / `in_progress` / `blocked`), for the new
     /// owner's notice.
     state: String,
+    /// The task's display title, for the notices; empty when the ledger has
+    /// none (issue #183).
+    title: String,
 }
 
 /// POSTs a reassignment to the broker's `/ledger/reassign`, returning who held
-/// the task and its preserved state, or surfacing the broker's refusal.
-fn post_reassign(base: &str, task: &str, to: &str, from: Option<&str>) -> Result<ReassignOutcome> {
+/// the task, its preserved state, and its title, or surfacing the broker's
+/// refusal.
+fn post_reassign(
+    base: &str,
+    task: TaskId,
+    to: &str,
+    from: Option<&str>,
+) -> Result<ReassignOutcome> {
     let mut body = json!({ "task": task, "to": to });
     if let Some(from) = from {
         body["from"] = json!(from);
@@ -302,9 +325,11 @@ fn post_reassign(base: &str, task: &str, to: &str, from: Option<&str>) -> Result
         .ok_or_else(|| eyre!("the reassignment response omitted the previous owner"))?
         .to_owned();
     let state = value["state"].as_str().unwrap_or_default().to_owned();
+    let title = value["title"].as_str().unwrap_or_default().to_owned();
     Ok(ReassignOutcome {
         previous_owner,
         state,
+        title,
     })
 }
 

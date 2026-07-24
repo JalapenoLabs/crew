@@ -213,6 +213,18 @@ impl Broker {
         self.post_message(target.name().as_str(), &payload)
     }
 
+    /// Returns the task this role is working, minting and adopting a fresh one
+    /// when it has none (issues #132, #183).
+    ///
+    /// Own-work flows (`crew_submit`, `crew_claim`) key by the task the role
+    /// already adopted from its order, so a claim -> `in_progress` -> done
+    /// chain and the done-gate share one id with no extra bookkeeping.
+    /// Genuinely ad-hoc work, with no adopted task, mints a fresh id and
+    /// adopts it, so the same call chain still shares one id.
+    fn adopt_task(&mut self) -> TaskId {
+        *self.task.get_or_insert_with(TaskId::new)
+    }
+
     /// Adds this role's task context to an outbound message `payload` when set,
     /// so the event correlates to the task the role is working (issue #132).
     ///
@@ -477,19 +489,23 @@ impl Broker {
         Ok(format!("{kind} sent to {to}"))
     }
 
-    /// Claims `task` for this role, or moves the role's claim to `state` (issue
-    /// #45).
+    /// Claims this role's work, or moves its claim to `state` (issues #45,
+    /// #183).
     ///
-    /// A role claims before it starts and moves its claim to `done` when it
-    /// finishes. The broker refuses a claim on work another role already
-    /// holds; the returned error names the holder, so a conflict is
-    /// surfaced rather than raced. An empty `title` keeps the task's
-    /// current title.
+    /// Own work: the claim keys by the task the role adopted from its order, so
+    /// a claim -> `in_progress` -> done chain shares one id and updates one
+    /// ledger entry. Ad-hoc work with no adopted task mints and adopts a
+    /// fresh id, so the same chain still shares one id. `title` is the
+    /// display label; an empty one keeps the task's current title. The
+    /// broker refuses a claim on work another role already holds; the
+    /// returned error names the holder, so a conflict is surfaced rather
+    /// than raced.
     ///
     /// # Errors
     /// Returns an error if another role holds the task, or the broker cannot
     /// be reached.
-    pub fn claim(&self, task: &str, state: &str, title: &str) -> Result<String, Error> {
+    pub fn claim(&mut self, state: &str, title: &str) -> Result<String, Error> {
+        let task = self.adopt_task();
         let url = format!("{}/ledger", self.base);
         let payload = json!({
             "task": task,
@@ -503,7 +519,7 @@ impl Broker {
             .set("content-type", "application/json")
             .send_string(&payload.to_string())
         {
-            Ok(_) => Ok(format!("{state}: {task}")),
+            Ok(_) => Ok(format!("{state}: {}", claim_label(title, task))),
             Err(err) => Err(self.explain(err)),
         }
     }
@@ -785,20 +801,31 @@ impl Broker {
         self.post_json("/boundary", &payload)
     }
 
-    /// Submits this role's finished work for adversarial verification (issue
-    /// #47).
+    /// Submits this role's finished work for adversarial verification (issues
+    /// #47, #183).
     ///
-    /// Announces the task on the stream and, when `to` names a reviewer, asks
-    /// it to verify. Submitting does not mark the work done: an independent
-    /// role must pass it first, so confident-but-wrong work never ships.
+    /// Keys the submission by the task the role adopted from its order (or a
+    /// freshly minted-and-adopted id for ad-hoc work), so the submission, its
+    /// verdict, and its ledger claim share one id; `title` is the display label
+    /// the gate shows. Announces the task on the stream and, when `to` names a
+    /// reviewer, asks it to verify. Submitting does not mark the work done: an
+    /// independent role must pass it first, so confident-but-wrong work never
+    /// ships.
     ///
     /// # Errors
     /// Returns an error if the broker rejects the submission or cannot be
     /// reached.
-    pub fn submit(&self, task: &str, acceptance: &str, to: Option<&str>) -> Result<String, Error> {
+    pub fn submit(
+        &mut self,
+        title: &str,
+        acceptance: &str,
+        to: Option<&str>,
+    ) -> Result<String, Error> {
+        let task = self.adopt_task();
         let mut payload = json!({
             "role": self.role.as_str(),
             "task": task,
+            "title": title,
             "acceptance": acceptance,
         });
         if let Some(reviewer) = to {
@@ -806,8 +833,9 @@ impl Broker {
         }
         self.post_json("/gate/submit", &payload)?;
         Ok(format!(
-            "submitted `{task}` for verification. It is not done until an independent role \
-             tries to break it and passes it."
+            "submitted `{}` for verification. It is not done until an independent role \
+             tries to break it and passes it.",
+            claim_label(title, task),
         ))
     }
 
@@ -831,18 +859,20 @@ impl Broker {
         Ok("reported the mission complete to the unit.".to_owned())
     }
 
-    /// Records this role's verdict on a task another role submitted (issue
-    /// #47).
+    /// Records this role's verdict on a task another role submitted (issues
+    /// #47, #183).
     ///
-    /// A `pass` marks the task done; otherwise the work returns to its owner
-    /// with the `failure`. The broker refuses a verdict on one's own work,
-    /// so a task passes only when an independent role could not break it.
+    /// The verifier names the `task` by its [`TaskId`], read from `crew_gate`,
+    /// so a cross-actor verdict correlates to the same id the owner submitted
+    /// under. A `pass` marks the task done; otherwise the work returns to its
+    /// owner with the `failure`. The broker refuses a verdict on one's own
+    /// work, so a task passes only when an independent role could not break it.
     ///
     /// # Errors
     /// Returns an error if the verdict is refused (the verifier is the owner,
     /// or the task is not awaiting a verdict), or the broker cannot be
     /// reached.
-    pub fn verdict(&self, task: &str, pass: bool, failure: &str) -> Result<String, Error> {
+    pub fn verdict(&self, task: TaskId, pass: bool, failure: &str) -> Result<String, Error> {
         let payload = json!({
             "role": self.role.as_str(),
             "task": task,
@@ -1264,9 +1294,9 @@ pub struct InboxItem {
 /// One task in the work ledger from `GET /ledger` (issue #45).
 #[derive(Debug, Deserialize)]
 pub struct LedgerItem {
-    /// The task's key.
+    /// The task's key: its [`TaskId`] as a UUID string (issue #183).
     pub task: String,
-    /// A short human title, or empty.
+    /// A short human title for display, or empty.
     pub title: String,
     /// The role that owns the claim.
     pub owner: String,
@@ -1316,8 +1346,12 @@ pub struct GateSnapshot {
 /// One task's standing in the done-gate.
 #[derive(Debug, Deserialize)]
 pub struct GateTask {
-    /// The task title.
+    /// The task's key: its [`TaskId`] as a UUID string, which `crew_verdict`
+    /// names to judge it (issue #183).
     pub task: String,
+    /// A short human title for display, or empty.
+    #[serde(default)]
+    pub title: String,
     /// The role that submitted the work and owns any rework.
     pub owner: String,
     /// The independent role that returned the latest verdict, if any.
@@ -1402,6 +1436,16 @@ fn broker_message(response: ureq::Response) -> Option<String> {
     value.get("error")?.as_str().map(str::to_owned)
 }
 
+/// A human label for an own-work confirmation: the display title, or the task
+/// id when there is no title (issue #183).
+fn claim_label(title: &str, task: TaskId) -> String {
+    if title.is_empty() {
+        task.to_string()
+    } else {
+        title.to_owned()
+    }
+}
+
 /// A sender's label: a role's id, or `general`.
 fn sender_label(from: &Sender) -> String {
     match from {
@@ -1469,6 +1513,30 @@ mod tests {
         assert!(
             error.status().is_none(),
             "an unreachable error carries no status"
+        );
+    }
+
+    #[test]
+    fn own_work_mints_and_adopts_one_task_shared_across_claim_and_submit() {
+        // Issue #183: own-work `claim` and `submit` key by the adopted task,
+        // minting and adopting a fresh one only when there is none. The id is
+        // adopted before the request, so it sticks even though the POST fails
+        // against a port with no broker; a later own-work call reuses it.
+        let mut broker = Broker::new(
+            "http://127.0.0.1:1",
+            RoleId::new("backend"),
+            RoleId::new("commander"),
+        );
+        assert!(broker.task().is_none(), "a fresh client has no task");
+
+        let _ = broker.claim("in_progress", "login flow");
+        let adopted = broker.task().expect("the claim minted and adopted a task");
+
+        let _ = broker.submit("login flow", "tokens expire", None);
+        assert_eq!(
+            broker.task(),
+            Some(adopted),
+            "submit reuses the adopted task rather than minting a new one",
         );
     }
 
