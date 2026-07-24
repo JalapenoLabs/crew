@@ -215,7 +215,16 @@ the store. It exposes sixteen tools (issues #17,
 - `crew_complete` reports the mission gracefully finished (issue #121): the crew, typically
   through the commander, declares the work done, so the broker records a `mission_complete`
   lifecycle event and `crew notify` fires on a true completion rather than a stand-down. It
-  announces, it does not halt: unlike `crew standdown` it does not gate the crew.
+  announces, it does not halt: unlike `crew standdown` it does not gate the crew. Whether
+  completion should also quiesce the crew was a deliberate product decision (issue #154):
+  it does not. Completion is a report the crew makes, not a control the General issues, so
+  gating on it would let a role halt everyone by declaring victory (inverting the "the
+  General commands, the crew reports" model) and would cut in-flight work short, the
+  opposite of a graceful finish. A finished mission has no work to pull, so its roles
+  idle-stop on their own (issue #55); to stop the crew the General uses `crew standdown`
+  (emergency) or `crew down` (graceful). So the crew standing keeps its three brake levels
+  (`Running` / `Paused` / `StoodDown`), all cleared by `crew resume`, with no terminal
+  `Complete`.
 - `crew_board` and `crew_record` are the shared situation board (issue #49), the crew's
   durable memory. `crew_record` records or retracts an entry (a decision, an interface, or
   a gotcha, keyed by a stable topic); `crew_board` reads it. A role reads the board before
