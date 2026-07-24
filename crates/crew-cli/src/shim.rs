@@ -30,7 +30,7 @@ use crew_substrate::{
 };
 use eyre::{eyre, Result, WrapErr};
 
-use crate::cursor::InboxCursor;
+use crate::cursor::{InboxCursor, TaskContext};
 
 /// The resolved agent context a shim command acts as: its broker, role, and
 /// lane.
@@ -49,8 +49,26 @@ struct Agent {
 
 impl Agent {
     /// A broker client acting as this agent's role.
+    ///
+    /// Seeds the task the role adopted from an order (issue #132), restored
+    /// from disk since each shim command is its own process, so `crew send`
+    /// and `crew order` stamp it the way the long-lived MCP client would. A
+    /// role with no task yet sends without one.
     fn broker(&self) -> Broker {
-        Broker::new(self.base.clone(), self.role.clone(), self.commander.clone())
+        let broker = Broker::new(self.base.clone(), self.role.clone(), self.commander.clone());
+        if let Some(task) = self.task_context().and_then(|context| context.load()) {
+            broker.with_task(task)
+        } else {
+            broker
+        }
+    }
+
+    /// The persisted task-context store for this role, when the broker state
+    /// dir is readable from the environment (issue #132).
+    fn task_context(&self) -> Option<TaskContext> {
+        BrokerConfig::from_env()
+            .ok()
+            .map(|config| TaskContext::new(&config.state_dir, &self.role))
     }
 }
 
@@ -167,11 +185,13 @@ pub fn order(
 /// Prints the messages addressed to this agent's role that are new since the
 /// last call.
 ///
-/// Mirrors `crew_inbox`. The MCP server holds its inbox cursor in memory; the
-/// shim is a process per call, so it persists a per-role cursor under the
-/// broker state dir (issue #130): it seeds the client from the saved position,
-/// reads only what arrived since, and writes the advanced position back. A
-/// first call, or a role with no saved cursor, shows the whole inbox.
+/// Mirrors `crew_inbox`. The MCP server holds its inbox cursor and task context
+/// in memory; the shim is a process per call, so it persists both per role
+/// under the broker state dir (issues #130, #132): it seeds the client from the
+/// saved position, reads only what arrived since, writes the advanced position
+/// back, and saves the task any new order assigned so a later `crew send`
+/// stamps it. A first call, or a role with no saved cursor, shows the whole
+/// inbox.
 ///
 /// # Errors
 /// Returns an error if no role context is set, the broker configuration cannot
@@ -182,6 +202,7 @@ pub fn inbox() -> Result<()> {
         .wrap_err("could not read the broker configuration")?
         .state_dir;
     let cursor = InboxCursor::new(&state_dir, &agent.role);
+    let task_context = TaskContext::new(&state_dir, &agent.role);
 
     let mut broker = agent.broker().with_read_through(cursor.load());
     let items = broker.inbox().map_err(|reason| eyre!("{reason}"))?;
@@ -189,6 +210,12 @@ pub fn inbox() -> Result<()> {
     // it has been shown: a failed write reprints next time rather than dropping it.
     print_inbox(&items);
     cursor.save(broker.read_through())?;
+    // Persist the task the read adopted from an order, so the next command stamps
+    // it (issue #132). A role still working its prior task keeps it, since the
+    // broker was seeded with the saved one.
+    if let Some(task) = broker.task() {
+        task_context.save(task)?;
+    }
     Ok(())
 }
 

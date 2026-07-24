@@ -205,6 +205,84 @@ fn a_brief_defaults_to_the_commander_who_fans_orders_out() {
     );
 }
 
+/// Every message event on the broker, oldest first, as raw JSON.
+fn message_events(base: &str) -> Vec<serde_json::Value> {
+    let text = ureq::get(&format!("{base}/history?kind=message"))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_str(&text).unwrap();
+    history["events"].as_array().unwrap().clone()
+}
+
+#[test]
+fn an_order_mints_a_task_the_assignee_adopts_and_stamps_on_its_work() {
+    // Issue #132: the commander's order mints a TaskId and stamps it on the order;
+    // the assignee adopts it from its inbox, so its next message carries the same
+    // id. The order and the work done under it correlate to one task.
+    let broker = TestBroker::start();
+    broker.register("commander", &[]);
+    broker.register("backend", &["api/"]);
+
+    let commander = broker.client("commander");
+    let mut backend = broker.client("backend");
+
+    // A commander broadcast before any order carries no task: work outside a task
+    // correlates to nothing.
+    commander.send(None, Some("all-units"), "stand by").unwrap();
+
+    // The commander orders backend: this mints the task and stamps it on the order.
+    commander
+        .order(
+            "backend",
+            "build login",
+            "POST /login",
+            &["api/".to_owned()],
+            "tests green",
+            "",
+        )
+        .unwrap();
+
+    let events = message_events(&broker.base);
+    let order = events
+        .iter()
+        .find(|event| event["kind"]["data"]["kind"] == "order")
+        .expect("the order is on the stream");
+    let task = order["task"]
+        .as_str()
+        .expect("the order carries the minted task id")
+        .to_owned();
+    let stand_by = events
+        .iter()
+        .find(|event| event["kind"]["data"]["body"] == "stand by")
+        .unwrap();
+    assert!(
+        stand_by["task"].is_null(),
+        "a message sent outside any task carries no id",
+    );
+
+    // Backend reads the order (adopting its task), then reports back.
+    let inbox = backend.inbox().unwrap();
+    assert!(
+        inbox.iter().any(|item| item.kind == "order"),
+        "backend receives the order",
+    );
+    backend.send(Some("commander"), None, "on it").unwrap();
+
+    // Backend's reply carries the very task the order minted, so its work
+    // correlates to the assignment.
+    let reply = message_events(&broker.base)
+        .into_iter()
+        .find(|event| event["kind"]["data"]["body"] == "on it")
+        .expect("backend's reply is on the stream");
+    assert_eq!(
+        reply["task"].as_str(),
+        Some(task.as_str()),
+        "the assignee stamps the adopted task on the messages it sends next",
+    );
+}
+
 #[test]
 fn an_agent_asks_a_typed_question_and_receives_a_typed_answer() {
     let broker = TestBroker::start();

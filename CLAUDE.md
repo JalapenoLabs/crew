@@ -326,8 +326,14 @@ input first, so no event reaches the store or stream missing a required field. T
 correlation rides the same envelope: a message carries the `task` its sender threads
 (the broker preserves it), and a lifecycle event carries the task the supervisor is
 working via `RosterClient::with_task` (a role fully leaving the unit is not
-task-scoped). Activity events thread the task the same way once the stream-json parser
-lands. See `docs/observability.md`.
+task-scoped). Activity events thread the task the same way through `Event.task` (issue
+#24). The task is minted where work is assigned (issue #132): `crew_order` mints a
+`TaskId` and stamps it on the order, and the assigned role adopts it from its inbox
+(`Broker::inbox`) so its own `crew_send` / `crew_order` stamp the same id, correlation
+on the envelope rather than a role-to-task table. The shim persists the adopted task
+per role beside the inbox cursor. Threading the task onto the assignee's supervisor
+`RosterClient` at runtime (the fleet watching the order stream, not a broker query) is
+the remaining step. See `docs/observability.md`.
 
 `crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,

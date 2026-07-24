@@ -237,6 +237,78 @@ fn a_shim_order_needs_a_single_specialist_not_a_channel() {
     );
 }
 
+/// The task id on the newest message of `kind`, if it carries one.
+fn task_of_kind(port: u16, kind: &str) -> Option<String> {
+    let history = get_json(port, "/history?kind=message");
+    let events = history["events"].as_array().unwrap().clone();
+    events
+        .iter()
+        .rev()
+        .find(|event| event["kind"]["data"]["kind"] == kind)
+        .and_then(|event| event["task"].as_str().map(str::to_owned))
+}
+
+/// The task id on the message whose body is `body`, if it carries one.
+fn task_of_body(port: u16, body: &str) -> Option<String> {
+    let history = get_json(port, "/history?kind=message");
+    let events = history["events"].as_array().unwrap().clone();
+    events
+        .iter()
+        .find(|event| event["kind"]["data"]["body"] == body)
+        .and_then(|event| event["task"].as_str().map(str::to_owned))
+}
+
+#[test]
+fn a_shim_role_stamps_its_adopted_task_across_separate_commands() {
+    // Issue #132: each shim command is its own process, so the task a role adopts
+    // from an order is persisted on disk. A later `crew send` restores it and
+    // stamps it, so the role's work correlates to the task the order minted, the
+    // way the long-lived MCP client does in memory.
+    let port = start_broker();
+    let state = state_dir("task");
+
+    crew(port, &state, "commander", &["register"]);
+    crew(port, &state, "backend", &["register"]);
+
+    // The commander orders backend: the order mints a task and stamps it.
+    stdout_of(
+        crew(
+            port,
+            &state,
+            "commander",
+            &[
+                "order",
+                "backend",
+                "build login",
+                "--acceptance",
+                "tests green",
+            ],
+        ),
+        "order",
+    );
+    let order_task = task_of_kind(port, "order").expect("the order carries a minted task id");
+
+    // Backend reads the order in one process (adopting and persisting the task) ...
+    stdout_of(crew(port, &state, "backend", &["inbox"]), "inbox");
+    // ... then reports back in a separate process, which restores the task from
+    // disk.
+    stdout_of(
+        crew(
+            port,
+            &state,
+            "backend",
+            &["send", "--to", "commander", "on it"],
+        ),
+        "send",
+    );
+
+    let reply_task = task_of_body(port, "on it").expect("backend's reply is on the stream");
+    assert_eq!(
+        reply_task, order_task,
+        "the shim send stamps the task from the earlier order, across processes",
+    );
+}
+
 #[test]
 fn the_shim_inbox_shows_only_new_messages_across_calls() {
     let port = start_broker();

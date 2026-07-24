@@ -476,3 +476,18 @@ task-scoped, so its `stopped` carries none). Activity events thread the task the
 way through the `Event.task` field (issue #24): `RosterClient::emit_activity` carries the
 supervisor's task context onto each `POST /activity`. An event produced outside any task
 carries no id, which serializes to an omitted field.
+
+A task is minted where work is assigned, not centrally (issue #132): the
+commander's `crew_order` mints a `TaskId` and stamps it on the order, so the order
+event correlates. The assigned role adopts that task the moment it reads the order
+from its inbox (`Broker::inbox`), so the messages it sends next (`crew_send`,
+`crew_order`, ...) stamp the same id, and its work correlates to the assignment
+with no central role-to-task table to keep. Correlation stays on the envelope,
+never a new broker query. A specialist already working a task threads it onto a
+sub-order, so a chain of orders shares one id. The MCP server holds the adopted
+task in its long-lived client; the stateless CLI shim persists it per role beside
+the inbox cursor, so its next process stamps the same task. Threading the task
+onto the assigned role's supervisor (`RosterClient::with_task`) so its own
+lifecycle and activity events correlate is the remaining step: the fleet watches
+the order stream the way the stall monitor does, not a broker query (issue #24
+turn boundaries give it a clean seam).
