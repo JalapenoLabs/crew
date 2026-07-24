@@ -9,7 +9,10 @@
 //! - **Lazy start.** A [`Fleet`] launches with every agent
 //!   [`Stopped`](AgentState::Stopped) and no process; work triggers
 //!   [`Fleet::start`], which spawns the process and registers the role (a
-//!   `started` event).
+//!   `started` event). Work triggers it automatically: a fleet-wide lazy-start
+//!   watcher wakes a parked role when a message is addressed to it (issue
+//!   #199), so an idle-stopped role comes back on first work with no manual
+//!   start.
 //! - **Idle-stop.** After the quiet `idle_timeout` the driver stops the process
 //!   but keeps the roster entry (an `idle` event), so a restart is fast and
 //!   keeps context.
@@ -45,7 +48,7 @@
 //! stub run identical code.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     io::{BufRead, BufReader, Read},
     process::Child,
     sync::{
@@ -57,7 +60,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crew_core::{Budget, BudgetEvent, BudgetScope, RoleId, TelemetryEvent};
+use crew_core::{
+    Budget, BudgetEvent, BudgetScope, Channel, ChannelId, Event, EventKind, MessageId, RoleId,
+    TelemetryEvent, Timestamp,
+};
 use eyre::{eyre, Result};
 use tracing::{event, Level};
 
@@ -115,6 +121,11 @@ pub struct LifecyclePolicy {
     /// and kill switch at the process level (issue #187). A brief interval
     /// keeps the response prompt without polling the broker each driver tick.
     pub pause_poll_interval: Duration,
+    /// How often the lazy-start watcher reads the broker for a message that
+    /// should wake a parked role (issue #199). A brief interval keeps
+    /// first-work latency low without a heavy read; a message wakes its
+    /// role within it.
+    pub lazy_start_poll_interval: Duration,
 }
 
 impl Default for LifecyclePolicy {
@@ -141,6 +152,9 @@ impl Default for LifecyclePolicy {
             // idle-stop and heartbeat clocks, so the process-level brake feels immediate
             // without hammering the roster.
             pause_poll_interval: Duration::from_secs(1),
+            // A message should wake a parked role within a second, so first work feels
+            // responsive; a light `since`-cursored read keeps the poll cheap.
+            lazy_start_poll_interval: Duration::from_secs(1),
         }
     }
 }
@@ -351,6 +365,10 @@ pub struct Fleet {
     /// process level (issue #187), stopped and joined on shutdown.
     pause_stop: Sender<()>,
     pause_monitor: Option<JoinHandle<()>>,
+    /// The lazy-start watcher that wakes a parked role when a message is
+    /// addressed to it (issue #199), stopped and joined on shutdown.
+    lazy_stop: Sender<()>,
+    lazy_start: Option<JoinHandle<()>>,
     /// The per-role git worktrees to clean up on stand-down (issue #43); empty
     /// unless the crew opted into worktree isolation.
     worktrees: Vec<Worktree>,
@@ -434,6 +452,23 @@ impl Fleet {
             })
         };
 
+        // The lazy-start watcher: the trigger half of lazy start (issue #199). It
+        // wakes a parked role when a message is addressed to it, so first work brings
+        // an idle-stopped role back without a manual `start`.
+        let lazy_targets: Vec<LazyTarget> = drivers
+            .iter()
+            .map(|driver| LazyTarget {
+                shared: Arc::clone(&driver.shared),
+                commands: driver.commands.clone(),
+            })
+            .collect();
+        let (lazy_stop, lazy_stop_rx) = mpsc::channel();
+        let lazy_start = {
+            let roster = roster.clone();
+            let interval = policy.lazy_start_poll_interval;
+            thread::spawn(move || run_lazy_start(&lazy_targets, &roster, interval, &lazy_stop_rx))
+        };
+
         // The coordination-stall monitor: the fleet-wide half of the defibrillator that
         // watches the stream for a crew stuck waiting on itself (issue #48).
         let stalls = Arc::new(Mutex::new(Vec::new()));
@@ -463,6 +498,8 @@ impl Fleet {
             stall_monitor: Some(stall_monitor),
             pause_stop,
             pause_monitor: Some(pause_monitor),
+            lazy_stop,
+            lazy_start: Some(lazy_start),
             worktrees: Vec::new(),
             recorder,
         }
@@ -625,6 +662,7 @@ impl Fleet {
         let _ = self.watchdog_stop.send(());
         let _ = self.stall_stop.send(());
         let _ = self.pause_stop.send(());
+        let _ = self.lazy_stop.send(());
         for driver in &mut self.drivers {
             if let Some(handle) = driver.handle.take() {
                 let _ = handle.join();
@@ -637,6 +675,9 @@ impl Fleet {
             let _ = handle.join();
         }
         if let Some(handle) = self.pause_monitor.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.lazy_start.take() {
             let _ = handle.join();
         }
         // Every agent has stopped, so its worktree is no longer in use: clean it up.
@@ -673,6 +714,7 @@ impl Drop for Fleet {
         let _ = self.watchdog_stop.send(());
         let _ = self.stall_stop.send(());
         let _ = self.pause_stop.send(());
+        let _ = self.lazy_stop.send(());
     }
 }
 
@@ -959,6 +1001,105 @@ fn run_pause_monitor(
     }
 }
 
+/// One agent the lazy-start watcher may wake: its shared state (to read whether
+/// it is parked) and its command channel (to start it).
+struct LazyTarget {
+    shared: Arc<AgentShared>,
+    commands: Sender<Command>,
+}
+
+/// The lazy-start watcher: wake a parked role when a message is addressed to it
+/// (issue #199).
+///
+/// The lifecycle machine parks a quiet role (idle-stop) so it costs nothing;
+/// this is the other half of lazy start, the trigger that brings it back. It
+/// polls the broker for new `message` events and starts every fleet role a
+/// message's channel addresses that is currently
+/// [`Stopped`](AgentState::Stopped) or [`Idle`](AgentState::Idle).
+/// [`Command::Start`] is idempotent (a no-op on a running role) and the driver
+/// still honors the pause gate (issue #187), so waking a running, dead, or
+/// paused role does nothing.
+///
+/// The cursor starts at launch, so a historical brief never wakes a role, and
+/// advances past each message acted on (the `since` read is inclusive, so an id
+/// set skips the boundary), so a parked role is not re-woken on a stale
+/// message.
+fn run_lazy_start(
+    targets: &[LazyTarget],
+    roster: &RosterClient,
+    interval: Duration,
+    stop: &Receiver<()>,
+) {
+    // Only messages after launch should wake a role; older ones are already
+    // handled or stale.
+    let mut cursor = Timestamp::now();
+    // The message ids already acted on at exactly `cursor`, so the inclusive
+    // `since` re-read never wakes a role twice on the boundary message.
+    let mut seen: HashSet<MessageId> = HashSet::new();
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(interval) {
+        let events = match roster.history_since(cursor, &["message"]) {
+            Ok(events) => events,
+            // A transient broker read failure is not fatal: skip this tick and retry.
+            Err(err) => {
+                event!(
+                    name: "supervisor.lazy_start.scan.skipped",
+                    Level::DEBUG,
+                    error = %err,
+                    "could not read the broker history to lazy-start roles; retrying next tick",
+                );
+                continue;
+            }
+        };
+        for value in events {
+            let Ok(event) = serde_json::from_value::<Event>(value) else {
+                continue;
+            };
+            let EventKind::Message(message) = &event.kind else {
+                continue;
+            };
+            // Skip a message already acted on: older than the cursor, or a boundary
+            // duplicate at the cursor.
+            if event.ts < cursor || (event.ts == cursor && seen.contains(&message.id)) {
+                continue;
+            }
+            if event.ts > cursor {
+                cursor = event.ts;
+                seen.clear();
+            }
+            seen.insert(message.id);
+            wake_addressed(targets, &event.channel);
+        }
+    }
+}
+
+/// Starts every parked role the `channel` of a just-seen message addresses.
+fn wake_addressed(targets: &[LazyTarget], channel: &ChannelId) {
+    let Some(channel) = Channel::parse(channel.as_str()) else {
+        return;
+    };
+    for target in targets {
+        if !channel.addresses(&target.shared.role) {
+            continue;
+        }
+        // Only a parked role needs waking: a running one is already up, and a dead
+        // one is the operator's to revive.
+        if !matches!(
+            target.shared.state(),
+            AgentState::Stopped | AgentState::Idle
+        ) {
+            continue;
+        }
+        if target.commands.send(Command::Start).is_ok() {
+            event!(
+                name: "supervisor.lazy_start.woke",
+                Level::INFO,
+                crew.role = %target.shared.role,
+                "woke `{{crew.role}}`: a message was addressed to it",
+            );
+        }
+    }
+}
+
 /// One agent's lifecycle state machine, owned by its driver thread.
 struct AgentLifecycle {
     shared: Arc<AgentShared>,
@@ -1238,5 +1379,8 @@ mod tests {
         assert_eq!(policy.stall_timeout.as_secs(), 10 * 60);
         assert_eq!(policy.stall_scan_interval.as_secs(), 60);
         assert!(policy.stall_timeout < policy.heartbeat_timeout);
+        // Lazy start wakes a parked role promptly, well below the idle-stop clock.
+        assert_eq!(policy.lazy_start_poll_interval.as_secs(), 1);
+        assert!(policy.lazy_start_poll_interval < policy.idle_timeout);
     }
 }
