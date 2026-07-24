@@ -71,12 +71,15 @@ The intent (`data.kind`) is one of:
 | --- | --- | --- |
 | `order` | `title`, `scope`, `owned_paths`, `acceptance` | Give a role a scoped task. |
 | `question` | `options` (array, may be empty) | Ask for a decision. |
-| `answer` | none | Respond to a question. |
+| `answer` | `in_reply_to` (the answered question's `id`) | Respond to a question. |
 | `status` | none | Report progress. |
 | `artifact` | `reference`, `artifact_kind` (`branch` / `pull_request` / `file` / `route`) | Point at a produced thing. |
 | `note` | none | Freeform prose. |
 
 Every message has `id` and `body`; only the fields in the table are added per intent.
+An `answer`'s `in_reply_to` must name an existing `question` message: the broker rejects
+one that does not with `400`, so a reply always threads to a real question and never
+dangles (issue #211).
 
 ### `lifecycle` (a supervised state change)
 
