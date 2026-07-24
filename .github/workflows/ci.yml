@@ -82,3 +82,21 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --workspace --all-features
+
+  # Scan the dependency tree (direct and transitive) for known security
+  # advisories in the RustSec database, so a vulnerable crate fails the gate
+  # rather than shipping (issue #215, M-STATIC-VERIFICATION). `cargo audit` reads
+  # the committed `Cargo.lock` and exits non-zero on a vulnerability; the
+  # informational advisories (`unmaintained`, `unsound`) it also reports do not
+  # fail the gate, since they are usually transitive and not directly fixable.
+  # The tool is version-pinned like the rest, but the advisory database it checks
+  # against is fetched fresh each run, so the scan stays current between bumps.
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - run: cargo audit
