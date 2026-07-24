@@ -750,7 +750,12 @@ online in the foreground until Ctrl-C or `SIGTERM`, when it stands the crew down
 gracefully (`Fleet::shutdown` stops and deregisters every agent, then the in-process
 broker drains) and removes its pidfile. `crew down` signals that process (`SIGTERM` via
 the pidfile the two share under the broker state dir), so `crew down` and Ctrl-C take
-the one graceful-shutdown path and neither leaves an orphaned process. The broker
+the one graceful-shutdown path and neither leaves an orphaned process. The pidfile carries
+a process-identity marker (on Linux the boot id plus the process start time, from `/proc`),
+so `crew down` verifies the PID still names that `crew up` before signaling and refuses (and
+clears) a stale pidfile whose PID was reused, rather than SIGTERM-ing an unrelated process
+(issue #195); a marker-less pidfile (an older one, or a platform without a `/proc`-style
+source) falls back to signaling by PID. The broker
 exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` drives the
 in-process broker's shutdown itself.
 

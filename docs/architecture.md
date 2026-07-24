@@ -280,9 +280,13 @@ subcommand tree.
 - `crew down` stands the running crew down gracefully (issue #26): it signals the
   `crew up` process (`SIGTERM` via the pidfile the two rendezvous on under the broker
   state dir), which stops every agent, deregisters it, and drains the broker it
-  started. The graceful shutdown itself lives in `crew up` (a single source of truth
-  for how a unit stands down), so `crew down` and Ctrl-C take the same path and neither
-  leaves an orphaned process. `crew up` owns the crew: it holds the fleet's driver
+  started. The pidfile carries a process-identity marker (on Linux the boot id plus the
+  process start time), so `crew down` verifies the PID still names that `crew up` before
+  signaling, refusing and clearing a stale pidfile whose PID was reused rather than
+  signaling an unrelated process (issue #195); a marker-less pidfile falls back to
+  signaling by PID. The graceful shutdown itself lives in `crew up` (a single source of
+  truth for how a unit stands down), so `crew down` and Ctrl-C take the same path and
+  neither leaves an orphaned process. `crew up` owns the crew: it holds the fleet's driver
   threads and, when it started one, the in-process broker, so standing down tears both
   down together.
 - `crew register`, `crew send`, `crew ask` / `crew answer`, `crew inbox`, and
