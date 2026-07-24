@@ -1288,7 +1288,7 @@ mod tests {
     use crew_core::{
         Activity, BoardEvent, BoardSection, BoundaryEvent, BudgetEvent, ChannelId, Event,
         EventKind, LedgerEvent, Lifecycle, Message, MessageId, MessageKind, MissionEvent, RoleId,
-        Sender, StallEvent, StallKind, StallStatus, TaskState, TelemetryEvent, Timestamp,
+        Sender, StallEvent, StallKind, StallStatus, TaskId, TaskState, TelemetryEvent, Timestamp,
         UsageEvent, Verdict, VerificationEvent,
     };
 
@@ -1823,7 +1823,8 @@ mod tests {
         let keep = [
             EventKind::Lifecycle(Lifecycle::Started),
             EventKind::Verification(VerificationEvent {
-                task: "t".to_owned(),
+                task: TaskId::new(),
+                title: String::new(),
                 owner: role(),
                 verifier: None,
                 verdict: Verdict::Submitted,
@@ -1837,7 +1838,7 @@ mod tests {
                 retracted: false,
             }),
             EventKind::Ledger(LedgerEvent {
-                task: "t".to_owned(),
+                task: TaskId::new(),
                 owner: role(),
                 state: TaskState::Claimed,
                 title: String::new(),
