@@ -394,6 +394,58 @@ impl Broker {
         Ok(format!("ordered {to}: {title}"))
     }
 
+    /// Steers `to` mid-task without stopping it: posts this role's `redirect`
+    /// (issues #38, #190).
+    ///
+    /// The commander's in-band counterpart to the General's `crew redirect`: a
+    /// [`Redirect`](crew_core::MessageKind::Redirect) the specialist honors at
+    /// its next tool boundary, keeping its current task and adjusting course.
+    /// `body` is the new direction. It direct-messages one specialist, like
+    /// [`order`](Broker::order).
+    ///
+    /// # Errors
+    /// Returns a message if `to` is not a plain role name, or the broker
+    /// rejects the post or cannot be reached.
+    pub fn redirect(&self, to: &str, body: &str) -> Result<String, String> {
+        self.steer(to, "redirect", body)
+    }
+
+    /// Halts `to`'s current work and re-tasks it: posts this role's `belay`
+    /// (issues #38, #190).
+    ///
+    /// The commander's in-band counterpart to the General's `crew belay`: a
+    /// [`Belay`](crew_core::MessageKind::Belay) the specialist honors at its
+    /// next tool boundary, stopping what it is doing and taking `body` as its
+    /// new order. It direct-messages one specialist, like
+    /// [`order`](Broker::order).
+    ///
+    /// # Errors
+    /// Returns a message if `to` is not a plain role name, or the broker
+    /// rejects the post or cannot be reached.
+    pub fn belay(&self, to: &str, body: &str) -> Result<String, String> {
+        self.steer(to, "belay", body)
+    }
+
+    /// Posts a steering directive (`kind`, a `redirect` or `belay`) as this
+    /// role to `to`'s direct channel, threading the sender's task for
+    /// correlation.
+    ///
+    /// Shared by [`redirect`](Broker::redirect) and [`belay`](Broker::belay). A
+    /// directive steers one specialist, so `to` must resolve to a single role's
+    /// `@role` channel, mirroring [`order`](Broker::order).
+    fn steer(&self, to: &str, kind: &str, body: &str) -> Result<String, String> {
+        let target = Channel::resolve(Some(to), None, &self.commander)
+            .filter(|channel| matches!(channel, Channel::Direct(_)))
+            .ok_or_else(|| format!("`{to}` is not a role to {kind}; name a single specialist"))?;
+        let payload = self.stamp_task(json!({
+            "from": { "kind": "role", "id": self.role.as_str() },
+            "kind": kind,
+            "body": body,
+        }));
+        self.post_message(target.name().as_str(), &payload)?;
+        Ok(format!("{kind} sent to {to}"))
+    }
+
     /// Claims `task` for this role, or moves the role's claim to `state` (issue
     /// #45).
     ///
@@ -1166,9 +1218,9 @@ pub struct InboxItem {
     pub detail: String,
     /// The message body.
     pub body: String,
-    /// Whether this is a General directive (a `redirect` or `belay`) the role
-    /// must honor at once, so the inbox render can flag it (see
-    /// `docs/communication.md`).
+    /// Whether this is a steering directive (a `redirect` or `belay`, from the
+    /// General or the commander) the role must honor at once, so the inbox
+    /// render can flag it (see `docs/communication.md`).
     pub directive: bool,
 }
 
@@ -1384,6 +1436,32 @@ mod tests {
         assert!(
             error.contains("not an artifact kind") && error.contains("pull_request"),
             "the error names the valid kinds: {error}",
+        );
+    }
+
+    #[test]
+    fn a_directive_rejects_a_non_role_target_before_touching_the_broker() {
+        // A directive steers one specialist, so a pair like `a+b` is not a target;
+        // redirect and belay refuse it before any request, so the bogus base is never
+        // reached (issue #190).
+        let broker = Broker::new(
+            "http://127.0.0.1:1",
+            RoleId::new("commander"),
+            RoleId::new("commander"),
+        );
+        let redirect = broker
+            .redirect("frontend+backend", "focus the login flow")
+            .expect_err("a redirect needs a single specialist");
+        assert!(
+            redirect.contains("not a role to redirect"),
+            "the error names the directive: {redirect}",
+        );
+        let belay = broker
+            .belay("frontend+backend", "drop that and take this")
+            .expect_err("a belay needs a single specialist");
+        assert!(
+            belay.contains("not a role to belay"),
+            "the error names the directive: {belay}",
         );
     }
 }

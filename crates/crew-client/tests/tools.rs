@@ -284,6 +284,63 @@ fn an_order_mints_a_task_the_assignee_adopts_and_stamps_on_its_work() {
 }
 
 #[test]
+fn a_commander_steers_a_specialist_in_band_with_redirect_and_belay() {
+    // Issue #190: the commander steers a working specialist through its own tools,
+    // not only the General over the CLI. A `redirect` nudges without stopping; a
+    // `belay` halts and re-tasks. Both arrive typed and flagged to honor at once.
+    let broker = TestBroker::start();
+    broker.register("commander", &[]);
+    broker.register("backend", &["api/"]);
+
+    let commander = broker.client("commander");
+    let mut backend = broker.client("backend");
+
+    // The commander redirects backend mid-task: it arrives as a typed `redirect`,
+    // flagged as a directive the specialist honors at its next tool boundary.
+    commander
+        .redirect(
+            "backend",
+            "prioritize the login flow before the profile page",
+        )
+        .unwrap();
+    let inbox = backend.inbox().unwrap();
+    assert_eq!(inbox.len(), 1, "backend receives the redirect");
+    let redirect = &inbox[0];
+    assert_eq!(redirect.from, "commander");
+    assert_eq!(redirect.channel, "@backend");
+    assert_eq!(
+        redirect.kind, "redirect",
+        "it arrives as a typed redirect, not a note"
+    );
+    assert!(
+        redirect.directive,
+        "a redirect is flagged as a directive to honor at once"
+    );
+    assert_eq!(
+        redirect.body,
+        "prioritize the login flow before the profile page"
+    );
+
+    // The commander then belays backend: halt the current work and take a new
+    // order.
+    commander
+        .belay("backend", "stop the refactor, patch the auth regression")
+        .unwrap();
+    let inbox = backend.inbox().unwrap();
+    assert_eq!(inbox.len(), 1, "backend receives the belay");
+    let belay = &inbox[0];
+    assert_eq!(belay.kind, "belay", "it arrives as a typed belay");
+    assert!(belay.directive, "a belay is flagged as a directive");
+    assert_eq!(belay.body, "stop the refactor, patch the auth regression");
+
+    // The commander never sees its own directives echoed back.
+    assert!(
+        broker.client("commander").inbox().unwrap().is_empty(),
+        "the commander does not receive its own steering directives",
+    );
+}
+
+#[test]
 fn an_agent_asks_a_typed_question_and_receives_a_typed_answer() {
     let broker = TestBroker::start();
     broker.register("backend", &["api/"]);
