@@ -156,7 +156,11 @@ decisions and their rationale, and known gotchas, distinct from the transient me
 stream so the crew stops re-deriving and re-litigating what is settled. A role records or
 retracts an entry with `crew_record` (`POST /board`) and reads the board with `crew_board`
 (`GET /board`, filterable by section); the whole crew reads and writes it, and the
-commander curates it.
+commander curates it. Recording is open to every role, but retraction is enforced curation
+(issue #180): `POST /board` with `retract: true` succeeds only for the entry's author or the
+crew's commander, and any other role is refused a 403, so a stray role cannot erase a
+curated decision. The broker resolves the commander from its config (`crew up` sets it from
+the crew config; `CREW_BROKER_COMMANDER` sets it for a bare `crewd`).
 
 Every change is a `board` event (to `all-units`), so the board is auditable on `/stream`,
 in `crew watch`, and via `GET /history?kind=board`. The board itself is a **projection of

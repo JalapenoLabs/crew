@@ -18,6 +18,9 @@ pub enum ApiError {
     BadRequest(String),
     /// The requested resource does not exist (HTTP 404).
     NotFound(String),
+    /// The requester is not allowed to perform this action: retracting a board
+    /// entry it neither authored nor commands (HTTP 403).
+    Forbidden(String),
     /// The request conflicts with the current state: claiming work another role
     /// already holds, or verifying one's own work or a task not awaiting a
     /// verdict (HTTP 409).
@@ -38,6 +41,12 @@ impl ApiError {
     #[must_use]
     pub fn not_found(message: impl std::fmt::Display) -> Self {
         Self::NotFound(message.to_string())
+    }
+
+    /// Builds a [`ApiError::Forbidden`] from anything that renders as a string.
+    #[must_use]
+    pub fn forbidden(message: impl std::fmt::Display) -> Self {
+        Self::Forbidden(message.to_string())
     }
 
     /// Builds a [`ApiError::Conflict`] from anything that renders as a string.
@@ -65,6 +74,7 @@ impl IntoResponse for ApiError {
         let (status, error) = match self {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::NotImplemented(message) => (StatusCode::NOT_IMPLEMENTED, message),
         };
