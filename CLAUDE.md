@@ -422,10 +422,14 @@ defaults to the crew config file's own directory (overridable with the `workspac
 Anchoring to the config, not the shell's cwd, means a name points at the same clone
 wherever `crew up` runs. Each role also carries a `runtime` (issue #128): `to_cards` stamps
 it onto the role card, and the supervisor's `agent_command` spawns `claude -p` (MCP tools)
-for a Claude role or `codex exec` (wired to the CLI shim) for a Codex role, adapting the
-card briefing to name the `crew <cmd>` shim invocations. The MCP server is registered only
-when the crew has a Claude role, so a Codex-only crew needs no `claude`, and `crew up`
-brings up a mixed-runtime unit in one command. See `docs/config.md` and `docs/codex.md`.
+for a Claude role or `codex exec --dangerously-bypass-approvals-and-sandbox
+--skip-git-repo-check` (wired to the CLI shim) for a Codex role, adapting the card briefing
+to name the `crew <cmd>` shim invocations. The codex invocation is verified against
+codex-cli 0.145.0 (issue #162): `exec` is the non-interactive mode, the bypass flag runs
+the agent unattended (no approval gate or sandbox), and `--skip-git-repo-check` lets a
+scratch-dir role boot outside a Git repo. The MCP server is registered only when the crew
+has a Claude role, so a Codex-only crew needs no `claude`, and `crew up` brings up a
+mixed-runtime unit in one command. See `docs/config.md` and `docs/codex.md`.
 
 Model per role spends strong-model budget where it matters and a cheap model everywhere
 else (issue #53, `crew_core::model`). A role runs a **model tier** (`strong` / `standard`

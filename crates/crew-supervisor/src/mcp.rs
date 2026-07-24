@@ -135,22 +135,32 @@ pub fn agent_turn_argv(briefing: &str) -> Vec<String> {
 }
 
 /// Builds the `codex` argv for a headless agent turn, the Codex analog of
-/// [`agent_turn_argv`] (issue #128).
+/// [`agent_turn_argv`] (issue #128). Verified against codex-cli 0.145.0.
 ///
-/// `codex exec` runs a non-interactive turn with `briefing` as the opening
-/// prompt (the shim-adapted role card bootstrap), and
-/// `--dangerously-bypass-approvals-and-sandbox` is the analog of Claude's
-/// `bypassPermissions`: it drops the approval gate and the sandbox so an
-/// unattended crew agent can work without prompting, which is the whole point
-/// of a spawned agent. `argv[0]` is the program. A Codex role needs no MCP
-/// registration; it reaches the crew through the CLI shim, which reads the same
-/// `CREW_ROLE_CARD` environment (see `docs/codex.md`).
+/// `codex exec` runs a non-interactive turn (`codex --help`: "Run Codex
+/// non-interactively") with `briefing` as the opening prompt (the shim-adapted
+/// role card bootstrap). Two flags make it safe to spawn unattended:
+///
+/// - `--dangerously-bypass-approvals-and-sandbox` is the analog of Claude's
+///   `bypassPermissions`: it drops the approval gate and the sandbox so the
+///   agent works without prompting, which is the whole point of a spawned
+///   agent. It is the intended flag for an externally sandboxed environment.
+/// - `--skip-git-repo-check` lets the turn start outside a Git repository.
+///   Without it `codex exec` refuses in a non-repo directory ("Not inside a
+///   trusted directory and --skip-git-repo-check was not specified"), so a role
+///   in a scratch dir rather than a worktree would never boot. It is a no-op
+///   inside a repo, so a worktree role is unaffected.
+///
+/// `argv[0]` is the program. A Codex role needs no MCP registration; it reaches
+/// the crew through the CLI shim, which reads the same `CREW_ROLE_CARD`
+/// environment (see `docs/codex.md`).
 #[must_use]
 pub fn codex_turn_argv(briefing: &str) -> Vec<String> {
     vec![
         CODEX_BIN.to_owned(),
         "exec".to_owned(),
         "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+        "--skip-git-repo-check".to_owned(),
         briefing.to_owned(),
     ]
 }
@@ -212,8 +222,8 @@ mod tests {
     };
 
     use super::{
-        agent_turn_argv, ensure_binary, find_on_path, mcp_add_argv, mcp_remove_argv,
-        register_server, server_file_name,
+        agent_turn_argv, codex_turn_argv, ensure_binary, find_on_path, mcp_add_argv,
+        mcp_remove_argv, register_server, server_file_name,
     };
 
     /// Renders an OS-string argv as UTF-8 for comparison.
@@ -298,6 +308,29 @@ mod tests {
         assert!(
             argv.iter().any(|arg| arg == "--verbose"),
             "stream-json under -p requires --verbose: {argv:?}",
+        );
+    }
+
+    #[test]
+    fn a_codex_turn_runs_exec_fully_autonomous_and_repo_independent() {
+        // The invocation is verified against codex-cli 0.145.0: `exec` is the
+        // non-interactive mode, the bypass flag drops approvals and the sandbox,
+        // and `--skip-git-repo-check` lets a scratch-dir role start outside a repo.
+        let argv = codex_turn_argv("You are the backend role.");
+        assert_eq!(argv[0], "codex");
+        assert_eq!(argv[1], "exec", "exec is codex's non-interactive mode");
+        assert!(
+            argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()),
+            "codex runs unattended without an approval gate or sandbox: {argv:?}",
+        );
+        assert!(
+            argv.contains(&"--skip-git-repo-check".to_owned()),
+            "a role outside a git repo must still boot: {argv:?}",
+        );
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("You are the backend role."),
+            "the briefing is the trailing prompt, after the flags",
         );
     }
 

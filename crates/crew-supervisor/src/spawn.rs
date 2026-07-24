@@ -735,6 +735,11 @@ mod tests {
             command.args,
         );
         assert!(
+            command.args.contains(&"--skip-git-repo-check".to_owned()),
+            "a codex role outside a git repo must still boot: {:?}",
+            command.args,
+        );
+        assert!(
             command
                 .args
                 .contains(&"You are the backend role.".to_owned()),
