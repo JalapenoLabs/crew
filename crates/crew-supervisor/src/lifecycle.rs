@@ -65,7 +65,7 @@ use std::{
 
 use crew_core::{
     Activity, Budget, BudgetEvent, BudgetScope, Channel, ChannelId, Event, EventKind, MessageId,
-    RoleId, TelemetryEvent, Timestamp,
+    MessageKind, RoleId, TaskId, TelemetryEvent, Timestamp,
 };
 use eyre::{eyre, Result};
 use tracing::{event, Level};
@@ -130,6 +130,11 @@ pub struct LifecyclePolicy {
     /// first-work latency low without a heavy read; a message wakes its
     /// role within it.
     pub lazy_start_poll_interval: Duration,
+    /// How often the order watcher reads the stream for an order assigning a
+    /// task to a fleet role (issue #223). A brief interval correlates a role's
+    /// supervisor events to the order's task soon after it lands, with a light
+    /// `since`-cursored read.
+    pub order_poll_interval: Duration,
 }
 
 impl Default for LifecyclePolicy {
@@ -159,6 +164,9 @@ impl Default for LifecyclePolicy {
             // A message should wake a parked role within a second, so first work feels
             // responsive; a light `since`-cursored read keeps the poll cheap.
             lazy_start_poll_interval: Duration::from_secs(1),
+            // An order's task should correlate the assigned role's supervisor events
+            // within a second of the order landing, on the same light cursored read.
+            order_poll_interval: Duration::from_secs(1),
         }
     }
 }
@@ -374,6 +382,10 @@ pub struct Fleet {
     /// addressed to it (issue #199), stopped and joined on shutdown.
     lazy_stop: Sender<()>,
     lazy_start: Option<JoinHandle<()>>,
+    /// The order watcher that threads an order's task onto the assigned role's
+    /// supervisor events (issue #223), stopped and joined on shutdown.
+    order_stop: Sender<()>,
+    order_watcher: Option<JoinHandle<()>>,
     /// The per-role git worktrees to clean up on stand-down (issue #43); empty
     /// unless the crew opted into worktree isolation.
     worktrees: Vec<Worktree>,
@@ -493,6 +505,22 @@ impl Fleet {
             thread::spawn(move || monitor.run(&stall_stop_rx))
         };
 
+        // The order watcher: thread an order's task onto the assigned role's
+        // supervisor events (issue #223). It watches the message stream for an order
+        // addressed to a fleet role and stamps that order's task on the roster client,
+        // so the role's own lifecycle and activity events correlate to the task the
+        // agent adopted, learned from the same stream any observer reads.
+        let (order_stop, order_stop_rx) = mpsc::channel();
+        let order_watcher = {
+            let roster = roster.clone();
+            let roles: HashSet<RoleId> = drivers
+                .iter()
+                .map(|driver| driver.shared.role.clone())
+                .collect();
+            let interval = policy.order_poll_interval;
+            thread::spawn(move || run_order_watcher(&roles, &roster, interval, &order_stop_rx))
+        };
+
         Self {
             drivers,
             incidents,
@@ -505,6 +533,8 @@ impl Fleet {
             pause_monitor: Some(pause_monitor),
             lazy_stop,
             lazy_start: Some(lazy_start),
+            order_stop,
+            order_watcher: Some(order_watcher),
             worktrees: Vec::new(),
             recorder,
         }
@@ -668,6 +698,7 @@ impl Fleet {
         let _ = self.stall_stop.send(());
         let _ = self.pause_stop.send(());
         let _ = self.lazy_stop.send(());
+        let _ = self.order_stop.send(());
         for driver in &mut self.drivers {
             if let Some(handle) = driver.handle.take() {
                 let _ = handle.join();
@@ -683,6 +714,9 @@ impl Fleet {
             let _ = handle.join();
         }
         if let Some(handle) = self.lazy_start.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.order_watcher.take() {
             let _ = handle.join();
         }
         // Every agent has stopped, so its worktree is no longer in use: clean it up.
@@ -720,6 +754,7 @@ impl Drop for Fleet {
         let _ = self.stall_stop.send(());
         let _ = self.pause_stop.send(());
         let _ = self.lazy_stop.send(());
+        let _ = self.order_stop.send(());
     }
 }
 
@@ -1147,6 +1182,104 @@ fn wake_addressed(targets: &[LazyTarget], channel: &ChannelId) {
     }
 }
 
+/// The `(role, task)` an order in `event` assigns, if it is an order directed
+/// to a fleet `role` and carries a task on its envelope (issue #223).
+///
+/// Only an order assigns work (a note or question does not), and only its
+/// envelope [`TaskId`] correlates: the same id the assignee adopts from its
+/// inbox (issue #132). The order must name a single specialist on its direct
+/// `@role` channel, mirroring the ledger's order auto-seed (issue #184): a
+/// broadcast to `all-units` names no owner, and a role the fleet does not
+/// manage is not ours to correlate. Pure, so the mapping is unit-tested without
+/// a running broker.
+fn order_assignment(event: &Event, roles: &HashSet<RoleId>) -> Option<(RoleId, TaskId)> {
+    let EventKind::Message(message) = &event.kind else {
+        return None;
+    };
+    if !matches!(message.kind, MessageKind::Order { .. }) {
+        return None;
+    }
+    let task = event.task?;
+    let Some(Channel::Direct(addressee)) = Channel::parse(event.channel.as_str()) else {
+        return None;
+    };
+    roles.contains(&addressee).then_some((addressee, task))
+}
+
+/// The order watcher: thread an order's task onto the assigned role's
+/// supervisor events (issue #223).
+///
+/// The mint half (issue #132) puts a [`TaskId`] on `crew_order` and has the
+/// assigned agent adopt it from its inbox, so the agent's own messages
+/// correlate. This is the supervisor's half: the fleet watches the message
+/// stream for an order addressed to a role it manages and stamps that order's
+/// task onto the roster client ([`RosterClient::set_task`]), so the role's own
+/// lifecycle (started / idle / restarted) and activity events correlate to it
+/// too. The correlation rides the same event envelope every observer reads, not
+/// a broker-side role-to-task map (`docs/observability.md`): the fleet learns
+/// the assignment from the stream, exactly as the stall monitor does.
+///
+/// The cursor starts at launch and advances past each order acted on (the
+/// `since` read is inclusive, so an id set skips the boundary), mirroring the
+/// lazy-start watcher, so an order is applied once and a historical one is
+/// ignored.
+fn run_order_watcher(
+    roles: &HashSet<RoleId>,
+    roster: &RosterClient,
+    interval: Duration,
+    stop: &Receiver<()>,
+) {
+    // Only orders after launch assign a task the running fleet has not already
+    // adopted; older ones are stale.
+    let mut cursor = Timestamp::now();
+    // The message ids already applied at exactly `cursor`, so the inclusive
+    // `since` re-read never re-applies a boundary order.
+    let mut seen: HashSet<MessageId> = HashSet::new();
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(interval) {
+        let events = match roster.history_since(cursor, &["message"]) {
+            Ok(events) => events,
+            // A transient broker read failure is not fatal: skip this tick and retry.
+            Err(err) => {
+                event!(
+                    name: "supervisor.order_watch.scan.skipped",
+                    Level::DEBUG,
+                    error = %err,
+                    "could not read the broker history to correlate orders; retrying next tick",
+                );
+                continue;
+            }
+        };
+        for value in events {
+            let Ok(event) = serde_json::from_value::<Event>(value) else {
+                continue;
+            };
+            let EventKind::Message(message) = &event.kind else {
+                continue;
+            };
+            // Skip an order already applied: older than the cursor, or a boundary
+            // duplicate at the cursor.
+            if event.ts < cursor || (event.ts == cursor && seen.contains(&message.id)) {
+                continue;
+            }
+            if event.ts > cursor {
+                cursor = event.ts;
+                seen.clear();
+            }
+            seen.insert(message.id);
+            if let Some((role, task)) = order_assignment(&event, roles) {
+                roster.set_task(role.clone(), task);
+                event!(
+                    name: "supervisor.order_watch.correlated",
+                    Level::INFO,
+                    crew.role = %role,
+                    crew.task = %task,
+                    "correlated `{{crew.role}}`'s supervisor events to the order's task",
+                );
+            }
+        }
+    }
+}
+
 /// One agent's lifecycle state machine, owned by its driver thread.
 struct AgentLifecycle {
     shared: Arc<AgentShared>,
@@ -1437,7 +1570,94 @@ fn capture(
 
 #[cfg(test)]
 mod tests {
-    use super::LifecyclePolicy;
+    use std::collections::HashSet;
+
+    use crew_core::{
+        ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender, TaskId,
+        Timestamp,
+    };
+
+    use super::{order_assignment, LifecyclePolicy};
+
+    /// Builds an event on `channel` from the commander, optionally carrying an
+    /// envelope `task`, with the given message `kind`.
+    fn message_event(channel: &str, task: Option<TaskId>, kind: MessageKind) -> Event {
+        Event {
+            ts: Timestamp::now(),
+            from: Sender::Role(RoleId::new("commander")),
+            channel: ChannelId::new(channel),
+            task,
+            kind: EventKind::Message(Message {
+                id: MessageId::new(),
+                kind,
+                body: String::new(),
+            }),
+        }
+    }
+
+    /// A `MessageKind::Order` with the given title and empty
+    /// scope/paths/acceptance.
+    fn order_kind(title: &str) -> MessageKind {
+        MessageKind::Order {
+            title: title.to_owned(),
+            scope: String::new(),
+            owned_paths: Vec::new(),
+            acceptance: String::new(),
+        }
+    }
+
+    #[test]
+    fn order_assignment_correlates_only_a_directed_order_with_a_task_for_a_managed_role() {
+        let backend = RoleId::new("backend");
+        let roles: HashSet<RoleId> = [backend.clone()].into_iter().collect();
+        let task = TaskId::new();
+
+        // A directed order to a managed role, carrying a task, assigns it.
+        assert_eq!(
+            order_assignment(
+                &message_event("@backend", Some(task), order_kind("login")),
+                &roles
+            ),
+            Some((backend, task)),
+            "a directed order with a task correlates to its addressee",
+        );
+        // A note, not an order, assigns nothing even with a task.
+        assert_eq!(
+            order_assignment(
+                &message_event("@backend", Some(task), MessageKind::Note),
+                &roles
+            ),
+            None,
+            "only an order assigns work",
+        );
+        // An order with no envelope task correlates nothing (there is no id to thread).
+        assert_eq!(
+            order_assignment(
+                &message_event("@backend", None, order_kind("login")),
+                &roles
+            ),
+            None,
+            "an order without a task carries no correlation",
+        );
+        // An order to a role the fleet does not manage is not ours to correlate.
+        assert_eq!(
+            order_assignment(
+                &message_event("@frontend", Some(task), order_kind("web")),
+                &roles
+            ),
+            None,
+            "an order to an unmanaged role is ignored",
+        );
+        // A broadcast order names no single owner, so it assigns no task here.
+        assert_eq!(
+            order_assignment(
+                &message_event("all-units", Some(task), order_kind("all hands")),
+                &roles
+            ),
+            None,
+            "a broadcast order assigns no single owner",
+        );
+    }
 
     #[test]
     fn the_default_policy_layers_idle_heartbeat_and_watchdog() {
@@ -1456,5 +1676,7 @@ mod tests {
         // Lazy start wakes a parked role promptly, well below the idle-stop clock.
         assert_eq!(policy.lazy_start_poll_interval.as_secs(), 1);
         assert!(policy.lazy_start_poll_interval < policy.idle_timeout);
+        // The order watcher correlates an assigned role's events promptly (issue #223).
+        assert_eq!(policy.order_poll_interval.as_secs(), 1);
     }
 }

@@ -41,7 +41,11 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   (order / question / answer / status / artifact / note).
 - `lifecycle` an agent's supervised state change (started, idle, stopped,
   restarted, died, recovered), including the defibrillator's death and recovery,
-  and the General's control gestures (paused, resumed, stood_down; issue #41).
+  and the General's control gestures (paused, resumed, stood_down; issue #41). A
+  role's transitions correlate to the task it was ordered (issue #223): the fleet
+  watches the order stream and threads that order's id onto the role's roster
+  client, so a supervised transition carries the same `task` as the work that
+  prompted it, learned from the stream rather than any broker role-to-task lookup.
 - `activity` an agent's own work, parsed from its stream-json (issue #24): turn
   boundaries, tool calls, text output, or `other` for a shape the parser does not model.
   Keyed to the role on its own `@role` channel, so it rides the aggregate stream and the
