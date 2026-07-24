@@ -367,7 +367,9 @@ before an out-of-lane edit; in-lane it says proceed, out-of-lane it reports a `b
 event and, under a blocking policy, refuses, routing the change through the commander;
 issue #46), the work-ledger pair `crew_claim` / `crew_ledger` (claim a task before
 touching shared work, moving the claim through `in_progress` / `blocked` / `done`, and
-read the ledger; the broker refuses a claim another role holds, issue #45), the
+read the ledger; the broker refuses a claim another role holds, issue #45; an order
+auto-seeds the recipient's claim so assigned work shows on the ledger without a manual
+claim, issue #184), the
 adversarial done-gate trio `crew_submit` / `crew_verdict` / `crew_gate` (submit finished
 work for verification instead of asserting it done, judge a teammate's work as an
 independent skeptic, and read the gate; issue #47), `crew_complete` (report the mission
