@@ -932,7 +932,7 @@ impl Broker {
             id: message.id.to_string(),
             from: sender_label(&event.from),
             channel: event.channel.as_str().to_owned(),
-            kind: message_kind_label(&message.kind).to_owned(),
+            kind: message.kind.label().to_owned(),
             detail: kind_detail(&message.kind),
             body: message.body.clone(),
             directive: message.kind.is_directive(),
@@ -1321,20 +1321,6 @@ fn sender_label(from: &Sender) -> String {
     }
 }
 
-/// The wire label for a message's typed intent.
-fn message_kind_label(kind: &MessageKind) -> &'static str {
-    match kind {
-        MessageKind::Order { .. } => "order",
-        MessageKind::Question { .. } => "question",
-        MessageKind::Answer { .. } => "answer",
-        MessageKind::Status => "status",
-        MessageKind::Artifact { .. } => "artifact",
-        MessageKind::Note => "note",
-        MessageKind::Redirect => "redirect",
-        MessageKind::Belay => "belay",
-    }
-}
-
 /// A human summary of a kind's structured fields, so the inbox surfaces them.
 ///
 /// Returns an empty string for kinds whose content is only their body (note,
@@ -1370,9 +1356,9 @@ fn kind_detail(kind: &MessageKind) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crew_core::{MessageKind, RoleId, Sender};
+    use crew_core::{RoleId, Sender};
 
-    use super::{message_kind_label, sender_label, Broker};
+    use super::{sender_label, Broker};
 
     #[test]
     fn a_sender_labels_a_role_or_the_general() {
@@ -1381,18 +1367,6 @@ mod tests {
             "backend"
         );
         assert_eq!(sender_label(&Sender::General), "general");
-    }
-
-    #[test]
-    fn a_message_kind_labels_an_order() {
-        let order = MessageKind::Order {
-            title: "build login".to_owned(),
-            scope: "the /login route".to_owned(),
-            owned_paths: vec!["api/".to_owned()],
-            acceptance: "tests green".to_owned(),
-        };
-        assert_eq!(message_kind_label(&order), "order");
-        assert_eq!(message_kind_label(&MessageKind::Note), "note");
     }
 
     #[test]

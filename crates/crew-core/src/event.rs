@@ -298,6 +298,25 @@ impl MessageKind {
     pub fn is_directive(&self) -> bool {
         matches!(self, Self::Redirect | Self::Belay)
     }
+
+    /// The kind's stable wire label, matching its serialized `kind` tag.
+    ///
+    /// The single source for this mapping, so a front-end or a projection that
+    /// keys on the kind (the broker summary, the `crew top` cockpit, the inbox
+    /// view) reads the same label, and a new variant names itself in one place.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Order { .. } => "order",
+            Self::Question { .. } => "question",
+            Self::Answer { .. } => "answer",
+            Self::Status => "status",
+            Self::Artifact { .. } => "artifact",
+            Self::Note => "note",
+            Self::Redirect => "redirect",
+            Self::Belay => "belay",
+        }
+    }
 }
 
 /// What a [`MessageKind::Artifact`] reference points to (see
@@ -914,6 +933,37 @@ mod tests {
         assert_eq!(redirect, serde_json::json!({ "kind": "redirect" }));
         let belay = serde_json::to_value(MessageKind::Belay).unwrap();
         assert_eq!(belay, serde_json::json!({ "kind": "belay" }));
+    }
+
+    #[test]
+    fn every_kind_label_matches_its_serialized_tag() {
+        // `label()` is the single source callers read, so it must never drift
+        // from the serde `kind` tag. Cover every variant so a new one added
+        // without a label arm fails here.
+        let kinds = [
+            MessageKind::Order {
+                title: String::new(),
+                scope: String::new(),
+                owned_paths: vec![],
+                acceptance: String::new(),
+            },
+            MessageKind::Question { options: vec![] },
+            MessageKind::Answer {
+                in_reply_to: MessageId::new(),
+            },
+            MessageKind::Status,
+            MessageKind::Artifact {
+                reference: String::new(),
+                artifact_kind: ArtifactKind::Branch,
+            },
+            MessageKind::Note,
+            MessageKind::Redirect,
+            MessageKind::Belay,
+        ];
+        for kind in &kinds {
+            let tag = serde_json::to_value(kind).unwrap()["kind"].clone();
+            assert_eq!(tag, kind.label(), "label drifted from the tag for {kind:?}");
+        }
     }
 
     #[test]

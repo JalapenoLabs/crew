@@ -344,7 +344,7 @@ impl Cockpit {
         self.feed.push_back(FeedLine {
             from: sender_label(&event.from),
             channel: event.channel.as_str().to_owned(),
-            kind: message_kind_label(&message.kind),
+            kind: message.kind.label(),
             summary: message_summary(message),
         });
         while self.feed.len() > FEED_CAP {
@@ -544,20 +544,6 @@ fn describe_activity(activity: &Activity) -> String {
         Activity::ToolCall { tool } => format!("tool: {tool}"),
         Activity::Output { text } => elide(text),
         Activity::Other { raw } => format!("({raw})"),
-    }
-}
-
-/// The wire label for a message's kind (matching its serde name).
-fn message_kind_label(kind: &MessageKind) -> &'static str {
-    match kind {
-        MessageKind::Order { .. } => "order",
-        MessageKind::Question { .. } => "question",
-        MessageKind::Answer { .. } => "answer",
-        MessageKind::Status => "status",
-        MessageKind::Artifact { .. } => "artifact",
-        MessageKind::Note => "note",
-        MessageKind::Redirect => "redirect",
-        MessageKind::Belay => "belay",
     }
 }
 
