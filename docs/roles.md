@@ -172,7 +172,12 @@ its dependents) so a stacked-PR strategy composes cleanly. See `CLAUDE.md`
 
 - **commander** is the lead and router. It owns decomposition, interface
   decisions, arbitration, and the interface to the General. It issues orders and
-  reports back; it does not write feature code. It also curates the shared situation
+  reports back; it does not write feature code. Order-issuing is the commander's
+  alone: the broker refuses an `order` from any other role (issue #194), so tracked
+  assignments fan out from the hub rather than a free-for-all. A specialist that
+  needs a peer's help delegates with a `crew_send` message or `crew_ask`, or asks
+  the commander to assign it; the General keeps its `crew command` direct override,
+  which posts as the General and informs the commander. It also curates the shared situation
   board (issue #49), the crew's durable memory of decisions, interfaces, and gotchas that
   the whole crew reads and writes (see the situation board below). When every task is
   verified done through the done-gate, it reports the mission gracefully complete with

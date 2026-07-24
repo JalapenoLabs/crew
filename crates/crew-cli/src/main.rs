@@ -120,8 +120,9 @@ enum Command {
         /// The answer (markdown).
         body: String,
     },
-    /// Issue a structured order to a specialist, as this agent's role
-    /// (typically the commander): a scoped task, not a plain message.
+    /// Issue a structured order to a specialist (commander-only): a scoped
+    /// task, not a plain message. The broker refuses an order from any
+    /// other role.
     Order {
         /// The specialist role to order (its `@role` channel).
         to: String,

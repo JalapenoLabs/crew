@@ -424,15 +424,17 @@ fn messaging_tools() -> Vec<Value> {
         }),
         json!({
             "name": "crew_order",
-            "description": "Issue an order: assign a scoped task to one specialist, as your \
-                role. This is the commander's fan-out handle for decomposing the General's \
-                brief into work. It direct-messages `to` an `order` the specialist can act \
-                on: `title` names the task, `scope` says what is in and out, `owned_paths` \
-                are the paths it owns while working, and `acceptance` is how it is judged \
-                done. `body` adds any freeform detail. The order also claims the task for the \
-                specialist on the work ledger, so assigned work shows up without a manual \
-                crew_claim; the specialist moves that claim forward as it works. Use crew_send \
-                for a plain message.",
+            "description": "Issue an order: assign a scoped task to one specialist. This is the \
+                commander's fan-out handle for decomposing the General's brief into work, and it \
+                is commander-only: only the crew's commander may issue an order, so the hub fans \
+                work out and arbitrates who owns what. If you are a specialist, the broker refuses \
+                your order; delegate with crew_send (a plain message) or crew_ask, or ask the \
+                commander to assign the work. It direct-messages `to` an `order` the specialist \
+                can act on: `title` names the task, `scope` says what is in and out, `owned_paths` \
+                are the paths it owns while working, and `acceptance` is how it is judged done. \
+                `body` adds any freeform detail. The order also claims the task for the specialist \
+                on the work ledger, so assigned work shows up without a manual crew_claim; the \
+                specialist moves that claim forward as it works.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -43,6 +43,20 @@ is itself the commander. The commander fans work out with `order` messages, one 
 specialist (the `crew_order` MCP tool); the peer direct message and the rare
 `all-units` broadcast stay open as the escape valves above.
 
+Order-issuing is commander-only, and the broker enforces it (issue #194): an `order`
+message is accepted only from the crew's commander or the General, and refused from any
+other role with a 403. The decision follows the topology, an order is not a peer
+message. It mints a task (issue #132) and seeds a ledger claim (issue #184), so letting
+any specialist issue one would route tracked assignments around the hub, the very
+free-for-all the star-with-a-hub avoids, and leave two specialists' claims on one role
+with nowhere to arbitrate. A specialist that needs a peer's help delegates through the
+escape valves, a `crew_send` note or a `crew_ask` question, or asks the commander to
+assign the work; those, not orders, are the sanctioned peer path. The General keeps its
+direct override (`crew command`, issue #42), which posts its order as the General and
+informs the commander, so bypassing the fan-out is transparent, never silent. The broker
+resolves the commander from its config (`CREW_BROKER_COMMANDER`, else the crew config),
+the same authority that gates board-entry retraction (issue #180).
+
 ## Channels
 
 - `all-units` reaches every live role. Reserved for genuine team-wide orders.

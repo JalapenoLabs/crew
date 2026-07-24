@@ -19,7 +19,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use crew_core::{ChannelId, Event, EventKind, Message, MessageId, MessageKind, Sender, TaskId};
+use crew_core::{
+    ChannelId, Event, EventKind, Message, MessageId, MessageKind, RoleId, Sender, TaskId,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::Stream;
@@ -154,6 +156,7 @@ async fn post_message(
 ) -> Result<(StatusCode, Json<Event>), ApiError> {
     let request = PostMessage::from_json(raw)?;
     request.validate(&channel)?;
+    ensure_order_authorized(&request, &state.config.commander)?;
 
     let event = Event {
         ts: crew_core::Timestamp::now(),
@@ -175,6 +178,35 @@ async fn post_message(
     // manual claim (issue #184). A no-op for every other message.
     crate::ledger::seed_order_claim(&state, &sequenced.event);
     Ok((StatusCode::CREATED, Json(sequenced.event)))
+}
+
+/// Enforces that issuing an `order` is a commander (or General) act (issue
+/// #194).
+///
+/// The hub-and-spoke design has the commander decompose the General's intent
+/// and fan orders out; arbitration (work-claiming, interface disputes) resolves
+/// at the hub (`docs/communication.md`). An order mints a task (issue #132) and
+/// seeds a ledger claim (issue #184), so letting any specialist issue one would
+/// route tracked assignments around the hub, the very free-for-all the topology
+/// avoids. The General's direct override (`crew command`, issue #42) posts its
+/// order from [`Sender::General`], so it is allowed; a specialist delegates
+/// with a message ([`crew_send`](crew_mcp)) or asks the commander to assign the
+/// work.
+///
+/// # Errors
+/// Returns a 403 [`ApiError::Forbidden`] if the message is an `order` from a
+/// role other than the crew's `commander`. Every other kind, and any order from
+/// the General or the commander, passes.
+fn ensure_order_authorized(request: &PostMessage, commander: &RoleId) -> Result<(), ApiError> {
+    if let (MessageKind::Order { .. }, Sender::Role(role)) = (&request.kind, &request.from) {
+        if role != commander {
+            return Err(ApiError::forbidden(format!(
+                "only the commander (`{commander}`) may issue an order; `{role}` should delegate \
+                 with a message (crew_send) or ask the commander to assign the work"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The body of `GET /events`: the stored event log, oldest first.
@@ -300,10 +332,13 @@ mod tests {
     /// and no broker-owned field (the channel travels in the path).
     fn one_of_each_kind() -> Vec<(&'static str, Value)> {
         let backend = json!({ "kind": "role", "id": "backend" });
+        // An order is a commander act (issue #194), so the round-trip fixture issues
+        // it as the commander; every other kind is a specialist's to send.
+        let commander = json!({ "kind": "role", "id": "commander" });
         vec![
             (
                 "all-units",
-                json!({ "from": backend, "kind": "order",
+                json!({ "from": commander, "kind": "order",
                     "title": "Ship it", "scope": "here", "owned_paths": ["src"],
                     "acceptance": "green", "body": "detail" }),
             ),
@@ -366,6 +401,78 @@ mod tests {
             stored_events(&state).await,
             posted,
             "the API must round-trip every message kind"
+        );
+    }
+
+    /// An order carrying its per-kind fields, from `sender`, to one specialist.
+    fn order_from(sender: &Value) -> Value {
+        json!({ "from": sender, "kind": "order",
+            "title": "build login", "scope": "the /login route",
+            "owned_paths": ["api/"], "acceptance": "tests green", "body": "" })
+    }
+
+    #[tokio::test]
+    async fn a_specialist_may_not_issue_an_order() {
+        // Order-issuing is a commander act (issue #194): the hub fans work out and
+        // arbitrates, so a specialist's order is refused with 403, pointing it at
+        // the peer escape valve (crew_send) instead.
+        let state = AppState::new(Config::default());
+        let (status, value) = post(
+            &state,
+            "@frontend",
+            order_from(&json!({ "kind": "role", "id": "backend" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a specialist may not order: {value}"
+        );
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("only the commander"),
+            "the refusal names the rule: {value}",
+        );
+        assert!(
+            stored_events(&state).await.is_empty(),
+            "a refused order never reaches the log",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_commander_may_issue_an_order() {
+        // The default commander is `commander`; its order is the fan-out handle.
+        let state = AppState::new(Config::default());
+        let (status, _) = post(
+            &state,
+            "@backend",
+            order_from(&json!({ "kind": "role", "id": "commander" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "the commander may issue an order"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_general_may_issue_a_direct_order() {
+        // The General's direct override (`crew command`, issue #42) posts its order
+        // from the General, so it is allowed and the commander is informed out of band.
+        let state = AppState::new(Config::default());
+        let (status, _) = post(
+            &state,
+            "@backend",
+            order_from(&json!({ "kind": "general" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "the General may order a specialist directly"
         );
     }
 
