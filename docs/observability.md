@@ -165,10 +165,10 @@ the crew config; `CREW_BROKER_COMMANDER` sets it for a bare `crewd`).
 Every change is a `board` event (to `all-units`), so the board is auditable on `/stream`,
 in `crew watch`, and via `GET /history?kind=board`. The board itself is a **projection of
 those events**: the broker rebuilds it from the durable log on startup, so a decision
-recorded before an idle-stop or a broker restart is still on the board after it. Unlike
-the pause control and the done-gate, which are in-memory and reset on a broker restart, the
-board survives one because it reads back from the log (see `docs/communication.md`, context
-management).
+recorded before an idle-stop or a broker restart is still on the board after it. The
+done-gate rebuilds the same way, so a task mid-verification survives a restart too (issue
+#181). Unlike the pause control, which is in-memory and resets on a broker restart, both
+read back from the log (see `docs/communication.md`, context management).
 
 ## Live agent count and roster
 

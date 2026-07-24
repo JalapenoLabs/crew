@@ -481,10 +481,14 @@ a task reaches `Passed` only when a role other than the owner could not break it
 verdict posts an actionable handback to the owner's inbox with the specific failure. Each
 step is a first-class `verification` event (a new `EventKind::Verification` carrying the
 task, owner, verifier, verdict, and detail) published to `all-units` and filterable with
-`GET /history?kind=verification`; `GET /gate` reads live ownership. Added `ApiError::Conflict`
-(409) and a `Verification` history-kind tag. Each role card's briefing now instructs a role
-to verify before done and to be the skeptic on a teammate's work. See `docs/roles.md` (the
-done-gate) and `docs/observability.md`.
+`GET /history?kind=verification`; `GET /gate` reads live ownership. Like the situation board
+(issue #49), the gate is a **projection of those `verification` events**: `AppState::with_storage`
+rebuilds it (`Gate::rebuild`) by folding the log the store just replayed, the latest event
+per task winning, so a task mid-verification survives a broker restart rather than being lost
+(issue #181). The broker stays the live authority that enforces the gate. Added
+`ApiError::Conflict` (409) and a `Verification` history-kind tag. Each role card's briefing now
+instructs a role to verify before done and to be the skeptic on a teammate's work. See
+`docs/roles.md` (the done-gate) and `docs/observability.md`.
 
 The shared situation board is the crew's durable memory (issue #49), distinct from the
 transient message stream: agreed interfaces, decisions and their rationale, and known
@@ -497,8 +501,9 @@ body, and a retracted flag) published to `all-units` and filterable with
 `GET /history?kind=board`. Crucially, the board is a **projection of those durable events**:
 the broker rebuilds it in `AppState::with_storage` by folding the log the store just
 replayed, so a decision recorded before an idle-stop or a broker restart is still on the
-board after it (this is what satisfies the acceptance, and why the board survives a restart
-where the in-memory pause control and done-gate do not). The whole crew reads and writes
+board after it (this is what satisfies the acceptance, and why the board survives a restart,
+as the done-gate now does too (issue #181), where the in-memory pause control does not). The
+whole crew reads and writes
 it; the commander curates it, and each role card's briefing points a role at it. Recording
 is open to every role, but retraction is enforced curation (issue #180): `retract_board_as`
 holds the board lock across an author-or-commander check and the removal, so `POST /board`

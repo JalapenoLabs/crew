@@ -108,6 +108,11 @@ event on the stream, and `crew_gate` (or `GET /gate`) reads the live gate: each 
 verification, its owner, its verifier, and whether it is submitted, passed, or failed (see
 `docs/observability.md`).
 
+Like the situation board, the gate is a projection of its `verification` events, so it is
+rebuilt from the durable log on a restart: a task mid-verification survives a broker restart
+rather than being lost, and the gate still enforces the owner-versus-verifier rule against
+the rebuilt task (issue #181). The broker stays the live authority that enforces it.
+
 ### The situation board
 
 The crew keeps a shared situation board (issue #49): its durable memory, distinct from the
