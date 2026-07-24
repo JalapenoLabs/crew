@@ -16,15 +16,11 @@ use std::{
     time::Duration,
 };
 
-use crew_substrate::{
-    broker::Config as BrokerConfig,
-    core::{
-        Activity, BoardEvent, BrokerEndpoint, BudgetEvent, BudgetScope, Event, EventKind,
-        MessageKind, Sender, StallEvent, StallStatus, TelemetryEvent, UsageEvent, Verdict,
-        VerificationEvent,
-    },
+use crew_substrate::core::{
+    Activity, BoardEvent, BudgetEvent, BudgetScope, Event, EventKind, MessageKind, Sender,
+    StallEvent, StallStatus, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
-use eyre::{eyre, Result, WrapErr};
+use eyre::{eyre, Result};
 use tracing::{event, Level};
 
 /// Tails a role's self-filtered inbox, or the whole firehose when `role` is
@@ -39,35 +35,8 @@ use tracing::{event, Level};
 /// Returns an error if the broker configuration is invalid, or the broker
 /// cannot be reached on the first connection.
 pub fn watch(broker: Option<&str>, role: Option<&str>) -> Result<()> {
-    let base = resolve_base(broker)?;
+    let base = crate::broker_base::resolve_base(broker)?;
     tail(&base, &watch_path(role))
-}
-
-/// The broker base URL: the `--broker` value if given, else the broker's
-/// environment.
-///
-/// Shared by every stream reader (`crew watch`, `crew notify`).
-///
-/// # Errors
-/// Returns an error if `CREW_BROKER_HOST` or `CREW_BROKER_PORT` is set but
-/// invalid.
-pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
-    if let Some(url) = flag {
-        return Ok(normalize_base(url));
-    }
-    let config = BrokerConfig::from_env().wrap_err("could not read the broker configuration")?;
-    Ok(BrokerEndpoint::new(config.host.to_string(), config.port).base_url())
-}
-
-/// Normalizes a `--broker` value: default the scheme to `http`, drop a trailing
-/// slash.
-fn normalize_base(url: &str) -> String {
-    let url = url.trim().trim_end_matches('/');
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_owned()
-    } else {
-        format!("http://{url}")
-    }
 }
 
 /// The SSE path a `watch` reads: one role's self-filtered inbox, or the
@@ -401,9 +370,7 @@ mod tests {
         Timestamp,
     };
 
-    use super::{
-        apply_line, normalize_base, parse_data_line, parse_id_line, render_event, watch_path,
-    };
+    use super::{apply_line, parse_data_line, parse_id_line, render_event, watch_path};
 
     fn note(from: Sender, channel: &str, body: &str) -> Event {
         Event {
@@ -554,19 +521,6 @@ mod tests {
             last_id,
             Some(5),
             "an undelivered event does not advance the cursor"
-        );
-    }
-
-    #[test]
-    fn normalize_base_defaults_the_scheme_and_trims() {
-        assert_eq!(normalize_base("localhost:2739/"), "http://localhost:2739");
-        assert_eq!(
-            normalize_base("http://127.0.0.1:2739"),
-            "http://127.0.0.1:2739"
-        );
-        assert_eq!(
-            normalize_base("https://broker.internal"),
-            "https://broker.internal"
         );
     }
 }

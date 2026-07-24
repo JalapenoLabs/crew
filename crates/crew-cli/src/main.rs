@@ -34,6 +34,7 @@ use eyre::Result;
 use mimalloc::MiMalloc;
 
 mod broker;
+mod broker_base;
 mod control;
 mod cursor;
 mod down;
