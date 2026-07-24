@@ -136,6 +136,40 @@ enum Command {
         #[arg(long, value_name = "TEXT")]
         body: Option<String>,
     },
+    /// Report progress as this agent's role, without asking anything (a typed
+    /// `status`, not a plain note).
+    Status {
+        /// Report to one role directly (its `@role` channel).
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+        /// Report on a named channel: `all-units`, or a pair like
+        /// `frontend+backend`.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// The progress note (markdown).
+        body: String,
+    },
+    /// Reference a produced thing (branch, PR, file, or route) as this agent's
+    /// role: a typed `artifact`, not a plain note.
+    Artifact {
+        /// Send to one role directly (its `@role` channel).
+        #[arg(long, value_name = "ROLE")]
+        to: Option<String>,
+        /// Send on a named channel: `all-units`, or a pair like
+        /// `frontend+backend`.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// What the reference points to: `branch`, `pull_request`, `file`, or
+        /// `route`.
+        #[arg(long, value_name = "KIND")]
+        kind: String,
+        /// The produced thing: a branch name, a PR URL, a file path, or a
+        /// route.
+        reference: String,
+        /// Optional freeform detail (markdown).
+        #[arg(long, value_name = "TEXT")]
+        body: Option<String>,
+    },
     /// Read the messages currently addressed to this agent's role.
     Inbox,
     /// Tail a role's self-filtered inbox stream live, or the whole firehose.
@@ -420,6 +454,22 @@ fn main() -> Result<()> {
             &owns,
             acceptance.as_deref().unwrap_or_default(),
             body.as_deref().unwrap_or_default(),
+        ),
+        Command::Status { to, channel, body } => {
+            shim::status(to.as_deref(), channel.as_deref(), &body)
+        }
+        Command::Artifact {
+            to,
+            channel,
+            kind,
+            reference,
+            body,
+        } => shim::artifact(
+            to.as_deref(),
+            channel.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            &reference,
+            &kind,
         ),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),

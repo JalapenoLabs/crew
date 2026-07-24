@@ -90,13 +90,18 @@ Typed intents are what let the commander arbitrate and let a UI show an order
 differently from a status ping.
 
 Agents post the typed kinds through dedicated tools, not by hand-tagging a note:
-`crew_send` posts a `note`, `crew_order` an `order`, and `crew_ask` / `crew_answer` a
-`question` / `answer` (issue #123). This matters beyond rendering: the coordination-stall
+`crew_send` posts a `note`, `crew_order` an `order`, `crew_ask` / `crew_answer` a
+`question` / `answer` (issue #123), `crew_status` a `status`, and `crew_artifact` an
+`artifact` (issue #167). This matters beyond rendering: the coordination-stall
 detector (issue #48) keys on `question` events, so an agent that asks through `crew_ask`
 lets an unanswered question or a mutual-wait deadlock surface on the stream, where a plain
 note would stall the crew silently. `crew_answer` names the question it replies to with the
 `in_reply_to` id the inbox surfaces, so the reply threads to its question and clears the
-wait.
+wait. `crew_status` and `crew_artifact` complete the set so every typed kind is reachable
+by an agent: a progress `status` renders as a progress ping rather than prose, and an
+`artifact` carries its `reference` and `artifact_kind` (`branch`, `pull_request`, `file`,
+or `route`) so a UI can link it. Each has a `crew status` / `crew artifact` shim command
+for a runtime without MCP.
 
 ## Delivery and notifications
 

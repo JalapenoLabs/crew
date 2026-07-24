@@ -8,6 +8,10 @@
 //! - `crew_send` (send a note to a channel or role),
 //! - `crew_ask` / `crew_answer` (post a typed question or answer, so an
 //!   unanswered question surfaces a coordination stall; issue #123),
+//! - `crew_status` / `crew_artifact` (post a typed progress `status` or a
+//!   reference to a produced branch, PR, file, or route, so the typed rendering
+//!   and any projection that keys on the kind is not lost to a plain note;
+//!   issue #167),
 //! - `crew_inbox` (read the messages addressed to it, self-filtered, each with
 //!   an id a `crew_answer` can reference),
 //! - `crew_roster` (list teammates and the lanes they own),

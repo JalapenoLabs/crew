@@ -164,6 +164,30 @@ impl Server {
                     in_reply_to,
                 )
             }
+            "crew_status" => {
+                let body =
+                    str_arg(arguments, "body").ok_or("crew_status requires a non-empty `body`")?;
+                self.broker.status(
+                    str_arg(arguments, "to"),
+                    str_arg(arguments, "channel"),
+                    body,
+                )
+            }
+            "crew_artifact" => {
+                let reference = str_arg(arguments, "reference")
+                    .ok_or("crew_artifact requires a `reference` to the produced thing")?;
+                let artifact_kind = str_arg(arguments, "artifact_kind").ok_or(
+                    "crew_artifact requires an `artifact_kind` (branch, pull_request, file, or \
+                     route)",
+                )?;
+                self.broker.artifact(
+                    str_arg(arguments, "to"),
+                    str_arg(arguments, "channel"),
+                    str_arg(arguments, "body").unwrap_or_default(),
+                    reference,
+                    artifact_kind,
+                )
+            }
             "crew_inbox" => Ok(render_inbox(&self.broker.inbox()?)),
             "crew_roster" => Ok(render_roster(&self.broker.roster()?)),
             "crew_lane" => {
@@ -260,8 +284,12 @@ fn tool_catalog() -> Value {
     Value::Array(tools)
 }
 
-/// The messaging tools: send a note, order a specialist, ask a question, and
-/// answer one.
+/// The messaging tools: send a note, order a specialist, ask and answer a
+/// question, and report a status or an artifact.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a tool catalog grows one self-contained schema literal per tool"
+)]
 fn messaging_tools() -> Vec<Value> {
     vec![
         json!({
@@ -347,6 +375,47 @@ fn messaging_tools() -> Vec<Value> {
                     "in_reply_to": { "type": "string", "description": "The id of the question being answered (from your inbox)." }
                 },
                 "required": ["body", "in_reply_to"]
+            }
+        }),
+        json!({
+            "name": "crew_status",
+            "description": "Report progress as your role, without asking anything: a typed \
+                `status`, not a plain note, so a front-end renders it as a progress update and a \
+                view that keys on status sees it. Use crew_ask instead when you need an answer to \
+                proceed. Target it like crew_send: `to` a role, a `channel`, or neither to reach \
+                the commander. `body` is the progress note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "A role to report to (its @role channel)." },
+                    "channel": { "type": "string", "description": "A channel name: `all-units`, or a pair like `frontend+backend`." },
+                    "body": { "type": "string", "description": "The progress note (markdown)." }
+                },
+                "required": ["body"]
+            }
+        }),
+        json!({
+            "name": "crew_artifact",
+            "description": "Reference a thing you produced, as your role: a typed `artifact` \
+                pointing at a branch, a pull request, a file, or a route, so a teammate or a \
+                front-end can find and link it rather than parse it out of prose. `reference` is \
+                the thing (a branch name, a PR URL, a file path, or a route) and `artifact_kind` \
+                says which of the four it is. Target it like crew_send: `to` a role, a `channel`, \
+                or neither to reach the commander. `body` adds any freeform detail.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "A role to send to (its @role channel)." },
+                    "channel": { "type": "string", "description": "A channel name: `all-units`, or a pair like `frontend+backend`." },
+                    "reference": { "type": "string", "description": "The produced thing: a branch name, a PR URL, a file path, or a route." },
+                    "artifact_kind": {
+                        "type": "string",
+                        "enum": ["branch", "pull_request", "file", "route"],
+                        "description": "Which kind of thing `reference` points to."
+                    },
+                    "body": { "type": "string", "description": "Optional freeform detail (markdown)." }
+                },
+                "required": ["reference", "artifact_kind"]
             }
         }),
     ]
@@ -857,6 +926,8 @@ mod tests {
                 "crew_order",
                 "crew_ask",
                 "crew_answer",
+                "crew_status",
+                "crew_artifact",
                 "crew_inbox",
                 "crew_roster",
                 "crew_lane",
@@ -975,6 +1046,40 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("in_reply_to"));
+    }
+
+    #[test]
+    fn crew_status_without_a_body_is_a_tool_error_not_a_broker_call() {
+        // A missing `body` fails before the broker is touched, so the bogus base is
+        // fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                    "params": { "name": "crew_status", "arguments": {} } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("body"));
+    }
+
+    #[test]
+    fn crew_artifact_without_a_reference_is_a_tool_error_not_a_broker_call() {
+        // A missing `reference` fails before the broker is touched, so the bogus base
+        // is fine.
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                    "params": { "name": "crew_artifact", "arguments": { "artifact_kind": "branch" } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("reference"));
     }
 
     #[test]

@@ -37,6 +37,8 @@ the agent just shells out to `crew` instead of calling a tool.
 | `crew order TO TITLE [--scope TEXT] [--owns PATH]... [--acceptance TEXT] [--body TEXT]` | issues a structured order to a specialist | `crew_order` |
 | `crew ask [--to ROLE] [--channel CHAN] [--option TEXT]... BODY` | asks a typed question (the kind stall detection keys on) | `crew_ask` |
 | `crew answer [--to ROLE] [--channel CHAN] --in-reply-to ID BODY` | answers a question, naming its id | `crew_answer` |
+| `crew status [--to ROLE] [--channel CHAN] BODY` | reports progress as a typed `status` | `crew_status` |
+| `crew artifact [--to ROLE] [--channel CHAN] --kind KIND REFERENCE [--body TEXT]` | references a produced branch, PR, file, or route | `crew_artifact` |
 | `crew inbox` | prints the messages addressed to the role, each with its id | `crew_inbox` |
 | `crew roster` | lists the unit's roles, lanes, and liveness | `crew_roster` |
 

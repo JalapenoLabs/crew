@@ -237,6 +237,90 @@ fn a_shim_order_needs_a_single_specialist_not_a_channel() {
     );
 }
 
+#[test]
+fn a_shim_agent_reports_a_typed_status_and_references_an_artifact() {
+    let port = start_broker();
+    let state = state_dir("status-artifact");
+
+    crew(port, &state, "backend", &["register"]);
+
+    // A typed `status`, not a plain note: it lands on the stream with its kind.
+    stdout_of(
+        crew(
+            port,
+            &state,
+            "backend",
+            &["status", "--channel", "all-units", "parser is 80% done"],
+        ),
+        "status",
+    );
+    let history = get_json(port, "/history?kind=message");
+    let status = history["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"]["data"]["kind"] == "status")
+        .expect("the status is on the stream as a typed status");
+    assert_eq!(status["from"]["id"], "backend");
+    assert_eq!(status["kind"]["data"]["body"], "parser is 80% done");
+
+    // A typed `artifact` carries its reference and kind, not just prose.
+    stdout_of(
+        crew(
+            port,
+            &state,
+            "backend",
+            &[
+                "artifact",
+                "--channel",
+                "all-units",
+                "--kind",
+                "pull_request",
+                "https://github.com/x/y/pull/1",
+                "--body",
+                "opened the PR",
+            ],
+        ),
+        "artifact",
+    );
+    let history = get_json(port, "/history?kind=message");
+    let artifact = history["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"]["data"]["kind"] == "artifact")
+        .expect("the artifact is on the stream as a typed artifact");
+    let detail = &artifact["kind"]["data"];
+    assert_eq!(detail["reference"], "https://github.com/x/y/pull/1");
+    assert_eq!(detail["artifact_kind"], "pull_request");
+    assert_eq!(detail["body"], "opened the PR");
+}
+
+#[test]
+fn a_shim_artifact_rejects_an_unknown_kind() {
+    let port = start_broker();
+    let state = state_dir("artifact-kind");
+
+    crew(port, &state, "backend", &["register"]);
+
+    // `pr` is not one of the four artifact kinds; the shim refuses it up front.
+    let output = crew(
+        port,
+        &state,
+        "backend",
+        &["artifact", "--kind", "pr", "feature/x"],
+    );
+    assert!(
+        !output.status.success(),
+        "an unknown artifact kind is refused"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not an artifact kind") && stderr.contains("pull_request"),
+        "the error names the valid kinds: {stderr}",
+    );
+}
+
 /// The task id on the newest message of `kind`, if it carries one.
 fn task_of_kind(port: u16, kind: &str) -> Option<String> {
     let history = get_json(port, "/history?kind=message");
