@@ -1018,7 +1018,8 @@ already-running `crewd` or starts its own.
   `[workspace.lints]` and every crate inherits them. Override a lint locally with
   `#[expect(..., reason = "...")]`, never `#[allow]` (M-LINT-OVERRIDE-EXPECT).
 - **CI gate** (`.github/workflows/ci.yml`): every pull request and every push to
-  `main` and `develop` runs six independent jobs, so each reports its own status
+  `main` (crew is main-only, so the vestigial `develop` was dropped from the
+  trigger, issue #272) runs six independent jobs, so each reports its own status
   and one failure never blocks the rest. Four run on the pinned build toolchain:
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
   and `Doc` (`cargo doc --no-deps --workspace` under `RUSTDOCFLAGS="-D warnings"`,
