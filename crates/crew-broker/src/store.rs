@@ -20,7 +20,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, PoisonError},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, PoisonError,
+    },
 };
 
 use crew_core::{Channel, ChannelId, Event, EventKind, RoleId, Sender, TaskId, Timestamp};
@@ -56,7 +59,23 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     fn next_seq(&self) -> u64;
 
     /// Appends an event to the log.
+    ///
+    /// Infallible by design: an event that cannot be persisted stays in the
+    /// in-memory index, so the running broker is consistent even when the disk
+    /// is not. A persist failure is not silent, though: it is counted in
+    /// [`durability`](Storage::durability) so `GET /health` can report degraded
+    /// durability (issue #207).
     fn append(&self, event: Event);
+
+    /// A snapshot of the backend's persistence health.
+    ///
+    /// Reports how many writes failed to reach disk, so `GET /health` can flag
+    /// degraded durability instead of a failure staying invisible until a
+    /// restart replays a short log (issue #207). The default reports healthy,
+    /// for a backend with no disk to fail (for example [`MemoryStore`]).
+    fn durability(&self) -> Durability {
+        Durability::default()
+    }
 
     /// Returns every stored event, oldest first.
     fn events(&self) -> Vec<Event>;
@@ -89,6 +108,31 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// position.
     fn query(&self, query: &EventQuery) -> Result<EventPage, InvalidCursor> {
         query_events(&self.events(), query)
+    }
+}
+
+/// A snapshot of a store's persistence health (issue #207).
+///
+/// A durable backend keeps the in-memory index consistent even when a write to
+/// disk fails, so an append never errors. This carries the otherwise-invisible
+/// signal that durability is degraded: `write_failures` counts the events and
+/// roster writes that did not reach disk since the broker started, and
+/// `last_error` is the most recent failure's message. `GET /health` reports it,
+/// so an operator learns durability is degraded rather than discovering it when
+/// a restart replays a short log.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Durability {
+    /// Events and roster writes that failed to reach disk since start.
+    pub write_failures: u64,
+    /// The most recent persist failure's message, if any.
+    pub last_error: Option<String>,
+}
+
+impl Durability {
+    /// Whether every write has reached disk so far.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.write_failures == 0
     }
 }
 
@@ -467,6 +511,42 @@ struct Log {
     writer: BufWriter<File>,
 }
 
+/// Tracks persistence failures so the store can report degraded durability.
+///
+/// A failed write is recorded here in addition to being logged, so it is
+/// visible through [`Storage::durability`] rather than only in the log (issue
+/// #207).
+#[derive(Debug, Default)]
+struct DurabilityState {
+    /// Count of writes that failed to reach disk since start.
+    write_failures: AtomicU64,
+    /// The most recent failure's message.
+    last_error: Mutex<Option<String>>,
+}
+
+impl DurabilityState {
+    /// Records one persist failure: bumps the count and stores its message.
+    fn record(&self, error: &dyn std::fmt::Display) {
+        self.write_failures.fetch_add(1, Ordering::Relaxed);
+        *self
+            .last_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
+    }
+
+    /// A snapshot of the current persistence health.
+    fn snapshot(&self) -> Durability {
+        Durability {
+            write_failures: self.write_failures.load(Ordering::Relaxed),
+            last_error: self
+                .last_error
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        }
+    }
+}
+
 /// A durable event store: an on-disk append-only log with an in-memory index.
 ///
 /// The log is one JSON-encoded [`Event`] per line. [`open`](LogStore::open)
@@ -475,11 +555,17 @@ struct Log {
 /// persists to its own file, rewritten atomically on each change. A torn or
 /// unreadable line (for example a partial write from a crash) is skipped on
 /// replay so one bad line never loses the rest of the log.
+///
+/// An append stays infallible: a write that fails leaves the event in the index
+/// and is counted in [`durability`](Storage::durability), so the running broker
+/// is consistent and the operator can still see that durability is degraded
+/// (issue #207).
 #[derive(Debug)]
 pub struct LogStore {
     log: Mutex<Log>,
     roster: Mutex<Roster>,
     roster_path: PathBuf,
+    durability: DurabilityState,
 }
 
 impl LogStore {
@@ -519,6 +605,7 @@ impl LogStore {
             }),
             roster: Mutex::new(roster),
             roster_path,
+            durability: DurabilityState::default(),
         })
     }
 }
@@ -530,28 +617,15 @@ impl Storage for LogStore {
 
     fn append(&self, event: Event) {
         let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-        // Persist first, then index. A write failure is logged rather than fatal: the
-        // event stays in memory so the running broker is consistent, only its
-        // durability is degraded until the operator resolves the disk problem.
-        match serde_json::to_string(&event) {
-            Ok(line) => {
-                if let Err(err) = write_line(&mut log.writer, &line) {
-                    event!(
-                        name: "broker.store.persist.failed",
-                        Level::ERROR,
-                        error = %err,
-                        "could not persist event to the log; keeping it in memory only",
-                    );
-                }
-            }
-            Err(err) => event!(
-                name: "broker.store.encode.failed",
-                Level::ERROR,
-                error = %err,
-                "could not encode event for the log; keeping it in memory only",
-            ),
-        }
+        // Persist first, then index. A write failure is not fatal: the event stays
+        // in memory so the running broker is consistent, and the failure is
+        // recorded (not just logged) so `GET /health` reports degraded durability.
+        persist_event(&mut log.writer, &self.durability, &event);
         log.events.push(event);
+    }
+
+    fn durability(&self) -> Durability {
+        self.durability.snapshot()
     }
 
     fn events(&self) -> Vec<Event> {
@@ -585,7 +659,7 @@ impl Storage for LogStore {
     fn register_role(&self, role: RoleId, status: RoleStatus) -> bool {
         let mut guard = self.roster.lock().unwrap_or_else(PoisonError::into_inner);
         let existed = guard.register(role, status);
-        save_roster(&self.roster_path, &guard);
+        save_roster(&self.roster_path, &guard, &self.durability);
         existed
     }
 
@@ -593,14 +667,43 @@ impl Storage for LogStore {
         let mut guard = self.roster.lock().unwrap_or_else(PoisonError::into_inner);
         let prior = guard.deregister(role);
         if prior.is_some() {
-            save_roster(&self.roster_path, &guard);
+            save_roster(&self.roster_path, &guard, &self.durability);
         }
         prior
     }
 }
 
+/// Encodes and writes one event line, recording any failure to `durability`.
+///
+/// Kept separate from the store so the failure path is testable with a writer
+/// that fails, without a real disk fault (see the tests).
+fn persist_event(writer: &mut impl Write, durability: &DurabilityState, event: &Event) {
+    match serde_json::to_string(event) {
+        Ok(line) => {
+            if let Err(err) = write_line(writer, &line) {
+                event!(
+                    name: "broker.store.persist.failed",
+                    Level::ERROR,
+                    error = %err,
+                    "could not persist event to the log; keeping it in memory only",
+                );
+                durability.record(&err);
+            }
+        }
+        Err(err) => {
+            event!(
+                name: "broker.store.encode.failed",
+                Level::ERROR,
+                error = %err,
+                "could not encode event for the log; keeping it in memory only",
+            );
+            durability.record(&err);
+        }
+    }
+}
+
 /// Writes one log line and flushes it to the OS so a restart can replay it.
-fn write_line(writer: &mut BufWriter<File>, line: &str) -> std::io::Result<()> {
+fn write_line(writer: &mut impl Write, line: &str) -> std::io::Result<()> {
     writeln!(writer, "{line}")?;
     writer.flush()
 }
@@ -661,10 +764,10 @@ fn read_roster(path: &Path) -> Result<Roster> {
     }
 }
 
-/// Persists the roster, logging (not propagating) a write failure so a roster
+/// Persists the roster, recording (not propagating) a write failure so a roster
 /// change never fails the request; the change stays in memory until the disk
-/// recovers.
-fn save_roster(path: &Path, roster: &Roster) {
+/// recovers, and the failure surfaces through [`Storage::durability`].
+fn save_roster(path: &Path, roster: &Roster, durability: &DurabilityState) {
     if let Err(err) = persist_roster(path, roster) {
         event!(
             name: "broker.store.roster.persist.failed",
@@ -672,6 +775,7 @@ fn save_roster(path: &Path, roster: &Roster) {
             error = %err,
             "could not persist roster; keeping it in memory only",
         );
+        durability.record(&err);
     }
 }
 
@@ -688,6 +792,7 @@ fn persist_roster(path: &Path, roster: &Roster) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{self, Write},
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -698,8 +803,8 @@ mod tests {
     };
 
     use super::{
-        query_events, EventFilter, EventKindTag, EventQuery, InvalidCursor, Liveness, LogStore,
-        MemoryStore, RoleStatus, Storage,
+        persist_event, query_events, DurabilityState, EventFilter, EventKindTag, EventQuery,
+        InvalidCursor, Liveness, LogStore, MemoryStore, RoleStatus, Storage,
     };
 
     /// A unique temp directory that removes itself on drop.
@@ -993,5 +1098,72 @@ mod tests {
             1,
             "the good event survives; the torn line is skipped"
         );
+    }
+
+    /// A writer that always fails, standing in for a full or failing disk.
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk full"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("disk full"))
+        }
+    }
+
+    #[test]
+    fn a_failed_write_is_recorded_as_degraded_durability() {
+        // A write failure must not be silent (issue #207): it stays out of the log
+        // but is counted so `GET /health` can report degraded durability.
+        let durability = DurabilityState::default();
+        assert!(
+            durability.snapshot().is_healthy(),
+            "a fresh store is durable"
+        );
+
+        persist_event(
+            &mut FailingWriter,
+            &durability,
+            &message("backend", "all-units", ts(1)),
+        );
+
+        let snapshot = durability.snapshot();
+        assert!(!snapshot.is_healthy(), "a failed write degrades durability");
+        assert_eq!(snapshot.write_failures, 1, "the failure is counted");
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("disk full"),
+            "the failure's message is captured for the operator",
+        );
+
+        // A second failure accumulates rather than resetting the count.
+        persist_event(
+            &mut FailingWriter,
+            &durability,
+            &message("frontend", "@backend", ts(2)),
+        );
+        assert_eq!(durability.snapshot().write_failures, 2);
+    }
+
+    #[test]
+    fn a_log_store_with_a_working_disk_reports_healthy_durability() {
+        let dir = TempDir::new();
+        let store = LogStore::open(dir.path()).unwrap();
+        store.append(message("backend", "all-units", ts(1)));
+        let durability = store.durability();
+        assert!(durability.is_healthy(), "every write reached disk");
+        assert_eq!(durability.write_failures, 0);
+        assert!(durability.last_error.is_none());
+    }
+
+    #[test]
+    fn the_memory_store_reports_healthy_durability() {
+        // The ephemeral store has no disk to fail, so it never reports a write
+        // failure; `storage: memory` already tells the operator it is not durable.
+        let store = MemoryStore::default();
+        store.append(message("backend", "all-units", ts(1)));
+        assert!(store.durability().is_healthy());
     }
 }
