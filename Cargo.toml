@@ -40,7 +40,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # crate can use; `tracing-subscriber` is the init side, kept in crew-telemetry so
 # the library crates never pull a subscriber.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # The broker service: async runtime and HTTP + SSE framework (JSON via the serde
 # above).
 tokio = { version = "1", features = ["full"] }
