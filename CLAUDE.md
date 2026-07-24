@@ -375,9 +375,13 @@ task-scoped). Activity events thread the task the same way through `Event.task` 
 `TaskId` and stamps it on the order, and the assigned role adopts it from its inbox
 (`Broker::inbox`) so its own `crew_send` / `crew_order` stamp the same id, correlation
 on the envelope rather than a role-to-task table. The shim persists the adopted task
-per role beside the inbox cursor. Threading the task onto the assignee's supervisor
-`RosterClient` at runtime (the fleet watching the order stream, not a broker query) is
-the remaining step. See `docs/observability.md`.
+per role beside the inbox cursor. The fleet threads that same task onto the assignee's
+own supervisor events (issue #223): a fleet-wide order watcher reads the order stream
+(`RosterClient::history_since`, as the stall monitor does) and, on an order directed to
+a role it manages, stamps the order's `TaskId` onto that role's `RosterClient`
+(`set_task`), so the role's own lifecycle and activity events correlate too, the
+assignment learned from the stream rather than a broker role-to-task query. See
+`docs/observability.md`.
 
 `crew-mcp` carries the agent-facing MCP surface (issue #17): the `crew-mcp` binary
 speaks JSON-RPC 2.0 over newline-delimited stdio (protocol `2024-11-05`,
@@ -617,7 +621,13 @@ fleet-wide lazy-start watcher polls the broker for new `message` events and call
 (`Channel::addresses`), so an idle-stopped role comes back on first work with no manual
 start. It is idempotent and respects the pause gate (a running, dead, or paused role is
 untouched), and its cursor starts at launch and advances past each message acted on, so
-a historical or already-handled brief never wakes a role.
+a historical or already-handled brief never wakes a role. A sibling fleet-wide
+**order watcher** reads the message stream the same incremental way (issue #223): on an
+order directed to a fleet role it stamps that order's `TaskId` on the role's roster
+client (`RosterClient::set_task`), so the role's own started / idle / restarted and
+activity events correlate to the task the agent adopted (issue #132). It learns the
+assignment from the stream, never a broker-side role-to-task map, so the correlation
+stays on the envelope (`docs/observability.md`).
 
 The supervisor captures **what each agent does inside its own process**, the per-agent
 activity log the broker cannot see (issue #24, `crew_supervisor::activity`). Each agent
@@ -637,7 +647,7 @@ against the crew budget through the shared `UsageRecorder` (issue #177). The bro
 `activity` event to
 the role on its own `@role` channel (via `Channel::Direct`), so it rides the aggregate
 stream and the role's per-agent timeline (`GET /activity?agent=<role>`) but never floods
-another role's inbox, and threads the supervisor's task (issue #29) for correlation.
+another role's inbox, and threads the role's task (issues #29, #223) for correlation.
 Recording is best-effort: a broker hiccup is logged, never fatal.
 
 The **defibrillator** (issue #23) recovers an agent whose turn died mid-flight,

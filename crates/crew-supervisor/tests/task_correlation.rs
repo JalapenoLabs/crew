@@ -96,3 +96,44 @@ fn the_supervisor_threads_the_task_onto_lifecycle_events() {
         "an event outside a task carries no task id",
     );
 }
+
+#[test]
+fn the_supervisor_threads_a_per_role_task_set_at_runtime() {
+    // Issue #223: one shared roster client correlates each role's events to the
+    // task assigned to that role, set at runtime (as the order watcher does),
+    // not one task for the whole client.
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+    let backend = RoleId::new("backend");
+    let frontend = RoleId::new("frontend");
+    let backend_task = TaskId::new();
+
+    // Only backend is assigned a task; the shared client learns it at runtime.
+    roster.set_task(backend.clone(), backend_task);
+    roster
+        .register(&backend, &["api/".to_owned()])
+        .expect("backend registers");
+    roster
+        .mark(&backend, Liveness::Idle)
+        .expect("backend is marked idle");
+    // frontend has no assignment on the same client.
+    roster
+        .register(&frontend, &["web/".to_owned()])
+        .expect("frontend registers");
+
+    // backend's events correlate to its task; frontend's carry none, proving the
+    // correlation is per role rather than client-wide.
+    assert_eq!(
+        lifecycle_tasks(&base, "backend"),
+        vec![
+            Some(backend_task.to_string()),
+            Some(backend_task.to_string())
+        ],
+        "each of the assigned role's events carries its task",
+    );
+    assert_eq!(
+        lifecycle_tasks(&base, "frontend"),
+        vec![None],
+        "an unassigned role on the same client carries no task",
+    );
+}

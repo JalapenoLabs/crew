@@ -8,8 +8,11 @@ mod common;
 
 use std::{thread, time::Duration};
 
-use common::{lifecycle_events, liveness, post_message, start_broker, stub, wait_until};
-use crew_core::RoleId;
+use common::{
+    lifecycle_events, lifecycle_tasks, liveness, post_message, post_order, start_broker, stub,
+    wait_until,
+};
+use crew_core::{RoleId, TaskId};
 use crew_supervisor::{AgentState, Fleet, LifecyclePolicy, RosterClient};
 
 #[test]
@@ -127,6 +130,52 @@ fn a_message_addressed_to_a_parked_role_wakes_it() {
     assert!(
         wait_until(|| liveness(&base, "commander").as_deref() == Some("working")),
         "a message to the parked role wakes it end to end (lazy start)",
+    );
+
+    fleet.shutdown();
+}
+
+#[test]
+fn an_order_correlates_the_assigned_role_s_supervisor_events() {
+    // Issue #223: the fleet watches the order stream and threads the order's task
+    // onto the assigned role's own supervisor lifecycle events, so a role's
+    // started/idle/restarted events correlate to the task the agent adopted.
+    let base = start_broker();
+    let roster = RosterClient::new(base.clone());
+    let backend = RoleId::new("backend");
+    let task = TaskId::new();
+
+    // Poll the order stream fast, and idle-stop after a beat, so the watcher
+    // correlates the order before the role's idle lifecycle event publishes.
+    let policy = LifecyclePolicy {
+        idle_timeout: Duration::from_millis(400),
+        heartbeat_timeout: Duration::from_secs(30),
+        watchdog_timeout: Duration::from_secs(60),
+        order_poll_interval: Duration::from_millis(50),
+        ..LifecyclePolicy::default()
+    };
+    let fleet = Fleet::launch(
+        &roster,
+        vec![stub("backend", "echo ready; sleep 30")],
+        policy,
+    );
+
+    // The commander orders backend, carrying the minted task on the envelope
+    // (issue #132); the fleet learns the assignment from the same stream any
+    // observer reads, never a broker-side role-to-task query.
+    post_order(&base, "backend", &task.to_string(), "ship the login flow");
+
+    // Start backend; once it idles, its lifecycle event correlates to the order's
+    // task the watcher stamped on the roster client.
+    fleet.start(&backend).unwrap();
+    assert!(
+        wait_until(|| {
+            lifecycle_tasks(&base, "backend")
+                .iter()
+                .any(|carried| carried.as_deref() == Some(task.to_string().as_str()))
+        }),
+        "the assigned role's supervisor events correlate to the order's task; got {:?}",
+        lifecycle_tasks(&base, "backend"),
     );
 
     fleet.shutdown();

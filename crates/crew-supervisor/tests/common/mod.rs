@@ -96,6 +96,44 @@ pub fn post_message(base: &str, channel: &str, body: &str) {
         .unwrap();
 }
 
+/// Posts an order from the commander to `@role`, carrying `task` on its
+/// envelope, standing in for a `crew_order` the fleet should correlate (issue
+/// #223).
+pub fn post_order(base: &str, role: &str, task: &str, title: &str) {
+    let payload = serde_json::json!({
+        "from": { "kind": "role", "id": "commander" },
+        "kind": "order",
+        "task": task,
+        "title": title,
+        "scope": "",
+        "owned_paths": [],
+        "acceptance": "",
+        "body": "",
+    });
+    ureq::post(&format!("{base}/channels/@{role}/messages"))
+        .set("content-type", "application/json")
+        .send_string(&payload.to_string())
+        .unwrap();
+}
+
+/// The task id stamped on each `lifecycle` event for `role`, oldest first
+/// (`None` when the event carries no task).
+pub fn lifecycle_tasks(base: &str, role: &str) -> Vec<Option<String>> {
+    let text = ureq::get(&format!("{base}/history?kind=lifecycle"))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["from"]["id"] == role)
+        .map(|event| event["task"].as_str().map(str::to_owned))
+        .collect()
+}
+
 /// The liveness the roster records for `role`, if it is registered.
 pub fn liveness(base: &str, role: &str) -> Option<String> {
     let text = ureq::get(&format!("{base}/roster"))

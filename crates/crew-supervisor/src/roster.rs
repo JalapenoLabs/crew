@@ -8,7 +8,10 @@
 //! agent-facing [`crew_mcp`](crew_mcp) client, which registers only its own
 //! role.
 
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use crew_core::{Activity, BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
 use serde::Deserialize;
@@ -60,8 +63,16 @@ pub struct RosterClient {
     agent: ureq::Agent,
     /// The task this supervisor is working, threaded onto every lifecycle
     /// transition so its events correlate to the task (issue #29). `None`
-    /// outside a task context.
+    /// outside a task context. A per-role assignment (`tasks`) supersedes it.
     task: Option<TaskId>,
+    /// The task an order assigned each role, so a multi-agent fleet correlates
+    /// each role's own lifecycle and activity events to the task that role
+    /// adopted, not one task for the whole client (issue #223).
+    ///
+    /// Shared behind an [`Arc`] so every clone (the per-agent drivers, the
+    /// activity forwarder, and the monitors) reads what the fleet's order
+    /// watcher writes; the map key is the role.
+    tasks: Arc<Mutex<HashMap<RoleId, TaskId>>>,
 }
 
 impl RosterClient {
@@ -72,7 +83,38 @@ impl RosterClient {
             base: base.into(),
             agent: crew_client::broker_agent(),
             task: None,
+            tasks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Stamps the `task` an order assigned onto `role`, so this client's
+    /// subsequent lifecycle and activity events for that role correlate to it
+    /// (issue #223).
+    ///
+    /// The fleet's order watcher calls this when an order addressed to a role
+    /// it manages appears on the stream. Because the assignment is shared
+    /// across every clone of this client (the per-agent drivers, the
+    /// activity forwarder, and the monitors all hold clones), the
+    /// correlation reaches every event any of them publishes for the role.
+    /// A newer order for the same role supersedes the old task, matching
+    /// how the assigned agent adopts the newest order (issue #132).
+    pub fn set_task(&self, role: RoleId, task: TaskId) {
+        self.tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(role, task);
+    }
+
+    /// The task to correlate `role`'s events to: the per-role task an order
+    /// assigned (issue #223), falling back to this client's own task context
+    /// (issue #29) when the role has no assignment.
+    fn task_for(&self, role: &RoleId) -> Option<TaskId> {
+        self.tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(role)
+            .copied()
+            .or(self.task)
     }
 
     /// Sets the task context, so every lifecycle transition this client
@@ -96,7 +138,7 @@ impl RosterClient {
     pub fn register(&self, role: &RoleId, owned_paths: &[String]) -> Result<()> {
         let url = format!("{}/roster", self.base);
         let mut body = json!({ "role": role.as_str(), "owned_paths": owned_paths });
-        self.attach_task(&mut body);
+        self.attach_task(role, &mut body);
         self.agent
             .post(&url)
             .set("content-type", "application/json")
@@ -118,7 +160,7 @@ impl RosterClient {
     pub fn mark(&self, role: &RoleId, liveness: Liveness) -> Result<()> {
         let url = format!("{}/roster", self.base);
         let mut body = json!({ "role": role.as_str(), "liveness": liveness.wire() });
-        self.attach_task(&mut body);
+        self.attach_task(role, &mut body);
         self.agent
             .post(&url)
             .set("content-type", "application/json")
@@ -193,7 +235,7 @@ impl RosterClient {
     pub fn emit_activity(&self, role: &RoleId, activity: &Activity) -> Result<()> {
         let url = format!("{}/activity", self.base);
         let mut body = json!({ "role": role.as_str(), "activity": activity });
-        if let Some(task) = &self.task {
+        if let Some(task) = self.task_for(role) {
             body["task"] = json!(task);
         }
         self.agent
@@ -248,9 +290,10 @@ impl RosterClient {
             })
     }
 
-    /// Adds the task id to a roster request body when a task context is set.
-    fn attach_task(&self, body: &mut Value) {
-        if let (Some(task), Value::Object(fields)) = (self.task, body) {
+    /// Adds `role`'s correlated task id to a roster request body when one is
+    /// set.
+    fn attach_task(&self, role: &RoleId, body: &mut Value) {
+        if let (Some(task), Value::Object(fields)) = (self.task_for(role), body) {
             fields.insert("task".to_owned(), json!(task));
         }
     }
