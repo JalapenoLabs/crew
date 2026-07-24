@@ -292,7 +292,11 @@ received. The **aggregate activity log** takes the same filter both ways (issue 
 `GET /stream` accepts the same `channel` / `role` / `agent` / `kind` / `task` / `since`
 params as `/history` (the shared `FilterQuery`, applied live with the very same
 `EventFilter::matches`), so a filtered live subscription and a filtered history read
-agree; with no filter `/stream` is the firehose. The
+agree; with no filter `/stream` is the firehose. Like `/inbox`, `/stream` resumes from a
+`Last-Event-ID` cursor: a dropped or lagged consumer reconnects and the stream replays
+the matching events it missed before the live tail, so it needs no separate `/history`
+call (issue #134); `/inbox`, `/activity`, and `/stream` share one replay-then-live SSE
+engine (`sse::resume_stream`), and a `/stream` lag logs `broker.stream.lagged`. The
 `/roster` endpoints expose who is in the unit (issue
 #14): `GET /roster` lists roles with their owned paths and liveness (working / idle
 / stopped / dead), a role registers on join with `POST /roster` and leaves with

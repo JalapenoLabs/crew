@@ -149,8 +149,13 @@ data: {"ts":"…","from":{"kind":"role","id":"backend"},"channel":"all-units","k
 - The `id` line is the event's **log sequence**, a monotonic integer and its position in
   the durable log. It is the cursor that bridges the live stream to history (below).
 - A fresh connection starts at the **live tail**: it delivers events from the moment it
-  connects, not the backlog. The stream is live-only; a consumer backfills the past
-  through `/history`.
+  connects, not the backlog. A consumer backfills the past through `/history`.
+- **Reconnect resumes losslessly** (issue #134): send the last `id` you saw as a
+  `Last-Event-ID` request header (an `EventSource` does this for you), and the stream
+  replays the matching events after that cursor before returning to the live tail, so a
+  dropped or lagged connection loses nothing without a separate `/history` call. The
+  replay honors the same filter params as the live tail. With no `Last-Event-ID` the
+  connection starts at the live tail, as above.
 - Periodic keep-alive comment lines (`:`) hold the connection open through idle spells.
 
 ### Catch-up: `GET /history`
@@ -174,8 +179,11 @@ stable cursor:
 - Pagination: pass `limit` (default 100, max 1000) and `after=<cursor>`. `next_cursor`
   is the position to resume from; it is **omitted** on the last page.
 - The cursor space is the **same** as the stream's `id`: a consumer that last saw
-  `id: N` on `/stream` calls `GET /history?after=N` to fetch everything since, then
-  resumes the live stream. That is the reconnect and initial-backfill path.
+  `id: N` reconnects to `/stream` with `Last-Event-ID: N` to replay everything since on
+  the stream itself (issue #134), or calls `GET /history?after=N` to page the gap
+  without holding a stream open. Use `/history` for the initial backfill (a first load
+  with no prior cursor) and for a large gap you would rather page; use the stream's own
+  `Last-Event-ID` resume for an ordinary reconnect.
 
 `GET /events` returns the entire stored log as `{ "events": [ … ] }` in one response,
 for a simple full read of a short-lived unit.
@@ -264,7 +272,9 @@ es.onmessage = (e) => {
   }
 };
 
-// On reconnect (or to backfill on first load), fetch what was missed, then resubscribe:
+// On a dropped connection EventSource reconnects on its own, sending the last `id` as
+// `Last-Event-ID`, and the stream replays what was missed (issue #134), so no manual
+// catch-up is needed. For the initial backfill on first load, or a large gap, page it:
 //   GET /history?after=<last seq>       // everything since a known point
 //   GET /history?summary=true           // bounded catch-up on a long-running unit
 ```
