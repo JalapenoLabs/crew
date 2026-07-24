@@ -607,6 +607,18 @@ boundaries on the stream (issue #24), but the watchdog does not yet key on them 
 hang-versus-idle discrimination, so by default a quiet agent still parks rather than being
 force-recovered. (Wiring the watchdog to those turn boundaries is a later cleanup.)
 
+The Fleet also enforces the crew's brake and kill switch at the process level, not only via
+the agent contract (issue #187). A fleet-wide **pause monitor** thread reads the pause state
+from the roster on `pause_poll_interval` (default one second) and, for each agent, records
+whether the crew has gated it (a crew-wide pause / stand-down / usage auto-pause, or its own
+per-role pause) in a shared `paused` flag, and reaps a still-working gated agent directly,
+like the watchdog, marking it stopped. The driver refuses to spawn a role while its flag is
+set (`AgentLifecycle::ensure_running` checks it), so the Fleet stops a paused role's process
+and refuses to feed it until a resume clears the gate; a stall reading the roster fails soft,
+holding the last-known gates. So pause and stand-down actually stop a non-compliant or
+wedged agent, rather than trusting each role to honor the role-card contract. See
+`docs/roles.md` (the brake and kill switch) and `docs/observability.md`.
+
 The defibrillator also catches a crew stuck waiting on itself, not just a dead agent
 (issue #48, `crew_supervisor::stall`). A fleet-wide **stall monitor** thread reads a
 recent window of the event stream (`RosterClient::history_since`, over the stable stream

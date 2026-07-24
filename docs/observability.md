@@ -205,8 +205,12 @@ halts the whole crew at once. Each records a `lifecycle` event (`paused` / `resu
 to `all-units`, so the change rides `/history`, `/stream`, and each inbox like any
 other. `GET /roster` carries the state too: a crew-wide `standing` (`running` /
 `paused` / `stood_down`) and a `paused` flag per role. A role is gated from new work
-whenever it is paused on its own or the crew is not `running`; it honors this by
-pulling no work while gated (its role card says so). The control state lives in the
+whenever it is paused on its own or the crew is not `running`. An agent honors this by
+pulling no work while gated (its role card says so), and the supervisor Fleet enforces it
+at the process level (issue #187): a fleet-wide pause monitor reads the gate from the
+roster and actually stops a gated role's process and refuses to restart it until it is
+resumed, so a non-compliant or wedged agent is stopped rather than trusted to idle. The
+control state lives in the
 broker, the live recoverable authority, and a stand-down preserves the durable log and
 roster, so the crew resumes with `crew resume` or a fresh `crew up`. Persisting the
 control state across a broker restart is a later refinement; the stream already records

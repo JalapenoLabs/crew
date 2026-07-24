@@ -24,7 +24,11 @@ the default; the direct override is explicit. A brake and a
 kill switch gate the crew's work: `crew pause [role]` and `crew resume [role]` gate one
 role or the whole crew, and `crew standdown` halts every role at once and preserves the
 state, so the crew is recoverable. A gated role pulls no new work until you lift it; the
-state is visible on the roster and the stream (see `docs/observability.md`).
+state is visible on the roster and the stream (see `docs/observability.md`). The
+supervisor enforces the gate at the process level (issue #187): its Fleet reads the pause
+state from the roster and actually stops a paused or stood-down role's process and refuses
+to restart it until you resume, so a non-compliant or wedged agent is stopped, not merely
+asked to idle.
 
 ## The ownership model
 

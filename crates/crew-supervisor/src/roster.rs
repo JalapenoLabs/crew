@@ -8,7 +8,7 @@
 //! agent-facing [`crew_mcp`](crew_mcp) client, which registers only its own
 //! role.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use crew_core::{Activity, BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
 use eyre::{eyre, Result};
@@ -295,6 +295,33 @@ impl RosterClient {
         Ok(view.roles.into_iter().map(|entry| entry.role).collect())
     }
 
+    /// Reads the crew's current pause state from `GET /roster` (issue #187).
+    ///
+    /// Returns which roles are gated from new work, so the Fleet can enforce
+    /// the brake and kill switch (issue #41) at the process level,
+    /// idle-holding a paused role, rather than trusting each agent to honor
+    /// the role-card contract. A role is gated when the whole crew is (a
+    /// manual pause or stand-down, or the usage auto-pause) or when it is
+    /// paused on its own.
+    ///
+    /// # Errors
+    /// Returns an error if the broker cannot be reached or its response is
+    /// malformed, so the caller can hold the last-known gates rather than act
+    /// on a bad read.
+    pub(crate) fn pause_snapshot(&self) -> Result<PauseSnapshot> {
+        let url = format!("{}/roster", self.base);
+        let text = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|err| eyre!("could not read the broker roster: {err}"))?
+            .into_string()
+            .map_err(|err| eyre!("could not read the roster response: {err}"))?;
+        let view: RosterView = serde_json::from_str(&text)
+            .map_err(|err| eyre!("could not parse the roster response: {err}"))?;
+        Ok(PauseSnapshot::from_view(view))
+    }
+
     /// Fetches `role`'s bounded briefing packet text (`GET /briefing?role=`,
     /// issue #50), for injecting into the agent's opening turn at spawn (issue
     /// #122).
@@ -385,14 +412,141 @@ struct BriefingResponse {
     text: String,
 }
 
-/// The shape of `GET /roster` (only the role ids are read here).
+/// The shape of `GET /roster`: the roles, the crew standing, and the
+/// shared-subscription usage pause (the fields the supervisor reads; the count
+/// and per-entry owned paths are ignored).
 #[derive(Debug, Deserialize)]
 struct RosterView {
     roles: Vec<RosterEntry>,
+    /// The crew's control standing: `running`, `paused`, or `stood_down` (issue
+    /// #41). Defaults to `running` if an older broker omits it, so a missing
+    /// standing never spuriously gates the crew.
+    #[serde(default = "running_standing")]
+    standing: String,
+    /// Whether new work is auto-paused on shared-subscription usage (issue
+    /// #56).
+    #[serde(default)]
+    usage_paused: bool,
 }
 
-/// One roster entry; extra fields (owned paths, liveness) are ignored.
+/// The default crew standing when the broker omits one: `running`, so a missing
+/// field reads as not gated.
+fn running_standing() -> String {
+    "running".to_owned()
+}
+
+/// One roster entry: its role and whether it is paused on its own (issue #41);
+/// extra fields (owned paths, liveness) are ignored.
 #[derive(Debug, Deserialize)]
 struct RosterEntry {
     role: RoleId,
+    #[serde(default)]
+    paused: bool,
+}
+
+/// A snapshot of the crew's pause state, for the Fleet to enforce at the
+/// process level (issue #187).
+///
+/// A role is gated when the whole crew is (a manual pause or stand-down, or the
+/// shared-subscription usage auto-pause), or when it is paused on its own.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PauseSnapshot {
+    /// Whether the whole crew is gated: the standing is not `running`, or new
+    /// work is usage auto-paused, so every role is held.
+    crew_gated: bool,
+    /// The roles paused on their own.
+    paused_roles: HashSet<RoleId>,
+}
+
+impl PauseSnapshot {
+    /// Derives the pause state from a parsed roster view: the crew is gated
+    /// when its standing is not `running` or work is usage auto-paused, and
+    /// each role paused on its own joins the set.
+    fn from_view(view: RosterView) -> Self {
+        let crew_gated = view.standing != "running" || view.usage_paused;
+        let paused_roles = view
+            .roles
+            .into_iter()
+            .filter(|entry| entry.paused)
+            .map(|entry| entry.role)
+            .collect();
+        Self {
+            crew_gated,
+            paused_roles,
+        }
+    }
+
+    /// Whether `role` is gated from new work: the crew is gated, or the role is
+    /// paused on its own.
+    pub(crate) fn is_gated(&self, role: &RoleId) -> bool {
+        self.crew_gated || self.paused_roles.contains(role)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crew_core::RoleId;
+
+    use super::{PauseSnapshot, RosterView};
+
+    /// Derives a pause snapshot from a `/roster`-shaped JSON body.
+    fn snapshot(json: &str) -> PauseSnapshot {
+        PauseSnapshot::from_view(
+            serde_json::from_str::<RosterView>(json).expect("the roster parses"),
+        )
+    }
+
+    #[test]
+    fn a_running_crew_gates_only_roles_paused_on_their_own() {
+        let snap = snapshot(
+            r#"{ "standing": "running", "usage_paused": false, "roles": [
+                { "role": "backend", "paused": true },
+                { "role": "frontend", "paused": false }
+            ] }"#,
+        );
+        assert!(
+            snap.is_gated(&RoleId::new("backend")),
+            "a self-paused role is gated"
+        );
+        assert!(
+            !snap.is_gated(&RoleId::new("frontend")),
+            "an unpaused role is not gated by a running crew"
+        );
+        assert!(
+            !snap.is_gated(&RoleId::new("qa")),
+            "an absent role is not gated by a running crew"
+        );
+    }
+
+    #[test]
+    fn a_stood_down_crew_gates_every_role() {
+        let snap = snapshot(r#"{ "standing": "stood_down", "roles": [ { "role": "backend" } ] }"#);
+        assert!(
+            snap.is_gated(&RoleId::new("backend")),
+            "a stood-down crew gates a role"
+        );
+        assert!(
+            snap.is_gated(&RoleId::new("anyone")),
+            "and every role, even one absent from the roster"
+        );
+    }
+
+    #[test]
+    fn a_usage_auto_pause_gates_every_role() {
+        let snap = snapshot(r#"{ "standing": "running", "usage_paused": true, "roles": [] }"#);
+        assert!(
+            snap.is_gated(&RoleId::new("backend")),
+            "a shared-subscription usage auto-pause gates work crew-wide"
+        );
+    }
+
+    #[test]
+    fn a_missing_standing_reads_as_running() {
+        // An older broker that omits `standing` must not spuriously gate the crew.
+        let snap = snapshot(r#"{ "roles": [ { "role": "backend" } ] }"#);
+        assert!(
+            !snap.is_gated(&RoleId::new("backend")),
+            "a missing standing is not a gate"
+        );
+    }
 }
