@@ -266,6 +266,88 @@ fn an_order_mints_a_task_the_assignee_adopts_and_stamps_on_its_work() {
 }
 
 #[test]
+fn own_work_shares_one_task_from_the_order_through_claim_submit_and_an_independent_verdict() {
+    // Issue #183: the done-gate and work ledger key by the adopted TaskId, not a
+    // human title. So a role's order -> claim -> in_progress -> submit chain rides
+    // one id with no bookkeeping, and an independent verifier names that same id.
+    use crew_core::TaskId;
+
+    let broker = TestBroker::start();
+    broker.register("commander", &[]);
+    broker.register("backend", &["api/"]);
+    broker.register("qa", &["tests/"]);
+
+    let commander = broker.client("commander");
+    let mut backend = broker.client("backend");
+    let qa = broker.client("qa");
+
+    // The commander orders backend: this mints the task and stamps it on the order.
+    commander
+        .order(
+            "backend",
+            "build login",
+            "POST /login",
+            &[],
+            "tests green",
+            "",
+        )
+        .unwrap();
+
+    // Backend reads the order and adopts its task, with no manual id bookkeeping.
+    backend.inbox().unwrap();
+    let task = backend.task().expect("backend adopted the order's task");
+
+    // Own-work claim and submit reuse the adopted id, so the whole chain shares it.
+    backend.claim("in_progress", "build login").unwrap();
+    backend
+        .submit("build login", "tests green", Some("qa"))
+        .unwrap();
+    assert_eq!(
+        backend.task(),
+        Some(task),
+        "claim and submit reuse the adopted task, minting nothing new",
+    );
+
+    // The ledger holds the work under the adopted id, titled for display.
+    let ledger = qa.ledger().unwrap();
+    let claim = ledger
+        .iter()
+        .find(|item| item.task == task.to_string())
+        .expect("the ledger holds the claim keyed by the adopted id");
+    assert_eq!(claim.owner, "backend");
+    assert_eq!(claim.state, "in_progress");
+    assert_eq!(claim.title, "build login", "titled for display");
+
+    // The verifier reads the gate, names the task by its id, and passes it.
+    let gate = qa.gate().unwrap();
+    let submitted = gate
+        .tasks
+        .iter()
+        .find(|t| t.task == task.to_string())
+        .expect("the gate holds the submission keyed by the adopted id");
+    assert_eq!(submitted.verdict, "submitted");
+    assert_eq!(submitted.title, "build login", "titled for display");
+    let task_id: TaskId = submitted
+        .task
+        .parse()
+        .expect("the gate exposes a parseable id");
+    qa.verdict(task_id, true, "").unwrap();
+
+    // The task is done end to end: keyed by one id from the order to the pass.
+    let gate = qa.gate().unwrap();
+    let passed = gate
+        .tasks
+        .iter()
+        .find(|t| t.task == task.to_string())
+        .expect("the task is still in the gate");
+    assert_eq!(
+        passed.verdict, "passed",
+        "an independent pass marks it done"
+    );
+    assert_eq!(passed.verifier.as_deref(), Some("qa"));
+}
+
+#[test]
 fn a_commander_steers_a_specialist_in_band_with_redirect_and_belay() {
     // Issue #190: the commander steers a working specialist through its own tools,
     // not only the General over the CLI. A `redirect` nudges without stopping; a

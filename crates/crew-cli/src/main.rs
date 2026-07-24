@@ -282,7 +282,7 @@ enum Command {
     /// General moves a claimed task, and both roles and the commander are
     /// informed (issue #42).
     Reassign {
-        /// The task key to reassign, as shown in `crew ledger`.
+        /// The task id to reassign, as shown in `crew ledger`.
         task: String,
         /// The role to move the task to (its `@role` channel).
         #[arg(long, value_name = "ROLE")]
@@ -358,17 +358,14 @@ enum Command {
         /// The repo-relative file path to check against this role's owned lane.
         path: String,
     },
-    /// Claim a task on the work ledger, or move this role's claim to a new
-    /// state.
+    /// Claim the work you were ordered to do on the work ledger, or move your
+    /// claim to a new state (issue #183).
     Claim {
-        /// The task key to claim (a path, a feature, or an order's title).
-        task: String,
         /// The state to move it to: `claimed`, `in_progress`, `blocked`, or
         /// `done`.
         #[arg(long, default_value = "claimed")]
         state: String,
-        /// An optional short label for the ledger.
-        #[arg(long)]
+        /// An optional short human label for the ledger.
         title: Option<String>,
     },
     /// Show the work ledger: every claimed task, its owner, and its state.
@@ -376,8 +373,8 @@ enum Command {
     /// Submit finished work for adversarial verification (not done until it
     /// passes).
     Submit {
-        /// The task title, matching the order it came from.
-        task: String,
+        /// A short human label for the work, matching the order it came from.
+        title: String,
         /// The acceptance criteria the work claims to meet.
         #[arg(long, value_name = "TEXT")]
         acceptance: Option<String>,
@@ -388,7 +385,7 @@ enum Command {
     /// Return a verdict on a task another role submitted: try to break it, then
     /// judge.
     Verdict {
-        /// The task title under verification.
+        /// The task id under verification, as shown in `crew gate`.
         task: String,
         /// Pass the task: mark it done because you could not break it.
         #[arg(long)]
@@ -571,15 +568,15 @@ fn main() -> Result<()> {
         } => integrate::integrate(&repo, &base, &branch, check.as_deref()),
         Command::Roster => shim::roster(),
         Command::Lane { path } => shim::lane(&path),
-        Command::Claim { task, state, title } => {
-            shim::claim(&task, &state, title.as_deref().unwrap_or_default())
+        Command::Claim { state, title } => {
+            shim::claim(&state, title.as_deref().unwrap_or_default())
         }
         Command::Ledger => shim::ledger(),
         Command::Submit {
-            task,
+            title,
             acceptance,
             to,
-        } => shim::submit(&task, acceptance.as_deref(), to.as_deref()),
+        } => shim::submit(&title, acceptance.as_deref(), to.as_deref()),
         Command::Verdict {
             task,
             pass,

@@ -92,10 +92,12 @@ it.
   config, issue #43, done) with an integration step to follow (`crew integrate`, issue #44,
   done: merge each role's `crew/<role>` branch into one branch, surface conflicts rather than
   drop them, and run the acceptance checks on the merged result), a work ledger with claims
-  (`crew_claim` / `crew_ledger`, issue #45, done), lane-ownership enforcement
-  (`lane_enforcement` and the `crew_lane` tool, issue #46, done), an adversarial done-gate
-  (`crew_submit` / `crew_verdict` / `crew_gate`, issue #47, done), and coordination-stall
-  detection (the defibrillator's fleet-wide stall monitor, issue #48, done).
+  (`crew_claim` / `crew_ledger`, issue #45, done; keyed by the task's `TaskId` with the
+  human title as display, issue #183), lane-ownership enforcement (`lane_enforcement` and
+  the `crew_lane` tool, issue #46, done), an adversarial done-gate (`crew_submit` /
+  `crew_verdict` / `crew_gate`, issue #47, done; keyed by `TaskId` too, issue #183), and
+  coordination-stall detection (the defibrillator's fleet-wide stall monitor, issue #48,
+  done).
 - **Team Memory + Cockpit.** A shared situation board (`crew_board` / `crew_record`,
   issue #49, done: the crew's durable memory of decisions, interfaces, and gotchas,
   rebuilt from the log across a restart), a new-role briefing packet (`crew_briefing`,

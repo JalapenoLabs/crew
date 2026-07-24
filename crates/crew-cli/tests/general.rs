@@ -187,14 +187,16 @@ fn a_brief_to_an_unroutable_target_fails_cleanly() {
 #[test]
 fn the_general_reassigns_an_in_flight_task_and_informs_both_roles_and_the_commander() {
     let port = start_broker();
+    // Tasks are keyed by their id now (issue #183), so the General names the id.
+    let task = "11111111-1111-1111-1111-111111111111";
 
     // backend holds an in-flight task.
-    claim(port, "login", "backend", "in_progress");
+    claim(port, task, "backend", "in_progress");
 
     // The General reassigns it to frontend (issue #42, the direct override's second
     // half).
     let out = stdout_of(
-        crew_general(port, &["reassign", "login", "--to", "frontend"]),
+        crew_general(port, &["reassign", task, "--to", "frontend"]),
         "reassign",
     );
     assert!(
@@ -204,7 +206,7 @@ fn the_general_reassigns_an_in_flight_task_and_informs_both_roles_and_the_comman
 
     // The work moved cleanly: the ledger now shows frontend as the owner.
     assert_eq!(
-        ledger_owner(port, "login").as_deref(),
+        ledger_owner(port, task).as_deref(),
         Some("frontend"),
         "the ledger owner moved from backend to frontend",
     );
@@ -229,8 +231,9 @@ fn the_general_reassigns_an_in_flight_task_and_informs_both_roles_and_the_comman
 fn reassigning_a_task_no_one_holds_fails_cleanly() {
     let port = start_broker();
 
-    // No one holds `ghost`, so there is nothing in flight to reassign.
-    let output = crew_general(port, &["reassign", "ghost", "--to", "frontend"]);
+    // No one holds this id, so there is nothing in flight to reassign.
+    let ghost = "22222222-2222-2222-2222-222222222222";
+    let output = crew_general(port, &["reassign", ghost, "--to", "frontend"]);
     assert!(
         !output.status.success(),
         "reassigning an unheld task is refused, not applied",
@@ -244,5 +247,36 @@ fn reassigning_a_task_no_one_holds_fails_cleanly() {
     assert!(
         messages(port).is_empty(),
         "a refused reassignment posts no notes",
+    );
+}
+
+#[test]
+fn a_direct_override_seeds_a_ledger_claim_keyed_by_a_task_id() {
+    // The General's `crew override` mints a task and stamps it on the order (issue
+    // #132), so the order seeds a ledger claim keyed by that id, titled by the
+    // order (issues #184, #183), without the recipient claiming manually.
+    let port = start_broker();
+    let out = crew_general(port, &["override", "backend", "ship the login flow"]);
+    assert!(out.status.success(), "the direct order succeeds: {out:?}");
+
+    let text = ureq::get(&format!("{}/ledger", base_url(port)))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let view: Value = serde_json::from_str(&text).unwrap();
+    let entry = view["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["owner"] == "backend")
+        .unwrap_or_else(|| panic!("the order seeded a ledger claim for backend: {view}"));
+    assert_eq!(entry["title"], "ship the login flow", "titled by the order");
+    assert_eq!(entry["state"], "claimed");
+    // The ledger key is a real task id, not the human title (issue #183).
+    let task = entry["task"].as_str().unwrap();
+    assert!(
+        task.parse::<crew_substrate::core::TaskId>().is_ok(),
+        "the claim is keyed by a task id, not the title: {task}",
     );
 }

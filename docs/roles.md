@@ -47,16 +47,19 @@ Two rules keep a unit healthy:
    the push is over.
 
 Ownership by directory sets the lanes; the **work ledger** enforces them on live work
-(issue #45). A role claims a task before it starts (`crew_claim`, or the shim `crew
+(issue #45). A role claims its work before it starts (`crew_claim`, or the shim `crew
 claim`) and moves the claim to `in_progress`, `blocked`, and `done` as it goes, so two
-roles never grab the same work or edit the same file blind. Issuing an order seeds the
-claim for the recipient automatically (`crew_order`, owner = the ordered role, state =
-`claimed`, keyed by the order title), so assigned-but-not-started work already shows on
-the ledger without a manual claim (issue #184); the recipient then moves that claim
+roles never grab the same work or edit the same file blind. The ledger keys by the work's
+`TaskId`, not a human string (issue #183): `crew_claim` reuses the task the role adopted
+from its order, so a claim -> `in_progress` -> `done` chain and the done-gate share one
+id, and ad-hoc work mints a fresh one. Issuing an order seeds the claim for the recipient
+automatically (`crew_order`, owner = the ordered role, state = `claimed`, keyed by the
+order's `TaskId` and titled by the order, issue #184), so assigned-but-not-started work
+already shows on the ledger without a manual claim; the recipient then moves that claim
 forward as it works. The seed is non-destructive: it never regresses an in-flight claim
-or steals a task another role holds. The broker keeps one owner per task and refuses a
+or steals a task another role holds. The broker keeps one owner per task id and refuses a
 conflicting claim, naming the holder, so a clash surfaces rather than races. `crew_ledger`
-shows who holds what. See `docs/observability.md`.
+shows who holds what (id and title). See `docs/observability.md`.
 
 A crew is described by a declarative config (`crew_core::CrewConfig`, issue #25): the
 roles and the lane each owns, the model tier each runs (issue #53), the runtime each runs
@@ -109,23 +112,28 @@ confident-but-wrong work never ships because an independent role tries to break 
 The gate is a two-party protocol the broker enforces:
 
 1. **Submit.** When a role believes its task meets the acceptance criteria, it submits the
-   work with `crew_submit` (or `crew submit <task>` on the shim) instead of declaring it
-   done. This records the task as awaiting verification and, when a reviewer is named,
-   asks it to verify. Submitting does not mark the work done.
+   work with `crew_submit <title>` (or `crew submit <title>` on the shim) instead of
+   declaring it done. It keys the submission by the task the role adopted from its order
+   (issue #183), passing the human title for display; this records the task as awaiting
+   verification and, when a reviewer is named, asks it to verify. Submitting does not mark
+   the work done.
 2. **Verify.** An independent role, `qa` or a skeptic reviewer, actively tries to break the
-   work against its acceptance criteria and records a verdict with `crew_verdict`. It
-   passes the task only if it could not break it.
+   work against its acceptance criteria, reads the task's id from `crew_gate`, and records
+   a verdict with `crew_verdict <task-id>`. It passes the task only if it could not break
+   it.
 3. **Pass or hand back.** A pass marks the task done. A failure returns the work to the
    owner with the specific, actionable failure, delivered to its inbox, so the owner fixes
    exactly what broke and resubmits.
 
-The broker refuses a verdict that would let bad work through: a role cannot verify its own
-work (the verifier must differ from the owner), and a task that already passed or was
-handed back is not open to a fresh verdict until it is resubmitted. So a task reaches done
-only when a role other than the owner could not break it. Every step is a `verification`
-event on the stream, and `crew_gate` (or `GET /gate`) reads the live gate: each task under
-verification, its owner, its verifier, and whether it is submitted, passed, or failed (see
-`docs/observability.md`).
+The gate keys by the work's `TaskId`, not its human title (issue #183), so two tasks that
+happen to share a title never collide, and a claim, its submission, and its verdict all
+correlate to one id. The broker refuses a verdict that would let bad work through: a role
+cannot verify its own work (the verifier must differ from the owner), and a task that
+already passed or was handed back is not open to a fresh verdict until it is resubmitted.
+So a task reaches done only when a role other than the owner could not break it. Every
+step is a `verification` event on the stream, and `crew_gate` (or `GET /gate`) reads the
+live gate: each task under verification (its id and title), its owner, its verifier, and
+whether it is submitted, passed, or failed (see `docs/observability.md`).
 
 Like the situation board, the gate is a projection of its `verification` events, so it is
 rebuilt from the durable log on a restart: a task mid-verification survives a broker restart

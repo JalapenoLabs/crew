@@ -7,7 +7,7 @@ use std::{
 };
 
 use crew_core::{
-    BoardEvent, BoardSection, Event, EventKind, Lifecycle, RoleId, Sender, TelemetryEvent,
+    BoardEvent, BoardSection, Event, EventKind, Lifecycle, RoleId, Sender, TaskId, TelemetryEvent,
     Timestamp, Verdict, VerificationEvent,
 };
 use serde::Serialize;
@@ -200,6 +200,9 @@ pub struct UsageView {
 /// [`AppState::record_verdict`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateEntry {
+    /// A short human title for the gate view; display only, may be empty (issue
+    /// #183).
+    pub title: String,
     /// The role that submitted the work and owns any rework.
     pub owner: RoleId,
     /// The independent role that returned the latest verdict, absent until one
@@ -213,18 +216,18 @@ pub struct GateEntry {
 }
 
 /// The adversarial done-gate: every task under verification, keyed by its
-/// title.
+/// [`TaskId`] (issue #183).
 ///
-/// A task title is a human label (the order's title), so the operator and the
-/// crew name the same work the same way. Like the situation board (issue #49),
-/// the gate is a projection of the `verification` events in the durable log, so
-/// it is rebuilt on a restart rather than lost: a task mid-verification
-/// survives a broker restart (issue #181). The broker is still the live
-/// authority that enforces the gate, and records every transition as a
-/// `verification` event.
+/// The key is the structured task id, not a human label, so two tasks that
+/// share a title never collide in the gate; each entry carries the display
+/// [`title`](GateEntry::title). Like the situation board (issue #49), the gate
+/// is a projection of the `verification` events in the durable log, so it is
+/// rebuilt on a restart rather than lost: a task mid-verification survives a
+/// broker restart (issue #181). The broker is still the live authority that
+/// enforces the gate, and records every transition as a `verification` event.
 #[derive(Debug, Default)]
 struct Gate {
-    tasks: BTreeMap<String, GateEntry>,
+    tasks: BTreeMap<TaskId, GateEntry>,
 }
 
 impl Gate {
@@ -256,8 +259,9 @@ impl Gate {
     /// [`record_verdict`](AppState::record_verdict) writes produced.
     fn apply(&mut self, change: &VerificationEvent) {
         self.tasks.insert(
-            change.task.clone(),
+            change.task,
             GateEntry {
+                title: change.title.clone(),
                 owner: change.owner.clone(),
                 verifier: change.verifier.clone(),
                 verdict: change.verdict,
@@ -287,6 +291,9 @@ pub enum VerdictError {
 /// (issue #47).
 #[derive(Debug, Clone)]
 pub struct VerdictOutcome {
+    /// The task's display title, for the handback note and the stream event
+    /// (issue #183).
+    pub title: String,
     /// The role whose work was judged, and to hand back to on a failure.
     pub owner: RoleId,
     /// The independent role that returned the verdict.
@@ -910,10 +917,17 @@ impl AppState {
     /// can be resubmitted and re-verified. Submitting does not mark the
     /// work done: only an independent [`Passed`](Verdict::Passed) verdict
     /// does.
-    pub fn submit_for_verification(&self, task: String, owner: RoleId, acceptance: String) {
+    pub fn submit_for_verification(
+        &self,
+        task: TaskId,
+        title: String,
+        owner: RoleId,
+        acceptance: String,
+    ) {
         self.gate().tasks.insert(
             task,
             GateEntry {
+                title,
                 owner,
                 verifier: None,
                 verdict: Verdict::Submitted,
@@ -938,13 +952,13 @@ impl AppState {
     /// awaiting a verdict, or the verifier is the owner.
     pub fn record_verdict(
         &self,
-        task: &str,
+        task: TaskId,
         verifier: RoleId,
         pass: bool,
         failure: String,
     ) -> Result<VerdictOutcome, VerdictError> {
         let mut gate = self.gate();
-        let entry = gate.tasks.get_mut(task).ok_or(VerdictError::UnknownTask)?;
+        let entry = gate.tasks.get_mut(&task).ok_or(VerdictError::UnknownTask)?;
         if entry.verdict != Verdict::Submitted {
             return Err(VerdictError::NotAwaitingVerification(entry.verdict));
         }
@@ -960,6 +974,7 @@ impl AppState {
             entry.detail = failure;
         }
         Ok(VerdictOutcome {
+            title: entry.title.clone(),
             owner: entry.owner.clone(),
             verifier,
             verdict: entry.verdict,
@@ -967,10 +982,10 @@ impl AppState {
         })
     }
 
-    /// A snapshot of the done-gate: every task under verification and its
-    /// standing.
+    /// A snapshot of the done-gate: every task under verification, keyed by its
+    /// [`TaskId`], and its standing.
     #[must_use]
-    pub fn gate_snapshot(&self) -> BTreeMap<String, GateEntry> {
+    pub fn gate_snapshot(&self) -> BTreeMap<TaskId, GateEntry> {
         self.gate().tasks.clone()
     }
 
@@ -1356,14 +1371,16 @@ mod tests {
         use crate::store::{MemoryStore, Storage};
 
         // A submission then an independent pass: two `verification` events for one
-        // task.
+        // task, keyed by its id (issue #183).
         let store: Arc<dyn Storage> = Arc::new(MemoryStore::default());
         let first = AppState::with_storage(Config::default(), Arc::clone(&store));
+        let task = TaskId::new();
         first.publish(from_role(
             "backend",
             at("2026-07-23T00:00:00Z"),
             EventKind::Verification(VerificationEvent {
-                task: "login".to_owned(),
+                task,
+                title: "login".to_owned(),
                 owner: RoleId::new("backend"),
                 verifier: None,
                 verdict: Verdict::Submitted,
@@ -1374,7 +1391,8 @@ mod tests {
             "qa",
             at("2026-07-23T00:01:00Z"),
             EventKind::Verification(VerificationEvent {
-                task: "login".to_owned(),
+                task,
+                title: "login".to_owned(),
                 owner: RoleId::new("backend"),
                 verifier: Some(RoleId::new("qa")),
                 verdict: Verdict::Passed,
@@ -1385,12 +1403,13 @@ mod tests {
         // Rebuild over the same store: the latest verdict per task wins (issue #181).
         let rebuilt = AppState::with_storage(Config::default(), store);
         let gate = rebuilt.gate_snapshot();
-        let login = gate.get("login").expect("the task survived the restart");
+        let login = gate.get(&task).expect("the task survived the restart");
         assert_eq!(
             login.verdict,
             Verdict::Passed,
             "the pass verdict was folded"
         );
+        assert_eq!(login.title, "login", "the display title survived");
         assert_eq!(login.owner, RoleId::new("backend"));
         assert_eq!(login.verifier, Some(RoleId::new("qa")));
     }

@@ -15,7 +15,7 @@ use crew_client::{
     BoardSnapshot, BriefingPacket, Broker, GateSnapshot, InboxItem, LedgerItem, RosterSnapshot,
     Standing,
 };
-use crew_core::LaneEnforcement;
+use crew_core::{LaneEnforcement, TaskId};
 use serde_json::{json, Value};
 
 /// The MCP protocol version this server implements.
@@ -258,32 +258,32 @@ impl Server {
                     .check_lane(&self.owned_paths, self.lane_enforcement, path)
                     .map_err(tool_error)
             }
-            "crew_claim" => {
-                let task =
-                    str_arg(arguments, "task").ok_or("crew_claim requires a `task` to claim")?;
-                self.broker
-                    .claim(
-                        task,
-                        str_arg(arguments, "state").unwrap_or("claimed"),
-                        str_arg(arguments, "title").unwrap_or_default(),
-                    )
-                    .map_err(tool_error)
-            }
+            "crew_claim" => self
+                .broker
+                .claim(
+                    str_arg(arguments, "state").unwrap_or("claimed"),
+                    str_arg(arguments, "title").unwrap_or_default(),
+                )
+                .map_err(tool_error),
             "crew_ledger" => Ok(render_ledger(&self.broker.ledger().map_err(tool_error)?)),
             "crew_submit" => {
-                let task =
-                    str_arg(arguments, "task").ok_or("crew_submit requires a `task` to submit")?;
+                let title = str_arg(arguments, "title")
+                    .ok_or("crew_submit requires a `title` for the work you are submitting")?;
                 self.broker
                     .submit(
-                        task,
+                        title,
                         str_arg(arguments, "acceptance").unwrap_or_default(),
                         str_arg(arguments, "to"),
                     )
                     .map_err(tool_error)
             }
             "crew_verdict" => {
-                let task =
-                    str_arg(arguments, "task").ok_or("crew_verdict requires a `task` to judge")?;
+                let task = str_arg(arguments, "task").ok_or(
+                    "crew_verdict requires the `task` id to judge (read it from crew_gate)",
+                )?;
+                let task: TaskId = task.parse().map_err(|_error| {
+                    format!("`{task}` is not a task id; pass the id crew_gate shows for the task")
+                })?;
                 let pass = bool_arg(arguments, "pass")
                     .ok_or("crew_verdict requires a boolean `pass` (true if it holds)")?;
                 self.broker
@@ -614,24 +614,24 @@ fn ledger_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "crew_claim",
-            "description": "Claim a piece of work before you start it, so no two roles touch \
-                the same work. `task` is a stable key the crew agrees on (a path, a feature, an \
-                order's title). If another role already holds it, this fails and names the \
-                holder: coordinate, do not race. Call it again with `state` to move your claim \
+            "description": "Claim the work you were ordered to do before you start it, so no two \
+                roles touch the same work. It claims the task you adopted from your order, so a \
+                claim -> in_progress -> done chain and the done-gate all share one task. For \
+                genuinely ad-hoc work with no order, it mints a fresh task and adopts it, so the \
+                same chain still shares one id. Call it again with `state` to move your claim \
                 forward: `in_progress` when you start, `blocked` if you are stuck, and `done` \
-                when you finish (which frees the task). `title` is an optional human label.",
+                when you finish (which frees the task). `title` is an optional human label for \
+                the ledger; keep it stable across the chain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task": { "type": "string", "description": "The work item's key (a path, feature, or order title)." },
                     "state": {
                         "type": "string",
                         "enum": ["claimed", "in_progress", "blocked", "done"],
                         "description": "The state to move it to; defaults to `claimed`."
                     },
-                    "title": { "type": "string", "description": "An optional short label for the ledger." }
-                },
-                "required": ["task"]
+                    "title": { "type": "string", "description": "An optional short human label for the ledger." }
+                }
             }
         }),
         json!({
@@ -652,18 +652,20 @@ fn done_gate_tools() -> Vec<Value> {
             "description": "Submit your finished work for adversarial verification instead of \
                 reporting it done yourself. Done means verified, not asserted: an independent \
                 role tries to break it against the acceptance criteria before it counts as done. \
-                `task` is the task title (match the order's title), `acceptance` restates the \
+                It submits the task you were ordered to do (or a fresh one for ad-hoc work), so \
+                the submission and its verdict share the id of your claim. `title` is a short \
+                human label for the work (match the order's title), `acceptance` restates the \
                 criteria the work must meet, and `to` optionally names the reviewer to notify \
                 (for example `to: \"qa\"`). This does not mark the task done; wait for the verdict, \
                 and if it fails, fix the specific failure and resubmit.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task": { "type": "string", "description": "The task title, matching the order it came from." },
+                    "title": { "type": "string", "description": "A short human label for the work, matching the order it came from." },
                     "acceptance": { "type": "string", "description": "The acceptance criteria the work claims to meet." },
                     "to": { "type": "string", "description": "An optional reviewer role to notify (for example `qa`)." }
                 },
-                "required": ["task"]
+                "required": ["title"]
             }
         }),
         json!({
@@ -673,11 +675,12 @@ fn done_gate_tools() -> Vec<Value> {
                 criteria. Set `pass` true only if you could not break it, which marks the task \
                 done. Set `pass` false and give the specific, actionable `failure` if you broke \
                 it, which returns the work to its owner to fix. You cannot verify your own work: \
-                an independent role must judge it. `task` is the task title.",
+                an independent role must judge it. `task` is the task id, which crew_gate shows \
+                for each task under verification.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task": { "type": "string", "description": "The task title under verification." },
+                    "task": { "type": "string", "description": "The task id under verification, as shown by crew_gate." },
                     "pass": { "type": "boolean", "description": "True if you could not break it (marks it done); false if you broke it." },
                     "failure": { "type": "string", "description": "The specific failure when `pass` is false, so the handback is actionable." }
                 },
@@ -686,9 +689,10 @@ fn done_gate_tools() -> Vec<Value> {
         }),
         json!({
             "name": "crew_gate",
-            "description": "Read the done-gate: every task under verification, who owns it, who \
-                is verifying it, and whether it is submitted, passed, or failed. Use it to see \
-                what is awaiting an independent verifier and what has been proven done.",
+            "description": "Read the done-gate: every task under verification, its id and title, \
+                who owns it, who is verifying it, and whether it is submitted, passed, or failed. \
+                Use it to see what is awaiting an independent verifier and what has been proven \
+                done, and to read the task id you pass to crew_verdict.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -931,9 +935,16 @@ fn render_gate(snapshot: &GateSnapshot) -> String {
             } else {
                 format!(": {}", task.detail)
             };
+            // Lead with the human title (empty for ad-hoc work), then the id a
+            // verifier passes to crew_verdict (issue #183).
+            let title = if task.title.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", task.title)
+            };
             format!(
-                "- {} owned by {} [{}{}]{}",
-                task.task, task.owner, task.verdict, verifier, detail
+                "- {}[{}] owned by {} [{}{}]{}",
+                title, task.task, task.owner, task.verdict, verifier, detail
             )
         })
         .collect();
@@ -1313,7 +1324,9 @@ mod tests {
     }
 
     #[test]
-    fn crew_submit_without_a_task_is_a_tool_error_not_a_broker_call() {
+    fn crew_submit_without_a_title_is_a_tool_error_not_a_broker_call() {
+        // crew_submit now keys by the adopted task, so it needs only a display
+        // `title`; a missing one fails before the broker is touched (issue #183).
         let response = handle(
             &mut server(),
             &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -1324,7 +1337,24 @@ mod tests {
         assert!(response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("task"));
+            .contains("title"));
+    }
+
+    #[test]
+    fn crew_verdict_with_a_non_id_task_is_a_tool_error_not_a_broker_call() {
+        // crew_verdict names the task by its id; a non-UUID argument is rejected
+        // before the broker is touched, naming what it expected (issue #183).
+        let response = handle(
+            &mut server(),
+            &json!({ "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+                    "params": { "name": "crew_verdict", "arguments": { "task": "login", "pass": true } } }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not a task id"));
     }
 
     #[test]

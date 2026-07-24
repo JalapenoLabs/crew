@@ -120,18 +120,19 @@ its claim forward (issue #45). The envelope's `from` is the owner role and `chan
 
 ```json
 { "kind": "ledger", "data": {
-  "task": "login-endpoint",
+  "task": "550e8400-e29b-41d4-a716-446655440000",
   "owner": "backend",
   "state": "in_progress",
   "title": "Build the login endpoint"
 } }
 ```
 
-- `task` is the work item's stable key (a path, a feature name, or an order's title); two
-  roles must not hold the same key at once.
+- `task` is the work item's key: the task's UUID, matching the envelope's `task` id (issue
+  #183). Two roles must not hold the same id at once. Order work shares its order's id;
+  ad-hoc work mints a fresh one.
 - `owner` is the role that holds the claim (it also names the envelope's `from`).
 - `state` is `claimed`, `in_progress`, `blocked`, or `done`; `done` releases the claim.
-- `title` is a short human title for the ledger view; may be empty.
+- `title` is a short human title for the ledger view (display only); may be empty.
 
 ### `boundary` (a lane crossing)
 
@@ -159,7 +160,8 @@ a verdict) and `channel` is `all-units`.
 
 ```json
 { "kind": "verification", "data": {
-  "task": "Build the login endpoint",
+  "task": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "Build the login endpoint",
   "owner": "backend",
   "verifier": "qa",
   "verdict": "passed",
@@ -167,7 +169,9 @@ a verdict) and `channel` is `all-units`.
 } }
 ```
 
-- `task` is the task under the gate, named by its (order) title.
+- `task` is the task under the gate: its UUID, matching the envelope's `task` id (issue
+  #183), so two tasks that share a title never collide in the gate.
+- `title` is a short human title for the gate view (display only); may be empty.
 - `owner` is the role whose work is under verification: the one that submitted it.
 - `verifier` is the independent role that returned the verdict; **omitted** on the
   submission itself.
@@ -479,3 +483,10 @@ it keeps rendering across upgrades:
 Existing field names, shapes, and enum values do not change or disappear without a
 version bump. The stream is typed, timestamped, and addressed by construction (issue
 #29), so these guarantees hold for every event, forever.
+
+**Pre-release breaking change (issue #183).** The `ledger` and `verification` payloads'
+`task` field changed shape, from a human string key to the task's UUID (matching the
+envelope's `task` id), and `verification` gained a display `title` field. This is a
+non-additive change to the "additive only" promise, taken while crew is pre-1.0 with no
+deployed broker holding in-flight state. From here the additive-only guarantee resumes:
+`task` is a UUID and the human label rides `title`.

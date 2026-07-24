@@ -54,9 +54,10 @@ one applies, and timestamped, so a consumer gets a unified ordered stream.
   out-of-lane path, and whether the crew's policy blocked the edit or only warned.
 - `ledger` a change to the shared work ledger: a role claiming a task or moving it
   to `in_progress`, `blocked`, or `done` (issue #45).
-- `verification` a step through the adversarial done-gate (issue #47): the task, its
-  owner, the independent verifier (once one judges it), and the verdict (submitted,
-  passed, or failed) with the acceptance claimed or the specific failure.
+- `verification` a step through the adversarial done-gate (issue #47): the task (its
+  `TaskId`, with the human title as display, issue #183), its owner, the independent
+  verifier (once one judges it), and the verdict (submitted, passed, or failed) with the
+  acceptance claimed or the specific failure.
 - `board` a change to the shared situation board (issue #49): an entry recorded or
   retracted, with its key, section (decision / interface / gotcha), author, and content.
 - `budget` a token-spend report against the crew budget (issue #54): the role, its
@@ -167,15 +168,20 @@ enforcement).
 The adversarial done-gate is a projection of the same stream (issue #47). "Done" is not a
 role's own assertion: it submits finished work with `crew_submit`, an independent role
 tries to break it against the acceptance criteria and records a verdict with
-`crew_verdict`, and only a pass from a role other than the owner marks the task done. Each
-step is a `verification` event (to `all-units`), so the operator watches the gate in
-action on `/stream` and in `crew watch`, and `GET /history?kind=verification` reads just
-the gate's history.
+`crew_verdict`, and only a pass from a role other than the owner marks the task done. The
+gate keys by the work's `TaskId`, not its human title (issue #183): `crew_submit` reuses
+the task the role adopted from its order, and the verifier reads that id from `crew_gate`
+and names it on `crew_verdict`, so a cross-actor verdict correlates to the id the owner
+submitted under, and two tasks that share a title never collide. Each step is a
+`verification` event (to `all-units`), so the operator watches the gate in action on
+`/stream` and in `crew watch`, and `GET /history?kind=verification` reads just the gate's
+history.
 
 The broker holds the live gate in memory, the authority on ownership like the pause
-control, and `GET /gate` reads it: every task under verification, its owner, its verifier,
-and whether it is submitted, passed, or failed. A failed verdict also posts an actionable
-handback to the owner's inbox, so the rework routes back through the normal message path.
+control, and `GET /gate` reads it: every task under verification (its id and display
+title), its owner, its verifier, and whether it is submitted, passed, or failed. A failed
+verdict also posts an actionable handback to the owner's inbox, so the rework routes back
+through the normal message path.
 The gate is enforced at the broker: `POST /gate/verdict` refuses a verdict from the task's
 own owner (409) and one on a task that is not awaiting a verdict, so confident-but-wrong
 work cannot slip through. See `docs/roles.md` (the done-gate).
@@ -278,20 +284,26 @@ file blind (issue #45). It is another projection of the stream, like the roster:
 role claims a task before it starts, and the broker records who holds what.
 
 `POST /ledger` (body `{task, owner, state?, title?}`) claims a task or moves a claim
-forward. The `task` is a stable key the crew agrees on (a path, a feature, an order's
-title). The broker is the authority: it serializes claims under one lock and refuses a
-claim on a task another role already holds (`409`, naming the holder), so a conflict is
-surfaced rather than raced. A task is **held** while `claimed`, `in_progress`, or
-`blocked`; `done` frees it, so a finished task may be claimed again. Only the owner may
-move its own task. `GET /ledger` reads the live ownership, sorted by key.
+forward. The `task` is the work's `TaskId` (issue #183): own-work flows reuse the id the
+role adopted from its order, so a claim -> `in_progress` -> `done` chain and the done-gate
+share one id, and ad-hoc work mints a fresh one. The `title` is a human label for display
+only. Keying by the id, not a human string, means two roles typing the same ad-hoc path
+no longer collide by accident (that is the lane system's job, issue #46), while order work
+still dedups by its shared order id. The broker is the authority: it serializes claims
+under one lock and refuses a claim on a task another role already holds (`409`, naming the
+holder), so a conflict is surfaced rather than raced. A task is **held** while `claimed`,
+`in_progress`, or `blocked`; `done` frees it, so a finished task may be claimed again.
+Only the owner may move its own task. `GET /ledger` reads the live ownership, sorted by
+id.
 
 An order seeds a claim for its recipient automatically (issue #184): when an `order`
 message is posted to a role's direct channel, the broker claims the work for that role
-(owner = the ordered role, state = `claimed`, keyed and titled by the order title), so
-assigned-but-not-started work shows on the ledger without a manual claim. The seed is
-non-destructive: it claims only when no one currently holds the task, so a re-order never
-regresses an in-flight claim and never steals a task another role holds (the General uses
-`crew reassign` for that). It rides the stream like any claim.
+(owner = the ordered role, state = `claimed`, keyed by the order's envelope `TaskId` and
+titled by the order title, issue #183), so assigned-but-not-started work shows on the
+ledger without a manual claim. The seed is non-destructive: it claims only when no one
+currently holds the task id, so a re-order never regresses an in-flight claim and never
+steals a task another role holds (the General uses `crew reassign` for that). It rides the
+stream like any claim.
 
 Every change also rides the stream as a `ledger` event (from the owner, to `all-units`,
 filterable with `history?kind=ledger`), so the ledger is reconstructable from the log

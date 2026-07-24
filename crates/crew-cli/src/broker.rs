@@ -18,7 +18,7 @@ use std::{
 
 use crew_substrate::core::{
     Activity, BoardEvent, BudgetEvent, BudgetScope, Event, EventKind, MessageKind, Sender,
-    StallEvent, StallStatus, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
+    StallEvent, StallStatus, TaskId, TelemetryEvent, UsageEvent, Verdict, VerificationEvent,
 };
 use eyre::{eyre, Result};
 use tracing::{event, Level};
@@ -207,7 +207,12 @@ fn describe(kind: &EventKind) -> (&'static str, String) {
         EventKind::Activity(activity) => ("activity", activity_body(activity)),
         EventKind::Ledger(ledger) => (
             "ledger",
-            format!("{} {} {}", ledger.owner, ledger.state.label(), ledger.task),
+            format!(
+                "{} {} {}",
+                ledger.owner,
+                ledger.state.label(),
+                task_label(&ledger.title, ledger.task),
+            ),
         ),
         EventKind::Boundary(boundary) => (
             "boundary",
@@ -316,9 +321,12 @@ fn board_body(board: &BoardEvent) -> String {
     }
 }
 
-/// A short description of a done-gate verification step (issue #47).
+/// A short description of a done-gate verification step (issues #47, #183).
+///
+/// Names the task by its human title (display), falling back to its id when the
+/// title is empty, rather than showing the raw uuid.
 fn verification_body(verification: &VerificationEvent) -> String {
-    let task = &verification.task;
+    let task = task_label(&verification.title, verification.task);
     let owner = &verification.owner;
     let verifier = verification
         .verifier
@@ -335,6 +343,16 @@ fn verification_body(verification: &VerificationEvent) -> String {
             format!("{verifier} failed `{task}` (owner {owner})")
         }
         Verdict::Failed => format!("{verifier} failed `{task}` (owner {owner}): {detail}"),
+    }
+}
+
+/// The display label for a task on the watch stream: its human title, or its id
+/// when the title is empty (issue #183).
+fn task_label(title: &str, task: TaskId) -> String {
+    if title.is_empty() {
+        task.to_string()
+    } else {
+        title.to_owned()
     }
 }
 
@@ -418,11 +436,14 @@ mod tests {
 
     #[test]
     fn renders_a_verification_step() {
-        use crew_substrate::core::{Verdict, VerificationEvent};
+        use crew_substrate::core::{TaskId, Verdict, VerificationEvent};
 
+        // The event keys by an id but renders the human title, so the watch line
+        // reads by the task's name, not a raw uuid (issue #183).
         let event = |verdict, verifier: Option<&str>, detail: &str| Event {
             kind: EventKind::Verification(VerificationEvent {
-                task: "login".to_owned(),
+                task: TaskId::new(),
+                title: "login".to_owned(),
                 owner: RoleId::new("backend"),
                 verifier: verifier.map(RoleId::new),
                 verdict,
@@ -434,7 +455,7 @@ mod tests {
         let submitted = render_event(&event(Verdict::Submitted, None, "tokens expire"));
         assert!(
             submitted.contains("(verification) backend submitted `login`"),
-            "submission names the owner and task: {submitted}"
+            "submission names the owner and title, not the uuid: {submitted}"
         );
 
         let failed = render_event(&event(Verdict::Failed, Some("qa"), "tokens never expire"));
