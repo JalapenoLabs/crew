@@ -267,9 +267,11 @@ impl Supervisor {
     /// Each command runs the role's configured model
     /// ([`model_for`](CrewConfig::model_for), its tier resolved to an alias).
     /// With `worktrees` on and repos configured, each role works in its own git
-    /// worktree of those repos; the returned worktrees are the ones to clean up
-    /// on stand-down. A failure part-way cleans up the worktrees already
-    /// created.
+    /// worktree of those repos; the resolved repos are pre-flight validated as
+    /// existing git repositories before any worktree is created (issue #164),
+    /// so a missing or non-git repo fails fast with one message. The
+    /// returned worktrees are the ones to clean up on stand-down; a failure
+    /// part-way cleans up the worktrees already created.
     fn prepare(
         &self,
         config: &CrewConfig,
@@ -285,6 +287,11 @@ impl Supervisor {
         } else {
             Vec::new()
         };
+
+        // Pre-flight: fail fast, before spawning or creating any worktree, if a
+        // configured repo is missing or not a git repository (issue #164). One
+        // message lists every bad repo, rather than one late per-role failure.
+        crate::worktree::validate_repos(&repos)?;
 
         let mut prepared = Vec::with_capacity(cards.len());
         let mut worktrees = Vec::new();
