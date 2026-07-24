@@ -15,6 +15,9 @@ workspace = true
 # The shared role-card format and loader (issue #18), and eyre for the I/O the
 # provisioner performs when it writes a card for a spawned agent (M-APP-ERROR).
 crew-core.workspace = true
+# The shared broker HTTP agent builder (`broker_agent`), so the roster client and
+# the agent-facing client tune the localhost transport in one place (issue #200).
+crew-client.workspace = true
 eyre.workspace = true
 # The roster client: a synchronous, http-only HTTP client (no TLS system dep, since
 # the broker is localhost) plus JSON for its request and response bodies.

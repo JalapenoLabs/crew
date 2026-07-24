@@ -8,7 +8,7 @@
 //! agent-facing [`crew_mcp`](crew_mcp) client, which registers only its own
 //! role.
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use crew_core::{Activity, BudgetEvent, RoleId, StallEvent, TaskId, TelemetryEvent, Timestamp};
 use serde::Deserialize;
@@ -49,13 +49,6 @@ impl Liveness {
     }
 }
 
-/// How long to wait to connect to the broker before giving up.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long to wait for a broker response before giving up, so a stuck broker
-/// surfaces as an error rather than hanging the supervisor.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// A client for the broker roster, used to register and deregister spawned
 /// roles.
 ///
@@ -75,13 +68,9 @@ impl RosterClient {
     /// Builds a client against the broker at `base` (e.g. `http://127.0.0.1:2739`).
     #[must_use]
     pub fn new(base: impl Into<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(CONNECT_TIMEOUT)
-            .timeout_read(READ_TIMEOUT)
-            .build();
         Self {
             base: base.into(),
-            agent,
+            agent: crew_client::broker_agent(),
             task: None,
         }
     }
