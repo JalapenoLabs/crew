@@ -319,6 +319,11 @@ The actionable moments are the ones the stream carries today:
   not gate the crew (a deliberate decision, issue #154): completion is a report, not a
   control, so a finished crew idle-stops on its own (issue #55), and the General stops it
   deliberately with `crew standdown` or `crew down`.
+- **The budget is exhausted** (a `budget` event with a `breach`, issues #54, #175): a role
+  hit its token cap or the crew hit its crew-wide budget, idle-stopping that role or the
+  whole crew rather than overrun. The push names the scope, `crew` (every role idle-stops)
+  or `role` (just that role), and the spend against the ceiling it crossed. A within-budget
+  spend report (no breach) is routine and stays quiet, like a resolved stall.
 
 Not every question needs the General (issue #119). A peer loop (`@backend` asking a live
 `@frontend`) is coordination the crew resolves on its own, so pushing it would drown the
@@ -335,8 +340,9 @@ still not known to be live (absent from the seed and unseen on the stream) is tr
 General-facing, so a real question is never silently dropped.
 
 Everything else, status and notes, orders, answers and artifacts, ordinary lifecycle such
-as `started` or `idle`, activity, board, boundary, and verification events, is routine and
-never notifies. The policy is configurable per moment: `--mute question,died,stood-down,stalled,complete`
+as `started` or `idle`, activity, board, boundary, verification, and a within-budget spend
+report, is routine and never notifies. The policy is configurable per moment: `--mute
+question,died,stood-down,stalled,complete,budget`
 suppresses any subset (for a General who does not want peer questions, say), and
 `--no-sound` drops the terminal bell while keeping the desktop notification and the log
 line.
