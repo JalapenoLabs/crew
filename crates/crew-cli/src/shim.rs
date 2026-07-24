@@ -135,6 +135,35 @@ pub fn answer(
     Ok(())
 }
 
+/// Issues an order as this agent's role to a specialist, giving it a scoped
+/// task (issue #27).
+///
+/// Mirrors `crew_order`: the commander's fan-out handle for decomposing the
+/// General's brief. It direct-messages `to` a structured `order` the specialist
+/// can act on, rather than freeform prose: `title` names the task, `scope` says
+/// what is in and out, `owned_paths` are the paths it owns while working, and
+/// `acceptance` is how it is judged done. `body` adds any freeform detail.
+///
+/// # Errors
+/// Returns an error if no role context is set, `to` is not a plain role name,
+/// or the broker rejects the order.
+pub fn order(
+    to: &str,
+    title: &str,
+    scope: &str,
+    owned_paths: &[String],
+    acceptance: &str,
+    body: &str,
+) -> Result<()> {
+    let agent = load_agent()?;
+    let confirmation = agent
+        .broker()
+        .order(to, title, scope, owned_paths, acceptance, body)
+        .map_err(|reason| eyre!("{reason}"))?;
+    println!("{confirmation}");
+    Ok(())
+}
+
 /// Prints the messages addressed to this agent's role that are new since the
 /// last call.
 ///

@@ -159,7 +159,7 @@ The full design is in `docs/architecture.md`. In short:
   mid-task, and `crew command` to order a role directly, bypassing the commander while
   keeping it informed, issue #42), `crew integrate` to merge the roles' branches into one
   coherent, green branch (issue #44), the agent CLI shim (`crew register` / `crew send` /
-  `crew ask` / `crew answer` / `crew inbox` /
+  `crew order` / `crew ask` / `crew answer` / `crew inbox` /
   `crew roster` / `crew lane` / `crew claim` / `crew ledger` / `crew submit` /
   `crew verdict` / `crew gate` / `crew board` / `crew record`) for a
   runtime without MCP, `crew watch` to tail a role's self-filtered inbox stream live
@@ -673,6 +673,7 @@ exposes `run_until(config, shutdown)` (the setup behind `run`) so `crew up` driv
 in-process broker's shutdown itself.
 
 `crew-cli` also carries the agent CLI shim (issue #28): `crew register`, `crew send`,
+`crew order` (issue a scoped order to a specialist, issue #27),
 `crew ask` / `crew answer` (post a typed question or answer, issue #123),
 `crew inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue #45), the
 done-gate trio `crew submit` / `crew verdict` / `crew gate` (issue #47), `crew complete`

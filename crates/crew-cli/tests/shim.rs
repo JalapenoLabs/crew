@@ -160,6 +160,84 @@ fn a_shim_agent_registers_sends_and_reads_its_inbox() {
 }
 
 #[test]
+fn a_shim_commander_orders_a_specialist_a_structured_task() {
+    let port = start_broker();
+    let state = state_dir("order");
+
+    crew(port, &state, "commander", &["register"]);
+    crew(port, &state, "backend", &["register"]);
+
+    // The commander fans a scoped task out to a specialist, not a plain note.
+    stdout_of(
+        crew(
+            port,
+            &state,
+            "commander",
+            &[
+                "order",
+                "backend",
+                "Ship the parser",
+                "--scope",
+                "the tokenizer only",
+                "--owns",
+                "src/parser/",
+                "--acceptance",
+                "cargo test passes",
+                "--body",
+                "start from the grammar",
+            ],
+        ),
+        "order",
+    );
+
+    // It lands on the broker's stream as a structured `order`, its fields intact.
+    let history = get_json(port, "/history?kind=message");
+    let order = history["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"]["data"]["kind"] == "order")
+        .expect("the order is on the stream");
+    assert_eq!(order["from"]["id"], "commander", "the commander issued it");
+    let detail = &order["kind"]["data"];
+    assert_eq!(detail["title"], "Ship the parser");
+    assert_eq!(detail["scope"], "the tokenizer only");
+    assert_eq!(detail["owned_paths"], serde_json::json!(["src/parser/"]));
+    assert_eq!(detail["acceptance"], "cargo test passes");
+    assert_eq!(detail["body"], "start from the grammar");
+
+    // The specialist reads it in its inbox, the way the MCP path renders one.
+    let inbox = stdout_of(crew(port, &state, "backend", &["inbox"]), "inbox");
+    assert!(
+        inbox.contains("Ship the parser"),
+        "the specialist's inbox shows the order: {inbox}",
+    );
+}
+
+#[test]
+fn a_shim_order_needs_a_single_specialist_not_a_channel() {
+    let port = start_broker();
+    let state = state_dir("order-target");
+
+    crew(port, &state, "commander", &["register"]);
+
+    // An order is a direct task to one specialist; a channel name (a pair here)
+    // is not a role to order.
+    let output = crew(
+        port,
+        &state,
+        "commander",
+        &["order", "frontend+backend", "do everything"],
+    );
+    assert!(!output.status.success(), "an order to a channel is refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("frontend+backend"),
+        "the error names the bad target: {stderr}",
+    );
+}
+
+#[test]
 fn the_shim_inbox_shows_only_new_messages_across_calls() {
     let port = start_broker();
     let state = state_dir("cursor");

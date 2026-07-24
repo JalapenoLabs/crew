@@ -6,16 +6,16 @@
 //!   down` (issue #26), and gates its work with `crew pause` / `crew resume` /
 //!   `crew standdown` (issue #41).
 //! - An agent on a runtime without MCP coordinates through the CLI shim (issue
-//!   #28): `crew register`, `crew send`, `crew inbox`, `crew roster`, `crew
-//!   lane`, `crew claim`, `crew ledger` (issue #45), the done-gate trio `crew
-//!   submit` / `crew verdict` / `crew gate` (issue #47), the situation-board
-//!   pair `crew board` / `crew record` (issue #49), and `crew briefing` (issue
-//!   #50) act as the role the environment names, mapping its I/O onto the
-//!   broker the same way the MCP tools do (see `docs/codex.md`). `crew watch`
-//!   (issue #15) tails a role's self-filtered inbox stream live, so a peer sees
-//!   a teammate's messages without polling and never its own; the upgraded
-//!   `coworker` skill replaces its `tail -F` monitor with it (see
-//!   `docs/communication.md`).
+//!   #28): `crew register`, `crew send`, `crew order` (issue #27), `crew
+//!   inbox`, `crew roster`, `crew lane`, `crew claim`, `crew ledger` (issue
+//!   #45), the done-gate trio `crew submit` / `crew verdict` / `crew gate`
+//!   (issue #47), the situation-board pair `crew board` / `crew record` (issue
+//!   #49), and `crew briefing` (issue #50) act as the role the environment
+//!   names, mapping its I/O onto the broker the same way the MCP tools do (see
+//!   `docs/codex.md`). `crew watch` (issue #15) tails a role's self-filtered
+//!   inbox stream live, so a peer sees a teammate's messages without polling
+//!   and never its own; the upgraded `coworker` skill replaces its `tail -F`
+//!   monitor with it (see `docs/communication.md`).
 //! - The General drives the unit with `crew brief` (issue #118): a free-form
 //!   note posted as the General to the commander by default, a role, or a
 //!   channel, distinct from the agent shim's `crew send`. The General also
@@ -114,6 +114,26 @@ enum Command {
         in_reply_to: String,
         /// The answer (markdown).
         body: String,
+    },
+    /// Issue a structured order to a specialist, as this agent's role
+    /// (typically the commander): a scoped task, not a plain message.
+    Order {
+        /// The specialist role to order (its `@role` channel).
+        to: String,
+        /// A short title for the task.
+        title: String,
+        /// What is in and out of scope for the task.
+        #[arg(long, value_name = "TEXT")]
+        scope: Option<String>,
+        /// A path the role owns while working the task; repeat for several.
+        #[arg(long = "owns", value_name = "PATH")]
+        owns: Vec<String>,
+        /// How the task is judged done.
+        #[arg(long, value_name = "TEXT")]
+        acceptance: Option<String>,
+        /// Optional freeform detail (markdown).
+        #[arg(long, value_name = "TEXT")]
+        body: Option<String>,
     },
     /// Read the messages currently addressed to this agent's role.
     Inbox,
@@ -373,6 +393,21 @@ fn main() -> Result<()> {
             in_reply_to,
             body,
         } => shim::answer(to.as_deref(), channel.as_deref(), &body, &in_reply_to),
+        Command::Order {
+            to,
+            title,
+            scope,
+            owns,
+            acceptance,
+            body,
+        } => shim::order(
+            &to,
+            &title,
+            scope.as_deref().unwrap_or_default(),
+            &owns,
+            acceptance.as_deref().unwrap_or_default(),
+            body.as_deref().unwrap_or_default(),
+        ),
         Command::Inbox => shim::inbox(),
         Command::Watch { role, broker } => broker::watch(broker.as_deref(), role.as_deref()),
         Command::Notify {

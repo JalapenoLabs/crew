@@ -34,6 +34,7 @@ the agent just shells out to `crew` instead of calling a tool.
 | --- | --- | --- |
 | `crew register` | registers the role and its lane on the roster | the MCP server's boot registration |
 | `crew send [--to ROLE] [--channel CHAN] BODY` | posts a note as the role | `crew_send` |
+| `crew order TO TITLE [--scope TEXT] [--owns PATH]... [--acceptance TEXT] [--body TEXT]` | issues a structured order to a specialist | `crew_order` |
 | `crew ask [--to ROLE] [--channel CHAN] [--option TEXT]... BODY` | asks a typed question (the kind stall detection keys on) | `crew_ask` |
 | `crew answer [--to ROLE] [--channel CHAN] --in-reply-to ID BODY` | answers a question, naming its id | `crew_answer` |
 | `crew inbox` | prints the messages addressed to the role, each with its id | `crew_inbox` |
@@ -44,6 +45,8 @@ A Codex agent participates like this:
 1. On boot, run `crew register`, so the unit sees it on the roster and the stream.
 2. During work, `crew send` to message a teammate, a channel, or the commander, and
    `crew inbox` to read what is addressed to it.
+3. As commander, `crew order` to fan the General's brief out to a specialist as a
+   scoped task, rather than a plain `crew send` note.
 
 ## Parity and gaps
 
@@ -60,12 +63,6 @@ shows the whole inbox. These gaps remain, by the nature of a stateless CLI:
 - **No push.** The MCP roadmap subscribes to the broker's per-role SSE stream for
   native notifications. The shim polls with `crew inbox`; it does not hold a stream
   open.
-- **No `crew_order` yet.** The MCP surface added `crew_order` for the commander to
-  issue a structured order (issue #27); the shim does not expose it, so a shim agent
-  sends notes, questions, and answers (`crew send` / `crew ask` / `crew answer`) but
-  cannot yet issue a structured order. A shim agent
-  still reads orders addressed to it: `crew inbox` renders an order's structured detail
-  the same way the MCP path does. Adding a `crew order` subcommand is a small follow-up.
 - **Auto-spawned from the config (issue #128).** `crew up` spawns each role on its
   configured runtime: a per-role `runtime` in the crew config (`claude`, the default, or
   `codex`) tells the supervisor which CLI to launch. A `codex` role is spawned as a
