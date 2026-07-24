@@ -89,7 +89,8 @@ ordered, and paginated with a ceiling, issue #209).
   - `question` asks for a decision, with optional suggested options.
   - `answer` responds to a question, naming the question it replies to (`in_reply_to`,
     the answered message's id), so a front-end threads the reply and the commander
-    correlates the two.
+    correlates the two. The broker rejects an answer whose `in_reply_to` does not name
+    an existing question message, so a thread never dangles (issue #211).
   - `status` reports progress without asking anything.
   - `artifact` references a produced thing (a reference plus its kind: a branch, a
     PR, a file, or a route).

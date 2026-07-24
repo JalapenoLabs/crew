@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio_stream::Stream;
 use tracing::{event, Level};
 
-use crate::{error::ApiError, filter::FilterQuery, state::AppState};
+use crate::{error::ApiError, filter::FilterQuery, state::AppState, store::Storage};
 
 /// The message routes: post to a channel and subscribe to the feed.
 ///
@@ -160,6 +160,7 @@ async fn post_message(
     let request = PostMessage::from_json(raw)?;
     request.validate(&channel)?;
     ensure_order_authorized(&request, &state.config.commander)?;
+    ensure_answer_references_a_question(&request, state.storage.as_ref())?;
 
     let event = Event {
         ts: crew_core::Timestamp::now(),
@@ -210,6 +211,43 @@ fn ensure_order_authorized(request: &PostMessage, commander: &RoleId) -> Result<
         }
     }
     Ok(())
+}
+
+/// Ensures an `answer`'s `in_reply_to` names a stored question (issue #211).
+///
+/// An answer threads to the question it replies to by [`MessageId`], so a
+/// front-end and the commander pair the two without parsing the prose body. A
+/// reference to a message that is not a stored question would leave that thread
+/// dangling, so it is rejected here rather than persisted; every other kind
+/// passes untouched. The answerer saw the question before replying, so a valid
+/// reference is already in the log (a linear scan suits the human-rate answer
+/// path).
+///
+/// # Errors
+/// Returns a 400 [`ApiError`] if the answer's `in_reply_to` does not name an
+/// existing `question` message.
+fn ensure_answer_references_a_question(
+    request: &PostMessage,
+    storage: &dyn Storage,
+) -> Result<(), ApiError> {
+    let MessageKind::Answer { in_reply_to } = &request.kind else {
+        return Ok(());
+    };
+    let names_a_question = storage.events().iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::Message(message)
+                if message.id == *in_reply_to
+                    && matches!(&message.kind, MessageKind::Question { .. })
+        )
+    });
+    if names_a_question {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(format!(
+            "an answer's `in_reply_to` (`{in_reply_to}`) must name an existing question message"
+        )))
+    }
 }
 
 /// `GET /stream`: subscribe to the live event feed as Server-Sent Events.
@@ -274,7 +312,7 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
-    use crew_core::{Event, EventKind};
+    use crew_core::{Event, EventKind, MessageKind};
     use serde_json::{json, Value};
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
@@ -321,6 +359,10 @@ mod tests {
 
     /// One valid `(channel, body)` per `MessageKind`, with its per-kind fields
     /// and no broker-owned field (the channel travels in the path).
+    ///
+    /// `answer` is posted separately by the round-trip test: its `in_reply_to`
+    /// must name a real stored question (issue #211), an id the broker mints,
+    /// so it cannot be a static fixture.
     fn one_of_each_kind() -> Vec<(&'static str, Value)> {
         let backend = json!({ "kind": "role", "id": "backend" });
         // An order is a commander act (issue #194), so the round-trip fixture issues
@@ -337,11 +379,6 @@ mod tests {
                 "@backend",
                 json!({ "from": backend, "kind": "question",
                     "options": ["a", "b"], "body": "which?" }),
-            ),
-            (
-                "@backend",
-                json!({ "from": backend, "kind": "answer",
-                    "in_reply_to": "11111111-1111-1111-1111-111111111111", "body": "a" }),
             ),
             (
                 "all-units",
@@ -387,11 +424,124 @@ mod tests {
             posted.push(event);
         }
 
+        // An answer must name a real question (issue #211), so reply to the one
+        // just posted; then confirm it round-trips like every other kind.
+        let (status, value) = post(
+            &state,
+            "@backend",
+            json!({ "from": { "kind": "role", "id": "backend" }, "kind": "answer",
+                "in_reply_to": question_id(&posted), "body": "a" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "answer to a real question: {value}"
+        );
+        posted.push(serde_json::from_value(value).unwrap());
+
         // Read the log back and confirm every posted event survived intact.
         assert_eq!(
             stored_events(&state).await,
             posted,
             "the API must round-trip every message kind"
+        );
+    }
+
+    /// The stored `MessageId` (as a string) of the single question in `events`.
+    fn question_id(events: &[Event]) -> String {
+        events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Message(message)
+                    if matches!(message.kind, MessageKind::Question { .. }) =>
+                {
+                    Some(message.id.to_string())
+                }
+                _ => None,
+            })
+            .expect("a question was posted")
+    }
+
+    /// The `MessageId` (as a string) carried by a posted message event.
+    fn message_id(event: &Event) -> String {
+        match &event.kind {
+            EventKind::Message(message) => message.id.to_string(),
+            other => panic!("expected a message event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_a_real_question_is_accepted() {
+        let state = AppState::new(Config::default());
+        let backend = json!({ "kind": "role", "id": "backend" });
+
+        let (_, question) = post(
+            &state,
+            "@frontend",
+            json!({ "from": backend, "kind": "question", "body": "which auth lib?" }),
+        )
+        .await;
+        let question: Event = serde_json::from_value(question).unwrap();
+
+        let (status, _) = post(
+            &state,
+            "@backend",
+            json!({ "from": { "kind": "role", "id": "frontend" }, "kind": "answer",
+                "in_reply_to": message_id(&question), "body": "use jwt" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "an answer naming a real question is accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_a_nonexistent_question_is_rejected() {
+        // A dangling reference would break threading (issue #211), so it is
+        // refused rather than persisted.
+        let state = AppState::new(Config::default());
+        let (status, value) = post(
+            &state,
+            "@backend",
+            json!({ "from": { "kind": "role", "id": "frontend" }, "kind": "answer",
+                "in_reply_to": "11111111-1111-1111-1111-111111111111", "body": "a" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "no such question: {value}");
+        assert!(value.get("error").is_some(), "typed error body: {value}");
+        assert!(
+            stored_events(&state).await.is_empty(),
+            "the rejected answer is not persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_referencing_a_non_question_message_is_rejected() {
+        // `in_reply_to` must name a question, not just any message: replying to a
+        // note is refused so the thread always resolves to a real question.
+        let state = AppState::new(Config::default());
+        let (_, note) = post(
+            &state,
+            "@backend",
+            json!({ "from": { "kind": "general" }, "kind": "note", "body": "fyi" }),
+        )
+        .await;
+        let note: Event = serde_json::from_value(note).unwrap();
+
+        let (status, value) = post(
+            &state,
+            "@backend",
+            json!({ "from": { "kind": "role", "id": "backend" }, "kind": "answer",
+                "in_reply_to": message_id(&note), "body": "a" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a note is not a question: {value}"
         );
     }
 

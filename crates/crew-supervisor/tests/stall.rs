@@ -17,7 +17,7 @@ mod common;
 use std::time::Duration;
 
 use common::start_broker;
-use crew_core::{MessageId, RoleId, StallEvent, StallKind, StallStatus, Timestamp};
+use crew_core::{RoleId, StallEvent, StallKind, StallStatus, Timestamp};
 use crew_supervisor::{detect_stalls, RosterClient};
 use serde_json::{json, Value};
 
@@ -38,20 +38,34 @@ fn roster() -> Vec<RoleId> {
     vec![RoleId::new("backend"), RoleId::new("frontend")]
 }
 
-/// Posts a message of `kind` from `role` to `channel` through the broker.
+/// Posts a message of `kind` from `role` to `channel` through the broker,
+/// returning the id the broker minted for it.
 ///
-/// An `answer` carries a required `in_reply_to` reference (the question it
-/// answers); the stall detector keys on the sender and the kind, not the
-/// referenced id, so a fresh id stands in here.
-fn post_message(base: &str, role: &str, channel: &str, kind: &str, body: &str) {
+/// An `answer` must reference an existing question (issue #211): pass that
+/// question's id as `in_reply_to`. Other kinds pass `None`.
+fn post_message(
+    base: &str,
+    role: &str,
+    channel: &str,
+    kind: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) -> String {
     let mut payload = json!({ "from": { "kind": "role", "id": role }, "kind": kind, "body": body });
-    if kind == "answer" {
-        payload["in_reply_to"] = json!(MessageId::new());
+    if let Some(id) = in_reply_to {
+        payload["in_reply_to"] = json!(id);
     }
-    ureq::post(&format!("{base}/channels/{channel}/messages"))
+    let text = ureq::post(&format!("{base}/channels/{channel}/messages"))
         .set("content-type", "application/json")
         .send_string(&payload.to_string())
+        .unwrap()
+        .into_string()
         .unwrap();
+    let event: Value = serde_json::from_str(&text).unwrap();
+    event["kind"]["data"]["id"]
+        .as_str()
+        .expect("the broker mints a message id")
+        .to_owned()
 }
 
 /// A wait of zero, so an event posted a moment ago already counts as stalled:
@@ -66,8 +80,22 @@ fn a_mutual_wait_deadlock_is_read_off_the_stream_and_named() {
     let roster_client = RosterClient::new(base.clone());
 
     // Each agent asks the other a question and neither answers: a deadlock.
-    post_message(&base, "backend", "@frontend", "question", "which auth lib?");
-    post_message(&base, "frontend", "@backend", "question", "what token TTL?");
+    post_message(
+        &base,
+        "backend",
+        "@frontend",
+        "question",
+        "which auth lib?",
+        None,
+    );
+    post_message(
+        &base,
+        "frontend",
+        "@backend",
+        "question",
+        "what token TTL?",
+        None,
+    );
 
     let events = roster_client
         .history_since(since, &["message", "ledger", "verification"])
@@ -91,8 +119,22 @@ fn an_answered_exchange_is_not_a_stall() {
     let since = Timestamp::now();
     let roster_client = RosterClient::new(base.clone());
 
-    post_message(&base, "backend", "@frontend", "question", "which auth lib?");
-    post_message(&base, "frontend", "@backend", "answer", "use the crew one");
+    let question = post_message(
+        &base,
+        "backend",
+        "@frontend",
+        "question",
+        "which auth lib?",
+        None,
+    );
+    post_message(
+        &base,
+        "frontend",
+        "@backend",
+        "answer",
+        "use the crew one",
+        Some(&question),
+    );
 
     let events = roster_client
         .history_since(since, &["message", "ledger", "verification"])
@@ -195,7 +237,14 @@ fn the_stall_fetch_filters_noise_kinds_server_side() {
         .send_string(&json!({ "role": "backend", "owned_paths": ["api/"] }).to_string())
         .unwrap();
     // A `question` is a kind the detector does inspect.
-    post_message(&base, "frontend", "@backend", "question", "which auth lib?");
+    post_message(
+        &base,
+        "frontend",
+        "@backend",
+        "question",
+        "which auth lib?",
+        None,
+    );
 
     let filtered = roster_client
         .history_since(since, &["message", "ledger", "verification"])
