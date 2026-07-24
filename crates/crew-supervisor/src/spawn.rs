@@ -291,7 +291,7 @@ impl Supervisor {
         // Pre-flight: fail fast, before spawning or creating any worktree, if a
         // configured repo is missing or not a git repository (issue #164). One
         // message lists every bad repo, rather than one late per-role failure.
-        worktree::validate_repos(&repos)?;
+        crate::worktree::validate_repos(&repos)?;
 
         let mut prepared = Vec::with_capacity(cards.len());
         let mut worktrees = Vec::new();
